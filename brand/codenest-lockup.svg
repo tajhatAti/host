@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 220" width="880" height="220" role="img" aria-label="CodeNest">
+  <rect width="880" height="220" fill="none"/>
+  <g transform="translate(40,42) scale(0.265)">
+    <rect width="512" height="512" rx="116" fill="none" stroke="#5B6CFF" stroke-width="24"/>
+    <g fill="none" stroke="#5B6CFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="188,182 118,256 188,330"/>
+      <polyline points="324,182 394,256 324,330"/>
+      <line x1="286" y1="156" x2="226" y2="356"/>
+    </g>
+  </g>
+  <text x="196" y="138"
+        font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="86" fill="#111318" letter-spacing="-2">
+    <tspan font-weight="400">Code</tspan><tspan font-weight="700">Nest</tspan>
+  </text>
+</svg>
