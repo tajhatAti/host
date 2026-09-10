@@ -1,0 +1,7 @@
+# ~/.profile — executed by login shells.
+# Source bashrc for interactive sessions (so PTY shells pick up aliases/PS1).
+if [ -n "$BASH_VERSION" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        . "$HOME/.bashrc"
+    fi
+fi
