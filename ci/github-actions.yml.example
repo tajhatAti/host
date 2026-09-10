@@ -1,0 +1,55 @@
+name: CodeNest CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codenest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: .
+      DATA_DIR: /tmp/codenest-ci-data
+      DB_PATH: /tmp/codenest-ci-db/test.db
+      JOB_SECRETS_KEY: ci-only-key-material
+      TELEGRAM_PING_BOT_TOKEN: 123456:AAFakeBotTokenForTests
+      TELEGRAM_BOT_USERNAME: MyCodeNestBot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Install JavaScript test dependencies
+        run: npm ci --ignore-scripts
+      - name: Prepare isolated paths
+        run: mkdir -p "$DATA_DIR" "$(dirname "$DB_PATH")"
+      - name: Core backend, frontend, migration, and security checks
+        run: scripts/test-core.sh
+
+  dockerfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Dockerfiles and Render blueprint references
+        run: |
+          test -f Dockerfile
+          test -f runner/Dockerfile
+          test -f render.yaml
+          grep -q 'JOB_SECRETS_KEY' render.yaml
+          grep -q 'RUNNER_SERVICE_URL' README.md
