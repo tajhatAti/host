@@ -1,0 +1,105 @@
+# render.yaml — Render Auto-Deploy Configuration
+# ==============================================
+# 🚀 DEFAULT (single service): ONE web service runs everything —
+#    the site (dashboard, auth, saved code), the in-process job runner,
+#    and the public /live/{slug}/ gateway. Needs the Docker image at the
+#    repo root. Embedded mode activates automatically when RUNNER_SERVICE_URL
+#    is NOT set.
+#
+# 📦 TWO-SERVICE LAYOUT (recommended for production / 2nd host):
+#    Keep THIS service as the dashboard + DB + saved-code main site, and
+#    deploy runner/ (its own render.yaml) as a SECOND Render web service
+#    (can be on a second Render account). Then set these two env vars on
+#    THIS service:
+#        RUNNER_SERVICE_URL  = https://ahad-code-runner.onrender.com
+#        RUNNER_SERVICE_SECRET = <same strong random string on BOTH services>
+#    When those are set, the main site proxies all code execution / jobs
+#    to the second host. The main site is your Dashboard & Code Saved host;
+#    the second is your RunSpace execution host.
+#
+# 💾 DATA PERSISTENCE:
+#    • DATABASE_URL (Supabase Postgres) → permanent user accounts & saved code.
+#    • Bot databases (SQLite / JSON files created by deployed bots) live in
+#      /app/data/jobs/<job_id>/ inside the RUNNER container. Mount a Render
+#      Persistent Disk at /app/data on the runner (paid Starter plan) to
+#      keep those files across full rebuilds; code edits & restarts always
+#      preserve them regardless of plan.
+#
+# 🔁 "Edit code & redeploy" never wipes user bot data — it does an in-place
+#    PATCH that only overwrites main.*; database.db, session.json, data/*
+#    and pip-installed pylibs/ are left intact. Referral bots, scraper
+#    state, bot progress — all safe.
+# ==================================================================
+
+services:
+  - type: web
+    name: ahad-co-auth           # Main dashboard + saved-code host
+    runtime: docker              # root Dockerfile = web (+ embedded runner if RUNNER_SERVICE_URL unset)
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    autoDeploy: true             # deploys on every push to main
+
+    envVars:
+      # ── Database ──────────────────────────────────────────
+      - key: DATABASE_URL        # ⚠️ REQUIRED for permanent data (Supabase session pooler, port 5432)
+        sync: false
+
+      # ── Public URLs ──────────────────────────────────────
+      # THIS service's public URL (e.g. https://ahad-co-auth.onrender.com).
+      #
+      # ⚠️ It is what the Telegram bot's "Open CodeNest" button opens. If it is
+      # wrong the button still appears and still taps, but it opens a
+      # DIFFERENT site — which verifies the sign-in with a different bot token
+      # and fails, or is simply gone and the webview closes on an empty page.
+      # Either way the deploy stays green and nothing reports a problem.
+      #
+      # Left unset, the code now falls back to RENDER_EXTERNAL_URL (which
+      # Render sets to this service's own URL), so the Mini App works out of
+      # the box. Set this only for a custom domain.
+      # Verify the running value: GET /health -> miniapp_url
+      - key: SITE_BASE_URL
+        sync: false
+
+      # ── Auth / admin ─────────────────────────────────────
+      - key: ADMIN_EMAILS        # comma-separated owner emails → auto-granted admin
+        sync: false
+      # Encrypts hosted-bot BOT_TOKEN and other environment secrets at rest.
+      # Render generates a stable random value; never rotate without migrating
+      # existing encrypted secrets first.
+      - key: JOB_SECRETS_KEY
+        generateValue: true
+
+      # ── Email (OTP) ──────────────────────────────────────
+      - key: BREVO_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false
+      - key: SENDER_NAME
+        value: Ahad Co
+      - key: OTP_EXPIRY_MINUTES
+        value: "10"
+
+      # ── Postgres SSL ─────────────────────────────────────
+      - key: PG_SSLMODE
+        value: prefer
+
+      # ── Telegram (bot + "Sign in with Telegram") ─────────
+      # Token powers the in-process RunSpace bot AND the login widget's
+      # HMAC check. Username is what makes the widget render at all
+      # (frontend reads it from /api/public-config). Leave both unset
+      # to disable the Telegram feature entirely.
+      - key: TELEGRAM_PING_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+
+      # ── Two-service layout (OPTIONAL — leave BOTH unset for
+      #    single-service embedded mode, which is the default) ──
+      # - key: RUNNER_SERVICE_URL     # https://ahad-code-runner.onrender.com
+      #   sync: false
+      # - key: RUNNER_SERVICE_SECRET  # same value as on the runner
+      #   sync: false
+
+    # Health check
+    healthCheckPath: /health
