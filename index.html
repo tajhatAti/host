@@ -899,6 +899,11 @@
 
         <!-- The single overflow control. -->
         <div class="rs-more-wrap">
+          <button type="button" class="rs-ghost-btn rs-sq rs-req-chip" id="rsReqChip"
+                  title="Requirements" aria-label="Requirements" aria-expanded="false"
+                  onclick="(function(btn){var row=document.getElementById('rsReqRow');var open=row.style.display==='flex';row.style.display=open?'none':'flex';btn.setAttribute('aria-expanded',String(!open));if(!open){var inp=document.getElementById('jobRequirements');if(inp)inp.focus();}})(this)">
+            <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+          </button>
           <button type="button" class="rs-ghost-btn rs-sq" id="rsMoreBtn"
                   title="Actions" aria-label="Actions" aria-haspopup="menu" aria-expanded="false">
             <svg viewBox="0 0 16 16" class="rs-ic" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
@@ -998,16 +1003,9 @@
               </select>
             </label>
 
-            <!-- Own box for pip/npm packages instead of making people
-                 remember a "# requirements: x==1" comment. Reads/writes
-                 that exact same comment line under the hood (see
-                 _syncRequirementsBoxFromCode / _applyRequirementsBoxToCode
-                 in pro.js) — the runner itself is untouched. -->
-            <label class="rs-menu-item rs-menu-field" id="rsReqRow">
-              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
-              <span class="rs-seg-label">Requirements</span>
-              <input type="text" class="rs-sel" id="jobRequirements" aria-label="Pip/npm packages" placeholder="e.g. python-telegram-bot==21.4" autocomplete="off" autocapitalize="off" spellcheck="false" />
-            </label>
+            <!-- Requirements moved to the header (see rsReqChip below) —
+                 essential before every run, so it doesn't belong three taps
+                 deep in an overflow menu. -->
 
             <!-- GitHub import: label + field on their own row inside the menu. -->
             <div class="rs-menu-item rs-menu-field rs-gh-wrap">
@@ -1170,13 +1168,33 @@
               </div>
               <div class="rs-analysis-result" id="rsTgAnalysis" hidden></div>
             </section>
-            <aside class="rs-bot-callout" id="rsBotCallout" hidden aria-live="polite">
-              <span class="rs-bot-logo" aria-hidden="true">✈</span>
-              <div class="rs-bot-copy"><b id="rsBotName">Telegram bot detected</b><span id="rsBotState">Checking bot…</span></div>
-              <a class="rs-bot-go" id="rsBotGo" target="_blank" rel="noopener noreferrer">Go to your bot</a>
-            </aside>
+            <!-- Removed from the visible editor entirely (was a banner with
+                 an airplane icon, "Detected", Check health, Go to bot — all
+                 competing with the header for attention). The health check
+                 itself still runs in the background (_checkRunSpaceBotHealth
+                 polls every 60s) and now only ever writes into the status
+                 dot; nothing floats on top of the code anymore. -->
 
-            <!-- Vertical split: editor top, logs bottom -->
+            <div class="rs-req-row" id="rsReqRow" style="display:none">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+              <span class="rs-req-label">Requirements</span>
+              <input type="text" class="rs-req-input" id="jobRequirements" aria-label="Pip/npm packages" placeholder="e.g. python-telegram-bot==21.4" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            </div>
+
+            <div class="rs-view-tabs" role="tablist" aria-label="Editor view">
+              <button type="button" class="rs-view-tab is-active" id="rsTabCode" role="tab" aria-selected="true"
+                      onclick="(function(btn){var split=document.getElementById('wbSplit');split.classList.remove('show-output');btn.classList.add('is-active');btn.setAttribute('aria-selected','true');var other=document.getElementById('rsTabOutput');other.classList.remove('is-active');other.setAttribute('aria-selected','false');})(this)">Code</button>
+              <button type="button" class="rs-view-tab" id="rsTabOutput" role="tab" aria-selected="false"
+                      onclick="(function(btn){var split=document.getElementById('wbSplit');split.classList.add('show-output');btn.classList.add('is-active');btn.setAttribute('aria-selected','true');var other=document.getElementById('rsTabCode');other.classList.remove('is-active');other.setAttribute('aria-selected','false');})(this)">Output</button>
+            </div>
+
+            <!-- Vertical split: editor top, logs bottom. The tab bar above
+                 toggles .show-output on this element; CSS (not JS) decides
+                 which pane is visible — see the .rs-split.show-output rules
+                 in app.css. The drag divider still works if a wider screen
+                 wants both panes open (desktop), it just starts collapsed
+                 to one pane at a time on mobile, which is what removes the
+                 "layered on top of each other" look on a phone screen. -->
             <div class="rs-split" id="wbSplit">
               <!-- Editor pane -->
               <div class="rs-pane rs-editor">
