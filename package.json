@@ -1,0 +1,13 @@
+{
+  "name": "codenest-checks",
+  "private": true,
+  "scripts": {
+    "test": "npm run test:js",
+    "test:js": "node tests/js/test_nav_drawer_overlay.js && node tests/js/test_ui_button_audit.js && node tests/js/test_reported_ui_bugs.js && node tests/js/test_bot_product_shell.js && node tests/js/test_miniapp_ui.js && node tests/js/test_telegram_job_ui.js && node tests/js/test_bot_template_picker.js && node tests/js/test_admin_live.js && node tests/js/test_admin_runner_ui.js && node tests/js/test_runspace_interaction_perf.js && node tests/js/test_runspace_touch_scroll.js && node tests/js/test_runspace_top_menu.js && node tests/js/test_runspace_global_nav.js && node tests/js/test_runspace_design_cleanup.js && node tests/js/test_editor_fullwidth_and_menu.js && node tests/js/test_mobile_menu_and_newjob.js && node tests/js/test_runspace_single_header.js && node tests/js/test_admin_risk_mobile.js && node tests/js/test_admin_bot_usage.js && node tests/js/test_job_urls.js && node tests/js/test_jd_rebuild.js && node tests/js/test_store_ui.js && node tests/js/test_auth_split.js && node tests/js/test_overview_dashboard.js && node tests/js/test_bugs_live_screenshots.js",
+    "check:js": "node --check static/pro.js"
+  },
+  "devDependencies": {
+    "jsdom": "24.1.3",
+    "postcss": "8.5.26"
+  }
+}
