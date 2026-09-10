@@ -1,0 +1,57 @@
+# render.yaml — Code Execution Runner (Service #2 — the SECOND host)
+# ==================================================================
+# Deploy this SEPARATELY as its OWN Render web service (can be on a
+# second Render account / second web service slot) when you want to
+# split the workload:
+#
+#   Main service (root render.yaml)  →  Dashboard + Auth + Code Saved
+#   This runner service              →  Executes code + hosts /live/ URLs
+#
+# Both services talk to each other over HTTPS using a shared secret.
+# Deploying standalone? Just run this yaml — it works as its own API too.
+#
+# PERSISTENT DATA: mount a Render Persistent Disk at /app/data on a paid
+# Starter plan to keep bot databases/session files across full redeploys.
+# On the free tier, /app/data survives process restarts & self-ping wakes
+# but NOT full rebuilds.
+# ==================================================================
+services:
+  - type: web
+    name: ahad-code-runner
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    dockerContext: ./
+    envVars:
+      - key: RUNNER_SERVICE_SECRET
+        # ⚠️ Set this in Render Dashboard to a strong random string.
+        # Admin-managed runners may each use a unique secret: paste the same
+        # value into Admin → Runners when adding this service. Legacy
+        # env-configured runners must match the main service secret.
+        # Generate one: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+        sync: false
+      - key: PUBLIC_BASE_URL
+        # This runner's own public URL — used for /live/{slug}/ links.
+        # e.g. https://ahad-code-runner.onrender.com
+        sync: false
+      - key: SITE_BASE_URL
+        # The MAIN dashboard site URL (for abuse-report back-links).
+        # e.g. https://ahad-co-auth.onrender.com
+        sync: false
+      - key: JOBS_DATA_DIR
+        value: /app/data/jobs
+      - key: MAX_EXECUTION_TIME_MS
+        value: "10000"
+      - key: MAX_MEMORY_MB
+        value: "256"
+      - key: MAX_BG_JOBS
+        value: "5"
+    healthCheckPath: /health
+    # Optional persistent disk (paid Starter plan+ only — uncomment & create
+    # a disk named "runspace-data" mounted at /app/data for TRUE persistence):
+    # disk:
+    #   name: runspace-data
+    #   mountPath: /app/data
+    #   sizeGB: 1
