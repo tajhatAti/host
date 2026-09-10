@@ -1,0 +1,2084 @@
+<!DOCTYPE html>
+<html lang="en" class="booting">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#090b10">
+<meta name="description" content="Deploy Python Telegram bots from a template, your own code, or a file. Secure BotFather token verification, automatic dependencies, logs, and 24/7 hosting.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="CodeNest — Telegram Bot Hosting">
+<meta property="og:description" content="Verify a BotFather token, choose a source, and deploy your Python Telegram bot.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="CodeNest — Telegram Bot Hosting">
+<meta name="twitter:description" content="Templates or your own Python code. Deploy a Telegram bot without managing a server.">
+<title>CodeNest — Telegram Bot Hosting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Inter for text, Space Grotesk for headings, JetBrains Mono for code —
+     the three faces the reference dashboard uses. Every one of them has a
+     system fallback in the --ui / --display / --mono stacks, so an offline
+     load degrades to the platform face instead of breaking the layout. -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- THE stylesheet. Nine sheets (pro/emoji/classic/workbench/codestudio/
+     terminal/runspace-dark/landing/nova) were replaced by this one file:
+     layering a tenth sheet over them could only ever be a coat of paint,
+     because 1,973 lines of classic.css and 1,959 of runspace-dark.css
+     kept asserting the old shape underneath. -->
+<link rel="stylesheet" href="/static/app.css?v=20260908b">
+<script>
+/* THEME BEFORE PAINT.
+ * data-theme was only set once pro.js ran, so the very first paint used the
+ * :root defaults — which are the LIGHT glass values. On a dark app that
+ * rendered the dashboard's middle as a white sheet until the script caught
+ * up. Setting the attribute here, inline and before any stylesheet is
+ * applied, removes the window entirely.
+ * Mirrors initTheme(): explicit choice > OS preference > dark. */
+(function () {
+  /* DARK UNLESS THE USER ASKED OTHERWISE — the OS preference is deliberately
+   * NOT consulted.
+   *
+   * REPRODUCED: with a phone in light mode this script chose "light", which
+   * is honest to the OS but wrong for this product. RunSpace and Code Studio
+   * ship hardcoded dark palettes (#0d1117 / #161b22) and contain ZERO
+   * data-theme rules, so they stay dark no matter what. The shared chrome
+   * then rendered light glass — rgba(255,255,255,.62) — against them, and the
+   * middle of the dashboard read as a white sheet.
+   *
+   * Following the OS only makes sense once every surface can actually follow
+   * it. Until then, defaulting to dark is what matches the app the user sees;
+   * an explicit choice in Settings is still honoured. */
+  try {
+    var t = localStorage.getItem("ahad_theme");
+    document.documentElement.setAttribute(
+      "data-theme", t === "light" ? "light" : "dark");
+  } catch (e) {
+    document.documentElement.setAttribute("data-theme", "dark");
+  }
+})();
+</script>
+<!-- NOVA — the design language. Loaded after every other sheet because it
+     re-points the tokens each of them reads, so they adopt it without
+     being rewritten. Square, flat, mono-labelled, no serif, no shadow. -->
+<!-- xterm.js (browser terminal emulator for the live PTY) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<!-- xterm loads ON DEMAND (see _ensureXterm in terminal.js): it is 300KB+ of
+     CDN payload that only matters once a terminal is opened, and in the
+     Telegram webview those two blocking round-trips were a large part of the
+     startup lag. Nothing else on the page needs it. -->
+<!-- CodeMirror IDE Editor CSS & JS -->
+<script>
+  // Boot guard — never leave the splash up if JS fails to load.
+  (function () {
+    function hideSplash() {
+      try { document.documentElement.classList.remove('booting'); } catch (e) {}
+      var s = document.getElementById('bootSplash');
+      if (s) { s.classList.add('hidden'); s.style.display = 'none'; }
+    }
+    try {
+      if (!localStorage.getItem('ahad_token')) hideSplash();
+    } catch (e) { hideSplash(); }
+    // Hard stop: even with a stored token, never freeze on "Securing your session…"
+    setTimeout(function () {
+      if (window.__tgBootOwned) return;
+      hideSplash();
+    }, 2500);
+  })();
+</script>
+<!-- Telegram Mini Apps SDK. Loaded on every page, not conditionally: it is
+     the only way to find out whether we are inside Telegram at all, and on a
+     normal browser it costs one small cached script and does nothing. -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+
+<!-- SVG ICON SPRITE (custom line icons — Phosphor-style, 1.7px stroke, recognizable & larger) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<defs>
+  <symbol id="i-menu" viewBox="0 0 24 24">
+    <path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24">
+    <path d="M12 5v14M5 12h14" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-square-plus" viewBox="0 0 24 24">
+    <rect x="4" y="4" width="16" height="16" rx="2.5"/>
+    <path d="M12 9v6M9 12h6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 24 24">
+    <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24">
+    <path d="M7 5.5v13c0 .7.8 1.2 1.4.8l11-6.5c.6-.4.6-1.3 0-1.7l-11-6.5c-.6-.3-1.4.1-1.4.9z" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-rocket" viewBox="0 0 24 24">
+    <path d="M14.5 3.5c3 0 6 3 6 6l-5.5 5.5-5-1.5-4 4-1.5-1.5 4-4-1.5-5z" stroke-linejoin="round"/>
+    <circle cx="15.5" cy="8.5" r="1.3"/>
+    <path d="M9 15l-3 3 3-.5.5-3z" stroke-linejoin="round"/>
+    <path d="M15 10l4-4" stroke-linecap="round"/>
+    <path d="M11.5 16.5l-3 3c-.5-.5-.8-1.7-.3-2.7.5-1.1 1.6-1.6 2.3-1.3" class="i-flame" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24">
+    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/>
+  </symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24">
+    <path d="M3 12a9 9 0 0 1 15.5-6.3"/>
+    <path d="M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M21 12a9 9 0 0 1-15.5 6.3" opacity=".35"/>
+  </symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24">
+    <path d="M12 20h9" stroke-linecap="round"/>
+    <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24">
+    <path d="M3 6h18" stroke-linecap="round"/>
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke-linecap="round"/>
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M10 11v6M14 11v6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-git" viewBox="0 0 24 24">
+    <circle cx="6" cy="6" r="2.2"/>
+    <circle cx="6" cy="18" r="2.2"/>
+    <circle cx="18" cy="12" r="2.2"/>
+    <path d="M6 8v8" stroke-linecap="round"/>
+    <path d="M6 12a6 6 0 0 0 6 6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-download" viewBox="0 0 24 24">
+    <path d="M12 3v12" stroke-linecap="round"/>
+    <path d="M7 10l5 5 5-5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M5 21h14" stroke-linecap="round"/>
+  </symbol>
+  <!-- Added: the Format and Terminal rows in the Code Studio "···" menu
+       referenced #i-wand and #i-term, but neither symbol existed, so both
+       rendered as empty boxes. -->
+  <symbol id="i-wand" viewBox="0 0 24 24">
+    <path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/>
+    <path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/>
+    <path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/>
+  </symbol>
+  <symbol id="i-term" viewBox="0 0 24 24">
+    <rect x="2.5" y="4" width="19" height="16" rx="2"/>
+    <path d="m7 9 3 3-3 3"/><path d="M13 15h4"/>
+  </symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24">
+    <rect x="9" y="9" width="11" height="11" rx="2"/>
+    <path d="M5 15V6a2 2 0 0 1 2-2h9" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-bottom" viewBox="0 0 24 24">
+    <path d="M7 7l5 5 5-5M7 13l5 5 5-5" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24">
+    <path d="M5 12l5 5L20 7" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-code" viewBox="0 0 24 24">
+    <path d="M8 6l-5 6 5 6M16 6l5 6-5 6M14 4l-4 16" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-save" viewBox="0 0 24 24">
+    <path d="M5 4h11l3 3v13H5z" stroke-linejoin="round"/>
+    <path d="M8 4v5h7V4"/>
+    <rect x="8" y="12" width="8" height="7" rx="1"/>
+  </symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24">
+    <rect x="3" y="4" width="18" height="16" rx="2"/>
+    <path d="M7 9l3 3-3 3M12 15h5" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24">
+    <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-server" viewBox="0 0 24 24">
+    <rect x="3" y="4" width="18" height="7" rx="2"/>
+    <rect x="3" y="13" width="18" height="7" rx="2"/>
+    <circle cx="7" cy="7.5" r="0.9" fill="currentColor"/>
+    <circle cx="7" cy="16.5" r="0.9" fill="currentColor"/>
+    <path d="M11 7.5h5M11 16.5h5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24">
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-fullscreen" viewBox="0 0 24 24">
+    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-format" viewBox="0 0 24 24">
+    <path d="M4 7h16M7 12h10M10 17h4" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24">
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" stroke-linejoin="round"/>
+    <circle cx="12" cy="12" r="3"/>
+  </symbol>
+  <symbol id="i-search" viewBox="0 0 24 24">
+    <circle cx="11" cy="11" r="7"/>
+    <path d="m20 21-4.3-4.3" stroke-linecap="round"/>
+  </symbol>
+</defs>
+</svg>
+
+<!-- Boot splash -->
+<div class="boot-splash" id="bootSplash">
+  <div class="boot-logo"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+  <div class="boot-spinner"></div>
+  <div class="boot-text">Securing your session…</div>
+</div>
+
+<!-- ============ MARKETING NAVBAR ============ -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="brand" onclick="showScreen('screen-landing')">
+      <div class="brand-mark"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+      <span class="brand-text">CodeNest</span>
+    </div>
+    <div class="nav-links">
+      <a class="nav-link" onclick="showScreen('screen-landing')">Overview</a>
+      <a class="nav-link" onclick="scrollToId('how')">How it works</a>
+      <a class="nav-link" onclick="scrollToId('features')">Features</a>
+    </div>
+    <div class="nav-cta">
+      <button class="btn-ghost" onclick="showScreen('screen-signin')">Sign in</button>
+      <button class="btn-primary" onclick="showScreen('screen-signup')">Get started</button>
+    </div>
+    <button class="nav-burger" id="navBurger" type="button" aria-label="Menu" aria-expanded="false" aria-controls="navSheet">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="nav-sheet hidden" id="navSheet">
+    <a class="nav-link" onclick="showScreen('screen-landing');closeNavSheet()">Overview</a>
+    <a class="nav-link" onclick="scrollToId('how');closeNavSheet()">How it works</a>
+    <a class="nav-link" onclick="scrollToId('features');closeNavSheet()">Features</a>
+    <button onclick="showScreen('screen-signin');closeNavSheet()">Sign in</button>
+    <button class="btn-primary" onclick="showScreen('screen-signup');closeNavSheet()">Get started</button>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<section class="hero" id="screen-landing">
+  <div class="hero-grid">
+    <div class="hero-copy reveal">
+      <div class="eyebrow"><span class="dot-live"></span> Free tier · no credit card</div>
+      <h1 class="hero-title">Your Telegram bot,<br><span class="grad">online 24/7.</span></h1>
+      <p class="hero-sub">Paste your Python or Node code, press deploy, and CodeNest keeps it running — restarting it when it crashes and installing the libraries it imports. No server to rent, nothing to configure.</p>
+      <div class="hero-actions">
+        <button class="btn-primary lg" onclick="showScreen('screen-signup')">Deploy your first bot <span class="arr">→</span></button>
+        <button class="btn-ghost lg" onclick="scrollToId('how')">See how it works</button>
+      </div>
+      <p class="hero-note">3 Telegram bots free · Ready-made starters included</p>
+    </div>
+
+    <!-- Real terminal transcript instead of a fake dashboard mockup: it shows
+         exactly what the product does, in the user's own language. -->
+    <div class="hero-art reveal">
+      <div class="term-card" role="img" aria-label="Deploy transcript: installing dependencies and starting a bot">
+        <div class="tc-bar">
+          <span class="tc-dot"></span><span class="tc-dot"></span><span class="tc-dot"></span>
+          <span class="tc-title">my-tg-bot · deploy</span>
+        </div>
+        <pre class="tc-body"><span class="tc-mut">$</span> <span class="tc-cmd">codenest deploy main.py</span>
+<span class="tc-mut">→</span> detected <span class="tc-hi">python 3.11</span>
+<span class="tc-mut">→</span> installing <span class="tc-hi">python-telegram-bot</span>
+<span class="tc-ok">✓</span> dependencies ready <span class="tc-mut">(4.2s)</span>
+<span class="tc-ok">✓</span> bot started · pid 4417
+
+<span class="tc-mut">[10:24:01]</span> polling for updates…
+<span class="tc-mut">[10:24:07]</span> /start from @ahad_r
+<span class="tc-mut">[10:24:07]</span> replied in 41ms<span class="tc-caret"></span></pre>
+        <div class="tc-foot">
+          <span class="tc-live"><i></i> running</span>
+          <span class="tc-mut">uptime 6d 14h · 0 crashes</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Live activity — same motion as a payout ticker, but about deploys. -->
+<section class="section live-strip" aria-label="Live activity">
+  <div class="live-strip-head">
+    <span class="dot-live"></span>
+    <span>Live on CodeNest</span>
+  </div>
+  <div class="live-ticker" aria-hidden="true">
+    <div class="live-ticker-track" id="liveTickerTrack"></div>
+  </div>
+  <div class="live-toasts" id="liveToasts" aria-live="polite"></div>
+</section>
+
+<!-- ============ HOW IT WORKS ============ -->
+<section class="section" id="how">
+  <div class="section-head reveal">
+    <div class="eyebrow">HOW IT WORKS</div>
+    <h2>Two steps, <span class="grad">about a minute</span></h2>
+  </div>
+  <ol class="steps bot-steps">
+    <li class="step reveal">
+      <span class="step-n">1</span>
+      <h3>Choose or paste</h3>
+      <p>Start from a ready-made Telegram bot or paste your own Python or Node code.</p>
+    </li>
+    <li class="step reveal">
+      <span class="step-n">2</span>
+      <h3>Connect &amp; deploy</h3>
+      <p>Paste your BotFather token. CodeNest verifies it, deploys automatically, and keeps it online.</p>
+    </li>
+  </ol>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section class="section alt" id="features">
+  <div class="section-head reveal">
+    <div class="eyebrow">WHAT YOU GET</div>
+    <h2>Built for people who <span class="grad">ship bots</span></h2>
+  </div>
+  <div class="feat-grid">
+    <div class="feat reveal">
+      <h3>Always-on hosting</h3>
+      <p>Long-running processes, not request handlers. Pollers, schedulers and workers stay alive between messages.</p>
+    </div>
+    <div class="feat reveal">
+      <h3>Automatic restarts</h3>
+      <p>A crash is not an outage. The supervisor brings your process back and records what happened in the log.</p>
+    </div>
+    <div class="feat reveal">
+      <h3>Dependencies handled</h3>
+      <p>Imports are detected and installed on deploy. No requirements file to maintain by hand.</p>
+    </div>
+    <div class="feat reveal">
+      <h3>Live logs</h3>
+      <p>Stream stdout as it happens, so you can debug a running bot without SSH or a log service.</p>
+    </div>
+    <div class="feat reveal">
+      <h3>Public URLs</h3>
+      <p>Bind a web server to <code>$PORT</code> and get a free HTTPS link — useful for webhooks and dashboards.</p>
+    </div>
+    <div class="feat reveal">
+      <h3>Your code stays yours</h3>
+      <p>Plain Python, Node, Bash, Ruby or PHP. Download it, move it elsewhere, stop any time.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CLOSING CTA ============ -->
+<section class="section cta-band">
+  <div class="cta-inner reveal">
+    <h2>Put your bot online tonight</h2>
+    <p>Three Telegram bots free, forever. Deploy your first one in about a minute.</p>
+    <button class="btn-primary lg" onclick="showScreen('screen-signup')">Get started free <span class="arr">→</span></button>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <div class="brand"><div class="brand-mark sm"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div><span class="brand-text">CodeNest</span></div>
+    <p>© 2026 CodeNest · <a href="/terms">Terms</a> · <a href="/report-abuse">Report abuse</a></p>
+  </div>
+</footer>
+
+<!-- ================= AUTH =================
+     The brand panel is a <template> that pro.js injects into every auth
+     screen at boot, so the seven screens cannot drift apart. It is
+     decoration: if the script never runs, the card is still complete and
+     centred. Mobile and the Telegram Mini App get the card alone. -->
+<template id="authAside">
+  <aside class="auth-aside">
+    <div class="brand auth-aside-brand"><div class="brand-mark"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div><span class="brand-text">CodeNest</span></div>
+    <div class="auth-aside-copy">
+      <div class="eyebrow">TELEGRAM BOT HOSTING</div>
+      <h1>Paste Python. Get a bot that stays online.</h1>
+      <p>Long-running processes with live logs, automatic restarts and a free HTTPS URL — not request handlers that time out between messages.</p>
+      <ul class="auth-points">
+        <li>Three bots free, no card</li>
+        <li>Dependencies install themselves</li>
+        <li>Plain Python — your code stays yours</li>
+      </ul>
+    </div>
+    <p class="auth-aside-foot">Deploy your first bot in about a minute.</p>
+  </aside>
+</template>
+
+<!-- ============ AUTH: SIGN UP ============ -->
+<div class="auth" id="screen-signup">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" type="button" onclick="showScreen('screen-landing')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>Create your account</h2>
+        <p class="auth-sub">Three bots free, forever. No card.</p>
+      </div>
+      <!-- Telegram is a one-tap shortcut; email stays visible below it. -->
+      <div class="telegram-login primary" id="telegramSignup" hidden>
+        <div id="telegramSignupBtn"></div>
+        <p class="telegram-hint">One tap. No password to remember.</p>
+      </div>
+      <div class="auth-note" id="telegramUnavailableSignup" hidden>
+        Telegram sign-up is unavailable right now — use email below.
+      </div>
+
+      <button type="button" class="auth-or" id="emailAuthDividerSignup" aria-expanded="true" onclick="(function(btn){var f=document.getElementById('emailAuthSignup');var open=f.style.display!=='none';f.style.display=open?'none':'';btn.querySelector('span').textContent=open?'or use email':'Hide email sign-in';btn.setAttribute('aria-expanded',String(!open));})(this)"><span>Hide email sign-in</span></button>
+      <div id="emailAuthSignup">
+        <form id="formSignup" class="auth-form">
+          <label class="field"><span>Username</span><input type="text" id="su_username" placeholder="e.g. ahad_r" autocomplete="username" required></label>
+          <label class="field"><span>Email</span><input type="email" id="su_email" placeholder="you@example.com" autocomplete="email" required></label>
+      <label class="field"><span>Password</span>
+        <span class="pw-wrap">
+          <input type="password" id="su_password" placeholder="At least 6 characters" autocomplete="new-password" required>
+                  <button type="button" class="pw-toggle" data-pw="su_password" aria-pressed="false" aria-label="Show password">Show</button>
+        </span>
+        <div class="strength-bar"><div class="strength-fill" id="strengthFill"></div></div>
+        <span class="strength-label" id="strengthLabel"></span>
+      </label>
+          <label class="tos-check"><input type="checkbox" id="su_terms"><span>I agree to the <a href="/terms" onclick="event.preventDefault();event.stopPropagation();window.open('/terms','_blank','noopener')">Terms of Use</a></span></label>
+          <button type="submit" class="btn-primary block" id="btnSignup"><span>Create account</span></button>
+          <p class="auth-trust">Free forever for three bots · no card · delete your account any time</p>
+        </form>
+      </div>
+      <p class="auth-switch">Already have an account? <a onclick="showScreen('screen-signin')">Sign in</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: SIGN IN ============ -->
+<div class="auth" id="screen-signin">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" onclick="showScreen('screen-landing')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>Sign in</h2>
+        <p class="auth-sub">Your bots keep running while you are away.</p>
+      </div>
+      <!-- Telegram widget is injected at runtime from /api/public-config.
+           Email stays visible below it at all times — Telegram is a
+           shortcut, not a requirement, so the two never fight for space. -->
+      <div class="telegram-login primary" id="telegramLogin" hidden>
+        <div id="telegramLoginBtn"></div>
+        <p class="telegram-hint">One tap. No password to remember.</p>
+      </div>
+      <!-- Shown only if Telegram's widget script fails to load. -->
+      <div class="auth-note" id="telegramUnavailable" hidden>
+        Telegram sign-in is unavailable right now — use email below.
+      </div>
+
+      <button type="button" class="auth-or" id="emailAuthDivider" aria-expanded="true" onclick="(function(btn){var f=document.getElementById('emailAuthSignin');var open=f.style.display!=='none';f.style.display=open?'none':'';btn.querySelector('span').textContent=open?'or use email':'Hide email sign-in';btn.setAttribute('aria-expanded',String(!open));})(this)"><span>Hide email sign-in</span></button>
+      <div id="emailAuthSignin">
+        <form id="formSignin" class="auth-form">
+          <label class="field"><span>Email or username</span><input type="text" id="si_username" placeholder="you@example.com" autocomplete="username"></label>
+      <label class="field"><span>Password</span>
+        <span class="pw-wrap">
+          <input type="password" id="si_password" placeholder="••••••••" autocomplete="current-password" required>
+                  <button type="button" class="pw-toggle" data-pw="si_password" aria-pressed="false" aria-label="Show password">Show</button>
+        </span>
+      </label>
+          <div class="field-row">
+            <label class="check"><input type="checkbox"> Remember me</label>
+            <a class="link" onclick="showScreen('screen-forgot1')">Forgot password?</a>
+          </div>
+          <button type="submit" class="btn-primary block" id="btnSignin"><span>Sign in</span></button>
+        </form>
+        <p class="auth-switch">New here? <a onclick="showScreen('screen-signup')">Create an account</a></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: OTP VERIFY ============ -->
+<div class="auth" id="screen-otp">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" onclick="showScreen('screen-signin')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>Verify your email</h2>
+        <p id="otpEmailNote">Check your inbox</p>
+      </div>
+      <div class="otp-expire" id="otpExpire"></div>
+      <div class="otp-boxes" id="otpBoxesSignup"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 1"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 2"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 3"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 4"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 5"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code digit 6"></div>
+      <button class="btn-primary block" id="btnVerify"><span>Verify &amp; continue</span></button>
+      <div class="otp-foot">
+        <span id="resendTimer"></span>
+        <a id="resendLink" class="link">Resend code</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: FORGOT 1 ============ -->
+<div class="auth" id="screen-forgot1">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" onclick="showScreen('screen-signin')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>Reset password</h2>
+        <p class="auth-sub">We'll email you a 6-digit code.</p>
+      </div>
+      <form id="formForgot1" class="auth-form">
+        <label class="field"><span>Email</span><input type="email" id="fp_email" placeholder="you@example.com" autocomplete="email" required></label>
+        <button type="submit" class="btn-primary block" id="btnForgot1"><span>Send reset code</span></button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: FORGOT 2 ============ -->
+<div class="auth" id="screen-forgot2">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" onclick="showScreen('screen-forgot1')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>Enter reset code</h2>
+        <p class="auth-sub">Check your email for the 6-digit code.</p>
+      </div>
+      <div class="otp-expire" id="otpExpireReset"></div>
+      <div class="otp-boxes" id="otpBoxesForgot"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 1"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 2"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 3"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 4"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 5"><input maxlength="1" inputmode="numeric" autocomplete="one-time-code" aria-label="Reset code digit 6"></div>
+      <button class="btn-primary block" id="btnForgot2"><span>Verify code</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: FORGOT 3 ============ -->
+<div class="auth" id="screen-forgot3">
+  <div class="auth-main">
+    <div class="auth-card">
+      <button class="back" onclick="showScreen('screen-forgot2')">← Back</button>
+      <div class="auth-head">
+        <div class="brand-mark lg"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div>
+        <h2>New password</h2>
+        <p class="auth-sub">Pick something you have not used here before.</p>
+      </div>
+      <form id="formForgot3" class="auth-form">
+      <label class="field"><span>New password</span>
+        <span class="pw-wrap">
+          <input type="password" id="fp_newpass" placeholder="••••••••" autocomplete="new-password" required>
+                  <button type="button" class="pw-toggle" data-pw="fp_newpass" aria-pressed="false" aria-label="Show password">Show</button>
+        </span>
+        <div class="strength-bar"><div class="strength-fill" id="strengthFill3"></div></div>
+        <span class="strength-label" id="strengthLabel3"></span>
+      </label>
+        <label class="field"><span>Confirm password</span>
+          <span class="pw-wrap">
+            <input type="password" id="fp_confirmpass" placeholder="••••••••" autocomplete="new-password" required>
+                      <button type="button" class="pw-toggle" data-pw="fp_confirmpass" aria-pressed="false" aria-label="Show password">Show</button>
+          </span>
+        </label>
+        <button type="submit" class="btn-primary block" id="btnForgot3"><span>Update password</span></button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AUTH: SUCCESS ============ -->
+<div class="auth" id="screen-forgot-success">
+  <div class="auth-main">
+    <div class="auth-card center">
+      <div class="success-ring">✓</div>
+      <h2>Password updated!</h2>
+      <p>Redirecting in <span id="successCountdown">3</span>…</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ DASHBOARD ============================ -->
+<div class="dashboard" id="screen-dashboard">
+  <div class="side-overlay hidden" id="sideOverlay"></div>
+  <header class="dash-bar">
+    <button class="side-menu-btn" id="sideMenuBtn" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <div class="brand" onclick="switchTab('jobs')"><div class="brand-mark"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div><span class="brand-text">CodeNest</span></div>
+    <nav class="dash-tabs">
+      <div class="tab-group product-legacy">Create</div>
+      <button title="Overview — your bots at a glance" class="dash-tab" data-tab="overview"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg><span class="tab-tx">Overview</span></button>
+      <button title="Code Studio" class="dash-tab product-legacy" data-tab="code"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4.5 4L9 16M15 8l4.5 4L15 16"/></svg><span class="tab-tx">Code</span></button>
+      <button title="Bots — Telegram bot hosting" class="dash-tab active" data-tab="jobs"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg><span class="tab-tx">Bots</span></button>
+      <button title="Store — ready-made bots in plain Python" class="dash-tab" data-tab="store"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16l-1 10.5H5z"/><path d="M8.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg><span class="tab-tx">Store</span></button>
+      <div class="tab-sep product-legacy"></div>
+      <div class="tab-group product-legacy">Account</div>
+      <button class="dash-tab dash-act tab-secondary product-legacy" type="button" id="btnActivitySide" title="Activity"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg><span class="tab-tx">Activity</span></button>
+      <button title="Profile" class="dash-tab tab-secondary" data-tab="profile"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.3" r="3.4"/><path d="M5.5 19.6c1.2-3.3 3.7-5 6.5-5s5.3 1.7 6.5 5"/></svg><span class="tab-tx">Profile</span></button>
+      <button title="Admin console" class="dash-tab tab-secondary hidden" id="tabBtnAdmin" data-tab="admin"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.5c0 4.5 3 7.6 7 9 4-1.4 7-4.5 7-9V6z"/><path d="M9.2 11.8l2 2 3.6-4"/></svg><span class="tab-tx">Admin</span></button>
+    </nav>
+    <div class="dash-user">
+      <button class="dash-add-bot" type="button" onclick="openAddBot()"><span>+</span> Add Bot</button>
+      <button class="dash-account-btn" type="button" onclick="switchTab('profile')" aria-label="Account" title="Account"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20c.8-3.7 3.2-5.5 6.5-5.5s5.7 1.8 6.5 5.5"/></svg></button>
+      <button class="icon-btn product-legacy" id="cmdBtn" title="Search (Ctrl+K)"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg></button>
+      <!-- THEME TOGGLE REMOVED. It set data-theme and swapped its own icon,
+           and nothing else happened: app.css states "One product, one theme"
+           and maps BOTH data-theme values to the same dark palette, because
+           RunSpace and Code Studio are hardcoded dark surfaces with zero
+           data-theme rules. Verified by resolving --bg/--fg/--card under each
+           value: identical. A control that visibly does nothing is worse than
+           no control — the user presses it, sees the icon change, and
+           concludes the app is broken. When every surface can honour a light
+           theme, the button comes back with it. -->
+      <span class="demo-pill" id="demoPill" title="Static UI preview — data is local sample data" hidden>Demo UI</span>
+      <span class="user-name" id="dashUsername">User</span>
+      <button class="btn-ghost sm" id="btnLogout">Sign out</button>
+    </div>
+    <button class="side-collapse" id="sideCollapse" aria-label="Collapse sidebar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg></button>
+  </header>
+
+  <main class="dash-main">
+    <!-- OVERVIEW -->
+    <div class="dash-tab-content" id="tab-overview">
+      <div class="welcome">
+        <div class="eyebrow">DASHBOARD</div>
+        <h1>Hello, <span id="dashUsername2">User</span></h1>
+        <p>Everything is synced — pick a tool and go.</p>
+      </div>
+
+      <!-- The first thing a person sees is an ACTION, not a chart. When the
+           dashboard opens on "Performance" it tells a new user about numbers
+           from a product they have not used yet; this row tells them what
+           this place is FOR. -->
+      <div class="section-label">What do you want to do?</div>
+      <div class="feat-cards">
+        <button class="feat-card acc" onclick="openAddBot()">
+          <span class="fc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg></span>
+          <span class="fc-body"><b>Add a bot <i>the fastest route</i></b><small>Verify a BotFather token and deploy a Telegram bot, scraper or API — public URL, auto restarts, libraries install themselves.</small></span>
+          <span class="fc-go">→</span>
+        </button>
+        <button class="feat-card" onclick="_openRunSpaceTemplates()">
+          <span class="fc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16l-1 10.5H5z"/><path d="M8.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg></span>
+          <span class="fc-body"><b>Use a template</b><small>Start from a complete, tested bot — no code needed to get the first one live.</small></span>
+          <span class="fc-go">→</span>
+        </button>
+        <button class="feat-card" onclick="switchTab('store')">
+          <span class="fc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16l-1 10.5H5z"/><path d="M8.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg></span>
+          <span class="fc-body"><b>Browse the store</b><small>Install a complete, tested Telegram bot in one tap — then keep editing the same Python file.</small></span>
+          <span class="fc-go">→</span>
+        </button>
+      </div>
+
+      <!-- ══════════ ANALYTICS ══════════
+           Modelled on the reference dashboard: a metric, its change against
+           the previous period, and the shape of the recent days. Every number
+           comes from /api/analytics/overview, which reads only events this
+           product already records — no sampling and no invented uptime. -->
+      <div class="ov-head">
+        <div>
+          <div class="eyebrow">LAST <span id="ovRangeLabel">14</span> DAYS</div>
+          <h2 class="ov-title">Performance</h2>
+          <p class="ov-sub" id="ovSub">Loading your numbers…</p>
+        </div>
+        <div class="ov-controls">
+          <div class="ov-ranges" id="ovRanges">
+            <button type="button" class="ov-range" data-days="7">7d</button>
+            <button type="button" class="ov-range is-active" data-days="14">14d</button>
+            <button type="button" class="ov-range" data-days="30">30d</button>
+          </div>
+          <button type="button" class="btn-ghost sm" id="ovRefresh">Refresh</button>
+        </div>
+      </div>
+
+      <div class="ov-kpis" id="ovKpis"></div>
+
+      <div class="ov-grid">
+        <section class="ov-card ov-chart-card">
+          <div class="ov-card-head">
+            <div><h3>Activity</h3><p class="ov-card-sub" id="ovChartSub">Deploys per day</p></div>
+            <span class="ov-legend"><i class="ov-dot"></i> deploys <i class="ov-dot ov-dot-2"></i> new bots</span>
+          </div>
+          <div class="ov-chart" id="ovChart"></div>
+        </section>
+
+        <section class="ov-card">
+          <div class="ov-card-head"><div><h3>Top bots</h3><p class="ov-card-sub">by activity in this period</p></div></div>
+          <div class="ov-list" id="ovTopBots"></div>
+        </section>
+
+        <section class="ov-card">
+          <div class="ov-card-head"><div><h3>Recent</h3><p class="ov-card-sub">the deploy trail</p></div></div>
+          <div class="ov-list" id="ovRecent"></div>
+        </section>
+      </div>
+
+      <!-- The stats had no label of any kind, so four bordered tiles simply
+           appeared under the two action cards with nothing saying what they
+           were or that they belong together. A small section heading turns
+           them from "four more cards" into one supporting block. -->
+      <div class="section-label">Your usage</div>
+      <div class="stats-grid">
+        <div class="stat-card" onclick="switchTab('jobs')"><div class="stat-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg></div><div><b id="statJobs">0</b><span>Total apps</span></div></div>
+        <div class="stat-card" onclick="switchTab('jobs')"><div class="stat-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5a13.5 13.5 0 0 1 0 17M12 3.5a13.5 13.5 0 0 0 0 17"/></svg></div><div><b id="statLive">0</b><span>Deployed 24/7</span></div></div>
+        <div class="stat-card" onclick="switchTab('code')"><div class="stat-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4.5 4L9 16M15 8l4.5 4L15 16"/></svg></div><div><b id="statSnippets">0</b><span>Saved snippets</span></div></div>
+        <div class="stat-card" onclick="switchTab('code')"><div class="stat-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="17.5" cy="5.5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="17.5" cy="18.5" r="2.5"/><path d="m8.2 10.8 6.8-4M8.2 13.2l6.8 4"/></svg></div><div><b id="statPublished">0</b><span>Published pages</span></div></div>
+      </div>
+      <div class="quick">
+        <!-- Was an <h2>, the same weight as a page heading, for a row of
+             shortcuts that repeat the cards above. Same label treatment as
+             "Your usage" so the two supporting blocks match. -->
+        <div class="section-label">Quick actions</div>
+        <div class="quick-grid">
+              <button class="quick-card" onclick="switchTab('code')"><span class="qc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4.5 4L9 16M15 8l4.5 4L15 16"/></svg></span><span>Code Studio</span></button>
+              <button class="quick-card" onclick="switchTab('jobs')"><span class="qc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg></span><span>Deploy 24/7</span></button>
+              <button class="quick-card" onclick="switchTab('code')"><span class="qc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="17.5" cy="5.5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="17.5" cy="18.5" r="2.5"/><path d="m8.2 10.8 6.8-4M8.2 13.2l6.8 4"/></svg></span><span>Publish a page</span></button>
+              <button class="quick-card" onclick="openActivityPanel()"><span class="qc-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg></span><span>Activity log</span></button>
+            </div>
+          </div>
+        </div>
+
+    <div class="dash-tab-content code-studio" id="tab-code">
+      <!-- Toolbar: single 36px row, never wraps -->
+      <div class="cs-header">
+        <div class="cs-brand">
+          <input type="text" id="snippetTitle" class="cs-name" placeholder="Untitled" spellcheck="false">
+        </div>
+        <select id="snippetLanguage" class="cs-lang" title="Language">
+          <option value="html">HTML</option>
+          <option value="css">CSS</option>
+          <option value="javascript">JS</option>
+          <option value="markdown">MD</option>
+          <option value="python">PY</option>
+          <option value="text">TXT</option>
+          <option value="typescript">TS</option>
+          <option value="json">JSON</option>
+          <option value="bash">SH</option>
+          <option value="sql">SQL</option>
+          <option value="java">JAVA</option>
+          <option value="cpp">C/C++</option>
+          <option value="go">GO</option>
+          <option value="php">PHP</option>
+          <option value="ruby">RB</option>
+        </select>
+        <div class="cs-actions">
+          <button class="cs-act primary publish-btn" id="btnShareSnippet" title="Publish" data-rocket><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-rocket"/></svg><span>Publish</span></button>
+          <button class="cs-act" id="btnSaveSnippet" title="Save (Ctrl+S)"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-save"/></svg><span>Save</span></button>
+
+          <!-- Same pattern as RunSpace: one "···" holds the secondary
+               actions so the row cannot overflow at 320px. The buttons are
+               MOVED, not duplicated, so their existing handlers still fire. -->
+          <div class="cs-more-wrap">
+            <button type="button" class="cs-act ic-btn" id="csMoreBtn" title="More actions"
+                    aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 16 16" class="btn-svg" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
+            </button>
+            <div class="cs-menu" id="csMoreMenu" role="menu" hidden>
+              <div class="cs-menu-grab" aria-hidden="true"></div>
+              <div class="cs-menu-head">Actions</div>
+              <button class="cs-menu-item" id="btnNewSnippet" role="menuitem" title="New file (Ctrl+N)"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-plus"/></svg><span>New file</span></button>
+              <button class="cs-menu-item" id="btnUploadFile" role="menuitem" title="Upload a code file"><svg viewBox="0 0 24 24" class="btn-svg" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg><span>Upload file</span></button>
+              <button class="cs-menu-item" id="btnRunSnippet" role="menuitem" title="Run"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-play"/></svg><span>Run</span></button>
+              <button class="cs-menu-item" id="btnFormatSnippet" role="menuitem" title="Format"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-wand"/></svg><span>Format</span></button>
+              <div class="cs-menu-sep" role="separator"></div>
+              <button class="cs-menu-item" id="btnCopySnippet" role="menuitem" title="Copy code"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-copy"/></svg><span>Copy code</span></button>
+              <button class="cs-menu-item" id="btnDownloadSnippet" role="menuitem" title="Download"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-download"/></svg><span>Download</span></button>
+              <button class="cs-menu-item" id="btnToggleTerm" role="menuitem" title="Terminal (Ctrl+`)"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-term"/></svg><span>Terminal</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Main row: activity bar + explorer + editor + preview -->
+      <div class="cs-canvas" id="ideSplit">
+        <div class="cs-activity">
+          <button class="cs-act-btn" id="btnExplorer" title="Explorer (Ctrl+B)"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-folder"/></svg></button>
+          <!-- Search button hidden (no functionality yet) -->
+        </div>
+        <div class="cs-explorer">
+          <div class="cs-explorer-head">
+            <span>EXPLORER</span>
+            <button id="btnNewFileExplorer" title="New file" onclick="if(typeof window.newSnippet==='function')window.newSnippet();else document.getElementById('btnNewSnippet').click()">+</button>
+          </div>
+          <div class="snippets-list" id="snippetsList"></div>
+        </div>
+        <div class="cs-editor-zone" id="ideEditor">
+          <!-- One <input type=file> shared by the menu button and the drop
+               zone, so both paths run the identical handler. `accept` is a
+               convenience filter in the picker only -- it is trivially
+               bypassed, so the real validation happens in JS on the bytes. -->
+          <input type="file" id="csFileInput" hidden
+                 accept=".py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.html,.htm,.css,.scss,.json,.md,.markdown,.txt,.sh,.bash,.sql,.java,.c,.h,.cpp,.cc,.hpp,.go,.php,.rb,.rs,.yml,.yaml,.toml,.ini,.cfg,.env,.xml,.csv,.log,.gitignore,.dockerfile,text/*">
+
+          <!-- Drag-and-drop target. Hidden until a drag enters the editor,
+               so it never sits on top of the code the user is writing. -->
+          <div class="cs-drop" id="csDropZone" aria-hidden="true">
+            <div class="cs-drop-inner">
+              <svg viewBox="0 0 24 24" class="cs-drop-ic" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              <b>Drop a code file to open it</b>
+              <small>Text and code files up to 9&nbsp;MB · .py .js .html .css .json .md and more</small>
+            </div>
+          </div>
+
+          <!-- Shown only when the editor is empty: the third way in, beside
+               "New" and the saved-snippet list. -->
+          <div class="cs-empty-upload" id="csEmptyUpload" hidden>
+            <button type="button" class="btn-secondary sm" id="btnUploadFileEmpty">
+              <svg viewBox="0 0 24 24" class="btn-svg" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              Upload file
+            </button>
+            <span class="cs-empty-hint">or drag one anywhere in the editor</span>
+          </div>
+
+          <textarea id="snippetContent" class="cs-code-input" placeholder="// Start coding here...
+// Type HTML, CSS, JS or Markdown — hit Preview to see it live
+// Pick Python/Go/C/Java... and hit Run ▶ — output appears below
+// Hit Publish to deploy a standalone static page
+// Ctrl+Enter = run · Ctrl+S = save · Tab = 2 spaces" spellcheck="false"></textarea>
+        </div>
+        <div class="cs-preview-zone" id="idePreview">
+          <div class="cs-preview-top">
+            <span id="previewMeta">Preview</span>
+            <button class="cs-close-prev ic-btn" id="ideDivider" title="Close preview"><svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-x"/></svg></button>
+          </div>
+          <div class="cs-preview-body" id="previewWrap">
+            <iframe id="livePreview" class="cs-iframe" sandbox="allow-scripts allow-modals"></iframe>
+            <div class="cs-console" id="ideConsole" style="display:none"><div class="cs-con-head">Console</div><div class="cs-con-body" id="icBody"></div></div>
+          </div>
+        </div>
+      </div>
+      <!-- Bottom run terminal (toggles open/closed) -->
+      <div class="ah-term" id="ahTerm">
+        <div class="ah-term-head">
+          <span class="ah-dots"><i class="d-r"></i><i class="d-y"></i><i class="d-g"></i></span>
+          <span class="ah-term-title" id="ahTermTitle">output</span>
+          <span class="ah-term-badge" id="ahTermBadge"></span>
+          <button class="ah-term-close" id="ahTermClose" title="Close (Ctrl+`)">&#10005;</button>
+        </div>
+        <div class="ah-term-body" id="ahTermBody"></div>
+      </div>
+      <!-- Status bar -->
+      <div class="cs-status">
+        <span id="csStatusGit">&#x2387; main</span>
+        <span id="csStatusErr"></span>
+        <span class="cs-st-right">
+          <span id="csStatusLn">Ln 1, Col 1</span>
+          <span id="csStatusLang">Plaintext</span>
+          <span>Spaces: 2</span>
+          <span>UTF-8</span>
+          <span>LF</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- RUNSPACE — Replit/Codespaces-style IDE (3-panel) -->
+    <div class="dash-tab-content active" id="tab-jobs">
+
+      <div class="rs-menu-backdrop" id="wbBackdrop"></div>
+
+      <!-- ============================================================
+           SINGLE APP HEADER  (GitHub/Codespaces model)
+           There used to be TWO stacked bars: a 42px chrome bar and a
+           44px+ editor bar that wrapped onto extra rows. 86px+ of a
+           phone screen was toolbar. Now there is ONE header: sidebar
+           toggle, breadcrumb identity, and the action group.
+           ============================================================ -->
+      <!-- ============================================================
+           ONE HEADER ROW.
+           Left: job name + status dot, truncating. Right: a single "···".
+           Every action lives in the menu behind that button, so the row
+           cannot overflow at any width and never needs horizontal scroll.
+           The old row carried a rail toggle, a 3-button run group, an
+           inspector button, a close button, a separator and a runner dot;
+           below ~900px they collided.
+           ============================================================ -->
+      <header class="rs-head">
+        <button type="button" class="rs-ghost-btn rs-sq" id="wbMenuBtn"
+                aria-label="Toggle job list" aria-expanded="false" aria-controls="wbSide">
+          <svg viewBox="0 0 16 16" class="rs-ic" fill="currentColor" aria-hidden="true"><path d="M2 3.75A.75.75 0 0 1 2.75 3h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 3.75Zm0 4A.75.75 0 0 1 2.75 7h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 7.75Zm0 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z"/></svg>
+        </button>
+
+        <!-- Identity: dot + name. Truncates; never wraps, never pushes. -->
+        <div class="rs-id" id="rsIdentity">
+          <span class="rs-status-dot" id="wbRunnerStat" title="Status"></span>
+          <button type="button" class="rs-crumb-root" id="rsCrumbRoot">Bots</button>
+          <span class="rs-crumb-sep" id="rsCrumbSep" hidden>/</span>
+          <span class="rs-crumb-cur" id="rsTitle" hidden></span>
+          <span class="rs-chip" id="rsHeadState" hidden></span>
+        </div>
+
+        <!-- Save and Run live on the editor header. Save writes the code
+             without restarting the process; Run deploys. Both used to sit
+             behind the ⋯ menu (and Run was CSS-hidden), so editing had no
+             visible Save. -->
+        <div class="rs-head-acts" id="rsHeadActs" hidden>
+          <button type="button" class="rs-save-quick" id="btnSaveQuick" title="Save (Ctrl+S)" hidden>
+            <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4"/><rect x="8" y="12" width="8" height="7" rx="1"/></svg>
+            <span>Save</span>
+          </button>
+          <button type="button" class="rs-run-quick" id="btnRunQuick" title="Run" hidden>
+            <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M4.5 3.3v9.4c0 .3.3.5.6.3l7.4-4.7a.4.4 0 0 0 0-.6L5.1 3a.4.4 0 0 0-.6.3Z"/></svg>
+            <span>Run</span>
+          </button>
+        </div>
+
+        <!-- The single overflow control. -->
+        <div class="rs-more-wrap">
+          <button type="button" class="rs-ghost-btn rs-sq" id="rsMoreBtn"
+                  title="Actions" aria-label="Actions" aria-haspopup="menu" aria-expanded="false">
+            <svg viewBox="0 0 16 16" class="rs-ic" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
+          </button>
+
+          <!-- Tap-outside target for the mobile sheet. Fixed and below the
+               sheet, above everything else. -->
+          <div class="rs-menu-scrim" id="rsMenuScrim" aria-hidden="true"></div>
+
+          <!-- One compact control surface: bot switcher + current-bot actions.
+               The old hamburger opened a separate drawer that looked like a
+               different page and made destructive actions hard to reach. -->
+          <!-- Dropdown on wide screens, compact glass panel on phones. -->
+          <div class="rs-menu" id="rsMoreMenu" role="menu" hidden>
+            <div class="rs-menu-grab" aria-hidden="true"></div>
+            <div class="rs-menu-current" id="rsMenuCurrent" hidden>
+              <span class="rs-menu-status-dot" id="rsMenuStatusDot"></span>
+              <div class="rs-menu-current-copy"><b id="rsMenuBotName">Selected bot</b><span id="rsMenuBotState">Checking status…</span></div>
+            </div>
+            <div class="rs-menu-section-label">Your bots</div>
+            <div class="rs-jobs-pop-list" id="rsUnifiedBotList"></div>
+            <div class="rs-menu-sep" role="separator"></div>
+            <div class="rs-menu-head">Bot actions</div>
+
+            <!-- Always present. #btnNew lives inside the job rail, which is
+                 an off-canvas overlay at every width, so on a fresh load it
+                 is not on screen; this copy is what guarantees a user can
+                 always start a job. Its click is forwarded to #btnNew so
+                 there is one implementation of "new job", not two. -->
+            <button class="rs-menu-item" id="btnNewInMenu" role="menuitem" title="Add Bot (Ctrl+N)">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M7.25 2.75a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5Z"/></svg>
+              <span class="rs-seg-label">Add Bot 🤖</span>
+            </button>
+            <!-- "Job list" REMOVED from this menu. The header already has a
+                 dedicated hamburger button (#wbMenuBtn) whose only job is to
+                 show the job list, and it sits three centimetres to the left
+                 with the SAME icon. Two identical-looking grey squares in one
+                 toolbar, one opening a drawer and one opening a menu that
+                 contains a row which opens the same drawer by a different
+                 code path, is exactly the "দুইটা মেনু বাটন" confusion. One
+                 job, one control. -->
+            <button class="rs-menu-item" id="btnFilesInMenu" role="menuitem" title="Browse the files in this job">
+              <span class="rs-seg-label">Files</span>
+            </button>
+            <!-- The Store is reachable on every width: a real tab on desktop,
+                 and this row in the one mobile menu. It is deliberately NOT a
+                 bottom-nav destination — that bar is Bots + Add + Account. -->
+            <button class="rs-menu-item" id="btnStoreInMenu" role="menuitem" title="Ready-made bots, one Python file each">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6h11l-.7 7.3H3.2Z"/><path d="M5.75 6V4.4a2.25 2.25 0 0 1 4.5 0V6"/></svg>
+              <span class="rs-seg-label">Bot Store</span>
+            </button>
+
+            <div class="rs-menu-sep" role="separator"></div>
+
+            <div class="rs-seg" id="rsJobActions" hidden>
+              <button class="rs-menu-item rs-seg-btn" id="btnStartJob" role="menuitem" title="Run &amp; deploy (Ctrl+Enter)">
+                <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M4.5 3.3v9.4c0 .3.3.5.6.3l7.4-4.7a.4.4 0 0 0 0-.6L5.1 3a.4.4 0 0 0-.6.3Z"/></svg>
+                <span class="rs-seg-label">Save &amp; Run</span>
+                <span class="rs-spin" aria-hidden="true"></span>
+              </button>
+              <button class="rs-menu-item rs-seg-btn" id="btnRestartJob" role="menuitem" title="Restart" hidden>
+                <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10-4.4L14 5"/><path d="M14 2v3.5h-3.5"/><path d="M14 8a6 6 0 0 1-10 4.4L2 11"/><path d="M2 14v-3.5h3.5"/></svg>
+                <span class="rs-seg-label">Restart</span>
+              </button>
+              <button class="rs-menu-item rs-seg-btn rs-seg-danger" id="btnStopJob" role="menuitem" title="Stop" hidden>
+                <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2"/></svg>
+                <span class="rs-seg-label">Stop</span>
+              </button>
+            </div>
+
+            <div class="rs-menu-sep" role="separator"></div>
+
+            <button class="rs-menu-item" id="btnFullDetails" role="menuitem" hidden>
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h7v7"/><path d="M13 3 7 9"/><path d="M11 9.5V13H3V5h3.5"/></svg>
+              <span class="rs-seg-label">Bot details</span>
+            </button>
+
+            <!-- Legacy inspector trigger retained for compatibility but hidden;
+                 Bot details is the single user-facing details action. -->
+            <button class="rs-menu-item" id="btnInspector" role="menuitem" aria-expanded="false" aria-controls="wbInspector" hidden aria-hidden="true">
+              <span class="rs-seg-label">Inspector</span>
+            </button>
+
+            <!-- Runtime lives in the menu rather than a second toolbar row:
+                 a select cannot be guaranteed to fit beside anything at
+                 320px, and the brief says move it here instead of letting
+                 it overflow. -->
+            <label class="rs-menu-item rs-menu-field" id="rsLangRow">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4 2.5 8 6 12"/><path d="m10 4 3.5 4L10 12"/></svg>
+              <span class="rs-seg-label">Runtime</span>
+              <select class="rs-sel" id="jobLang" aria-label="Runtime">
+                <option value="python">Python</option>
+                <option value="javascript">Node.js</option>
+                <option value="bash">Bash</option>
+                <option value="ruby">Ruby</option>
+                <option value="php">PHP</option>
+              </select>
+            </label>
+
+            <!-- Own box for pip/npm packages instead of making people
+                 remember a "# requirements: x==1" comment. Reads/writes
+                 that exact same comment line under the hood (see
+                 _syncRequirementsBoxFromCode / _applyRequirementsBoxToCode
+                 in pro.js) — the runner itself is untouched. -->
+            <label class="rs-menu-item rs-menu-field" id="rsReqRow">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+              <span class="rs-seg-label">Requirements</span>
+              <input type="text" class="rs-sel" id="jobRequirements" aria-label="Pip/npm packages" placeholder="e.g. python-telegram-bot==21.4" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            </label>
+
+            <!-- GitHub import: label + field on their own row inside the menu. -->
+            <div class="rs-menu-item rs-menu-field rs-gh-wrap">
+              <span class="rs-gh-ic" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+              </span>
+              <input class="rs-inp rs-gh" id="jobRepoUrl" type="url" placeholder="Import from a GitHub repo…" spellcheck="false" autocomplete="off" aria-label="GitHub repository URL">
+              <button class="rs-ghost-btn rs-sq" id="btnImportGh" title="Import repository" aria-label="Import repository">
+                <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v8"/><path d="m4.5 7 3.5 3.5L11.5 7"/><path d="M2.5 13.5h11"/></svg>
+              </button>
+            </div>
+
+            <!-- Upload a file from the device. RunSpace only had the GitHub
+                 URL field, which imports a REPO — it cannot take example.py
+                 off a phone. Same handler shape as Code Studio's upload:
+                 read the file, put the text in the editor, done. -->
+            <input type="file" id="rsFileInput" hidden
+                   accept=".py,.js,.mjs,.cjs,.ts,.sh,.bash,.rb,.php,.txt,.json,.yml,.yaml,.env,.md,text/*">
+            <button class="rs-menu-item" id="btnUploadJobFile" role="menuitem" title="Upload a code file from this device">
+              <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              <span class="rs-seg-label">Upload file</span>
+            </button>
+
+            <div class="rs-menu-sep" role="separator"></div>
+
+            <button class="rs-menu-item rs-menu-danger" id="btnDeleteInMenu" role="menuitem" hidden>
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M3 4h10M6 4V2.8h4V4m-5.5 0 .7 9h5.6l.7-9M6.7 6.5v4M9.3 6.5v4"/></svg>
+              <span class="rs-seg-label">Delete bot</span>
+            </button>
+            <button class="rs-menu-item" id="btnDeselect" role="menuitem" hidden>
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></svg>
+              <span class="rs-seg-label">Back to bots</span>
+            </button>
+            <button class="rs-menu-item" id="rsAccountMenu" role="menuitem">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="5.2" r="2.2"/><path d="M3.5 14c.5-2.7 2-4 4.5-4s4 1.3 4.5 4"/></svg>
+              <span class="rs-seg-label">Account</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div class="rs-body">
+        <!-- LEFT SIDEBAR: job list -->
+        <aside class="rs-side" id="wbSide">
+          <div class="rs-side-head">
+            <span class="rs-side-title">Bots</span>
+            <span class="rs-count" id="txJobCount">0</span>
+            <button type="button" class="rs-ghost-btn rs-sq rs-side-new" id="btnNew" title="Add Bot (Ctrl+N)" aria-label="Add Bot">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M7.25 2.75a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5Z"/></svg>
+            </button>
+            <!-- Mobile only. The drawer covers the editor, and the header
+                 toggle + backdrop were not obvious enough as a way out —
+                 reported three times as "the jobs panel is always open and I
+                 cannot see or type in the editor". CSS hides this on desktop,
+                 where the rail collapses instead. -->
+            <button type="button" class="rs-side-close" id="btnSideClose" title="Close jobs panel" aria-label="Close jobs panel">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></svg>
+            </button>
+          </div>
+          <div class="rs-list" id="jobsList"></div>
+        </aside>
+
+        <!-- FILE TREE for cloned repos. Reuses the .cs-fp-* row styling from
+             Code Studio's file popover rather than inventing a second file-row
+             component. Collapsed by default so the editor keeps the width. -->
+        <aside class="rs-files" id="rsFiles" hidden aria-label="Repository files">
+          <div class="rs-files-head">
+            <span class="rs-side-title">Files</span>
+            <span class="rs-count" id="rsFileCount">0</span>
+            <button type="button" class="rs-ghost-btn rs-sq" id="rsFilesRefresh" title="Rescan files" aria-label="Rescan files">
+              <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+            </button>
+            <button type="button" class="rs-ghost-btn rs-sq" id="rsFilesClose" title="Close" aria-label="Close file list">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></svg>
+            </button>
+          </div>
+          <div class="rs-files-list" id="rsFilesList"></div>
+        </aside>
+
+        <!-- MAIN EDITOR + LOGS -->
+        <main class="rs-main">
+
+          <!-- Boot loading skeleton — shown ONLY while the first jobs fetch is
+               in flight (state 'loading'). Driven by _setJobsStatus(); never
+               inferred from empty array length. -->
+          <div class="rs-boot-loader" id="wbBootLoader" aria-hidden="true" style="display:none">
+            <div class="rs-bl-bar">
+              <span class="rs-skel" style="width:140px;height:14px"></span>
+              <span class="rs-skel" style="width:72px;height:14px;margin-left:auto"></span>
+            </div>
+            <div class="rs-bl-editor">
+              <div class="rs-skel code"></div>
+            </div>
+            <div class="rs-bl-logs">
+              <span class="rs-skel" style="width:84px;height:10px"></span>
+              <span class="rs-skel" style="width:60%;height:10px;margin-top:8px"></span>
+            </div>
+          </div>
+
+          <!-- Empty state (no job selected OR zero jobs — copy set by JS) -->
+          <div class="rs-empty" id="wbEmpty">
+            <div class="rs-empty-ic">
+              <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v8M9.5 12h5"/><path d="M12 2.5v2M12 19.5v2"/></svg>
+            </div>
+            <div class="rs-empty-title">Loading your bots…</div>
+            <div class="rs-empty-sub">Fetching your saved bots &amp; services.</div>
+            <ol class="rs-empty-steps">
+              <li><b>1</b> Verify a BotFather token</li>
+              <li><b>2</b> Paste your bot code</li>
+              <li><b>3</b> Deploy &amp; it runs 24/7</li>
+            </ol>
+            <button class="rs-empty-btn" id="btnNewEmpty" style="display:none">
+              <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+              Add your first bot
+            </button>
+          </div>
+
+          <!-- Active workspace -->
+          <div class="rs-ws" id="wbWorkspace" style="display:none">
+            <!-- ========================================================
+                 EDITOR META STRIP
+                 This used to be a second toolbar that competed with the
+                 header AND wrapped onto extra rows (flex-wrap on both the
+                 bar and its group), so controls physically moved between
+                 renders. Run/Stop/Restart/Details/Close moved up into the
+                 header's segmented group. What is left is job METADATA —
+                 one row, never wrapping, horizontally scrollable if narrow.
+                 ======================================================== -->
+            <!-- The one thin row the brief permits: a single full-width
+                 field that cannot wrap at any width. Runtime and GitHub
+                 import moved into the "···" menu. -->
+            <div class="rs-meta" hidden aria-hidden="true">
+              <input class="rs-inp" id="jobName" type="text" maxlength="60" autocomplete="off" aria-label="Bot name">
+            </div>
+            <section class="rs-bot-wizard" id="rsTgSetup" aria-label="Add Telegram bot">
+              <div class="rs-wizard-steps" aria-label="Setup progress">
+                <span class="is-active" data-rs-step="connect"><b>1</b> Connect bot</span>
+                <span data-rs-step="code"><b>2</b> Choose source</span>
+              </div>
+              <div class="rs-wizard-stage rs-connect-stage" id="rsTgConnectStage">
+                <div><b>Paste your BotFather token</b><small>The bot name is detected automatically.</small></div>
+                <label class="field"><span>Bot token</span><input class="input-text" id="rsTgToken" type="password" autocomplete="off" placeholder="123456789:AA…"></label>
+                <div class="rs-stage-actions"><button class="btn-primary" id="rsTgVerify" type="button">Verify bot</button></div>
+                <span class="rs-tg-verify-state" id="rsTgVerifyState"></span>
+              </div>
+              <div class="rs-wizard-stage" id="rsTgCodeStage" hidden>
+                <div><b>How do you want to build it?</b><small>Choose one. You can deploy in one tap.</small></div>
+                <div class="rs-template-actions">
+                  <div class="rs-source-options" aria-label="Bot source">
+                    <button class="rs-source-option" id="rsUseOwnCode" type="button"><b>Own code</b><small>Full-screen editor</small></button>
+                    <button class="rs-source-option" id="rsBrowseTemplates" type="button"><b>Template</b><small id="rsSelectedTemplate">7 complete bot products</small></button>
+                    <button class="rs-source-option" id="rsUploadCode" type="button"><b>Upload file 🗃️</b><small>.py file</small></button>
+                  </div>
+                  <div class="rs-deploy-actions"><button class="btn-ghost" id="rsChangeSource" type="button" hidden>Change source</button><button class="btn-primary" id="rsTgAnalyze" type="button" hidden>Deploy bot</button></div>
+                </div>
+              </div>
+              <div class="rs-template-config" id="rsTemplateConfig" hidden>
+                <b>Required setup</b>
+                <div id="rsTemplateConfigFields"></div>
+              </div>
+              <div class="rs-analysis-result" id="rsTgAnalysis" hidden></div>
+            </section>
+            <aside class="rs-bot-callout" id="rsBotCallout" hidden aria-live="polite">
+              <span class="rs-bot-logo" aria-hidden="true">✈</span>
+              <div class="rs-bot-copy"><b id="rsBotName">Telegram bot detected</b><span id="rsBotState">Checking bot…</span></div>
+              <a class="rs-bot-go" id="rsBotGo" target="_blank" rel="noopener noreferrer">Go to your bot</a>
+            </aside>
+
+            <!-- Vertical split: editor top, logs bottom -->
+            <div class="rs-split" id="wbSplit">
+              <!-- Editor pane -->
+              <div class="rs-pane rs-editor">
+                <div class="rs-cm-host" id="jobCmHost">
+                  <textarea class="rs-code" id="jobCode" spellcheck="false" autocapitalize="off" placeholder="// Paste your code here, then click Run to deploy 24/7"></textarea>
+                </div>
+              </div>
+              <!-- Draggable divider -->
+              <div class="rs-divider" id="wbDivider" title="Drag to resize"></div>
+              <!-- Log pane -->
+              <div class="rs-pane rs-logs">
+                <div class="rs-log-head">
+                  <span class="rs-log-dot" id="jobLogTitle"></span>
+                  <span class="rs-log-label">Output</span>
+                  <div class="rs-log-acts">
+                    <button class="rs-icon-btn rs-tb" id="jobLogCopy" title="Copy logs">
+                      <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+                    </button>
+                    <button class="rs-icon-btn rs-tb" id="jobLogDl" title="Download logs">
+                      <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+                    </button>
+                    <button class="rs-icon-btn rs-tb" id="jobLogRefresh" title="Reload logs">
+                      <svg viewBox="0 0 24 24" class="rs-ic-sm spin-target" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+                    </button>
+                    <button class="rs-icon-btn rs-tb" id="jobLogBottom" title="Jump to bottom">
+                      <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/><path d="m6 15 6 6 6-6"/></svg>
+                    </button>
+                    <button class="rs-icon-btn rs-tb" id="jobLogClear" title="Clear">
+                      <svg viewBox="0 0 24 24" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <pre class="rs-log-body" id="jobLogBody"><span class="rs-log-empty">// Logs will appear here when you run the job.</span></pre>
+              </div>
+            </div>
+
+            
+          </div>
+
+          <div class="rs-launch-success" id="rsLaunchSuccess" hidden>
+            <a id="rsLaunchGo" target="_blank" rel="noopener noreferrer">Go to bot</a>
+          </div>
+
+          <!-- ============================================================
+               INSPECTOR  ·  the third column (desktop) / a sheet (mobile)
+               Everything here is a REAL field returned by the runner's
+               _job_public(): status, uptime_s, restarts, port, cpu_pct,
+               mem_mb, env_keys, web_slug, language. Nothing is invented —
+               a row that has no data renders an em dash instead of a
+               plausible-looking number.
+               ============================================================ -->
+
+<!-- ============================================================
+                 JOB DETAILS PAGE  ·  /runspace/{user}/{job}/page
+                 Rebuilt as a standalone view (sibling of .rs-ws, NOT a child —
+                 nesting it inside the workspace is what made it go blank when
+                 the workspace was hidden). Every action lives in its own
+                 labelled section instead of being crowded into one toolbar.
+                 ============================================================ -->
+            <!-- ============================================================
+                 JOB DETAIL PAGE  ·  rebuilt as a tabbed workspace
+                 ------------------------------------------------------------
+                 The previous component stacked EIGHT always-visible cards in
+                 one scroller (Status, Controls, URL, Env, Logs, Download,
+                 Backup, History). Everything competed for attention at once
+                 and the page was mostly scrolling.
+
+                 Three distinct structural pieces now:
+                   1. header row  — identity + status pill + primary action
+                   2. tab row     — pill tabs, one accent-filled active tab
+                   3. panel       — ONE view at a time, filling the height
+                 ============================================================ -->
+            <section class="jd" id="jobDetailPanel" aria-hidden="true" aria-label="Job details">
+
+              <!-- 1 · HEADER ROW -->
+              <header class="jd-top">
+                <button class="jd-back" id="jobDetailBack" type="button" title="Back to editor" aria-label="Back to editor">
+                  <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="10 3 5 8 10 13"/></svg>
+                </button>
+
+                <span class="jd-avatar" id="jdLang" aria-hidden="true">py</span>
+
+                <div class="jd-id">
+                  <h2 class="jd-name" id="jdName" title="Rename this job">—</h2>
+                  <!-- Status is a PILL: dot + word. A bare dot forces the
+                       reader to decode a colour; the word does not. -->
+                  <span class="jd-pill" id="jdBadge">stopped</span>
+                </div>
+
+                <div class="jd-top-acts">
+                  <button class="jd-btn jd-primary" id="jdStart" type="button">
+                    <svg viewBox="0 0 16 16" class="jd-i" fill="currentColor" aria-hidden="true"><path d="M4.5 3.3v9.4c0 .3.3.5.6.3l7.4-4.7a.4.4 0 0 0 0-.6L5.1 3a.4.4 0 0 0-.6.3Z"/></svg>
+                    <span>Deploy</span>
+                  </button>
+                  <!-- Theme toggle removed here too; see the note in the dash bar. -->
+                  <!-- Overflow: secondary + destructive actions live here so
+                       they never compete with the one primary button. -->
+                  <div class="jd-more-wrap">
+                    <button class="jd-icon-btn" id="jdMoreBtn" type="button" title="More actions"
+                            aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
+                      <svg viewBox="0 0 16 16" class="jd-i" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
+                    </button>
+                    <div class="jd-menu" id="jdMoreMenu" role="menu" hidden>
+                      <button class="jd-menu-item" id="jdRestart" type="button" role="menuitem">Restart</button>
+                      <button class="jd-menu-item" id="jdStop" type="button" role="menuitem">Stop</button>
+                      <button class="jd-menu-item" id="jdEditCode" type="button" role="menuitem">Open in editor</button>
+                      <div class="jd-menu-sep" role="separator"></div>
+                      <button class="jd-menu-item jd-menu-danger" id="jdDelete" type="button" role="menuitem">Delete job</button>
+                    </div>
+                  </div>
+                </div>
+              </header>
+
+              <!-- 2 · TAB ROW (new component — pill tabs, single accent) -->
+              <nav class="jd-tabs" id="jdTabs" role="tablist" aria-label="Job sections">
+                <button class="jd-tab is-active" role="tab" data-jdtab="overview" id="jdTabOverview" aria-selected="true"  aria-controls="jdPanelOverview">Overview</button>
+                <button class="jd-tab"           role="tab" data-jdtab="code"     id="jdTabCode"     aria-selected="false" aria-controls="jdPanelCode">Code</button>
+                <button class="jd-tab"           role="tab" data-jdtab="logs"     id="jdTabLogs"     aria-selected="false" aria-controls="jdPanelLogs">Logs</button>
+                <button class="jd-tab"           role="tab" data-jdtab="env"      id="jdTabEnv"      aria-selected="false" aria-controls="jdPanelEnv">Env</button>
+                <button class="jd-tab"           role="tab" data-jdtab="files"    id="jdTabFiles"    aria-selected="false" aria-controls="jdPanelFiles">Files</button>
+                <button class="jd-tab"           role="tab" data-jdtab="metrics"  id="jdTabMetrics"  aria-selected="false" aria-controls="jdPanelMetrics">Metrics</button>
+                <button class="jd-tab"           role="tab" data-jdtab="versions" id="jdTabVersions" aria-selected="false" aria-controls="jdPanelVersions">Versions</button>
+                <button class="jd-tab"           role="tab" data-jdtab="settings" id="jdTabSettings" aria-selected="false" aria-controls="jdPanelSettings">Settings</button>
+              </nav>
+
+              <!-- 3 · CONTENT AREA — exactly one panel visible -->
+              <div class="jd-body" id="jdScroll">
+
+                <!-- OVERVIEW -- the "what is this bot doing right now" view -->
+                <div class="jd-panel jd-overview-panel is-active" id="jdPanelOverview" role="tabpanel" aria-labelledby="jdTabOverview">
+                  <div class="jd-overview-head">
+                    <div>
+                      <div class="jd-pane-title">At a glance</div>
+                      <p class="jd-sub">The one place to see whether this bot is live and how to reach it.</p>
+                    </div>
+                    <button class="jd-btn sm" id="jdOvRefresh" type="button"><span>Refresh</span></button>
+                  </div>
+
+                  <div class="jd-ov-grid">
+                    <div class="jd-ov-card"><span class="jd-k">State</span><span class="jd-v jd-ov-state" id="jdOvState">—</span></div>
+                    <div class="jd-ov-card"><span class="jd-k">Uptime</span><span class="jd-v" id="jdOvUptime">—</span></div>
+                    <div class="jd-ov-card"><span class="jd-k">Restarts</span><span class="jd-v" id="jdOvRestarts">—</span></div>
+                    <div class="jd-ov-card"><span class="jd-k">Telegram bot</span><span class="jd-v" id="jdOvBot">—</span></div>
+                  </div>
+
+                  <div class="jd-ov-url" id="jdOvUrlCard" hidden>
+                    <span class="jd-k">Public URL</span>
+                    <a class="jd-ov-url-link mono" id="jdOvUrl" href="#" target="_blank" rel="noopener">—</a>
+                    <button class="jd-icon-btn sm" id="jdOvUrlCopy" type="button" title="Copy URL" aria-label="Copy URL">
+                      <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M2.5 10.5V3a1 1 0 0 1 1-1h7"/></svg>
+                    </button>
+                    <button class="jd-icon-btn sm" id="jdOvUrlOpen" type="button" title="Open URL" aria-label="Open URL">
+                      <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7 9"/><path d="M12.5 9.5v3a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3"/></svg>
+                    </button>
+                  </div>
+
+                  <div class="jd-ov-actions">
+                    <button class="jd-btn jd-primary" id="jdOvOpenBot" type="button"><span>Open bot</span></button>
+                    <button class="jd-btn" id="jdOvRestart" type="button"><span>Restart</span></button>
+                    <button class="jd-btn" id="jdOvStop" type="button"><span>Stop</span></button>
+                    <button class="jd-btn" id="jdOvEdit" type="button"><span>Open in editor</span></button>
+                  </div>
+                  <details class="jd-ov-logs" id="jdOvLogs">
+                    <summary>View logs</summary>
+                    <pre class="jd-term" id="jdOvLogBody">No logs yet.</pre>
+                  </details>
+                </div>
+
+                <!-- CODE -->
+                <div class="jd-panel" id="jdPanelCode" role="tabpanel" aria-labelledby="jdTabCode" hidden>
+                  <div class="jd-split">
+                    <div class="jd-code-pane">
+                      <div class="jd-pane-head">
+                        <span class="jd-pane-title" id="jdLangName">main.py</span>
+                        <span class="jd-pane-meta" id="jdPid">—</span>
+                      </div>
+                      <div class="jd-code-host" id="jdCodeHost">
+                        <pre class="jd-code-ro" id="jdCodePreview">// Open in editor to make changes.</pre>
+                      </div>
+                    </div>
+                    <!-- Output: a real terminal surface, live-streamed -->
+                    <div class="jd-out-pane">
+                      <div class="jd-pane-head">
+                        <span class="jd-term-dot" id="jdHealth"></span>
+                        <span class="jd-pane-title">Output</span>
+                        <span class="jd-pane-meta" id="jdHealthSub">—</span>
+                        <label class="jd-follow"><input type="checkbox" id="jdFollow" checked><span>Follow</span></label>
+                        <button class="jd-icon-btn sm" id="jdHealthNow" type="button" title="Re-check">
+                          <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10-4.4L14 5"/><path d="M14 2v3.5h-3.5"/><path d="M14 8a6 6 0 0 1-10 4.4L2 11"/><path d="M2 14v-3.5h3.5"/></svg>
+                        </button>
+                        <button class="jd-icon-btn sm" id="jdCopy" type="button" title="Copy output">
+                          <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M2.5 10.5V3a1 1 0 0 1 1-1h7"/></svg>
+                        </button>
+                        <button class="jd-icon-btn sm" id="jdClear" type="button" title="Clear">
+                          <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></svg>
+                        </button>
+                      </div>
+                      <pre class="jd-term" id="jdLogBody"><span class="jd-term-idle">Waiting for output…</span></pre>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- LOGS -->
+                <div class="jd-panel" id="jdPanelLogs" role="tabpanel" aria-labelledby="jdTabLogs" hidden>
+                  <div class="jd-pane-head">
+                    <span class="jd-pane-title">Live log stream</span>
+                    <button class="jd-btn sm" id="jdDlLogs" type="button" data-type="logs"><span>Download</span></button>
+                  </div>
+                  <pre class="jd-term jd-term-full" id="jdLogFull"><span class="jd-term-idle">Logs appear here while the job runs.</span></pre>
+                </div>
+
+                <!-- ENV -->
+                <div class="jd-panel" id="jdPanelEnv" role="tabpanel" aria-labelledby="jdTabEnv" hidden>
+                  <div class="jd-pane-head">
+                    <span class="jd-pane-title">Environment variables</span>
+                    <button class="jd-btn sm" id="jdEnvAdd" type="button"><span>+ Add</span></button>
+                  </div>
+                  <div class="jd-env" id="jdEnvList"></div>
+                  <p class="jd-sub" id="jdEnvHint">Changes apply on the next restart.</p>
+                </div>
+
+                <!-- FILES -->
+                <div class="jd-panel" id="jdPanelFiles" role="tabpanel" aria-labelledby="jdTabFiles" hidden>
+                  <div class="jd-pane-head"><span class="jd-pane-title">Download</span></div>
+                  <div class="jd-acts">
+                    <button class="jd-btn" id="jdDlSource" type="button" data-type="source"><span>Source code</span></button>
+                    <button class="jd-btn" id="jdDlDb" type="button" data-type="db"><span>Data files</span></button>
+                  </div>
+                  <p class="jd-sub">Data files download as one .tar.gz (database, sessions, everything the bot wrote).</p>
+
+                  <div class="jd-pane-head"><span class="jd-pane-title">Data backup</span></div>
+                  <div class="jd-row"><span class="jd-k">Last backup</span><span class="jd-v" id="jdBackup">—</span></div>
+                  <div class="jd-acts">
+                    <button class="jd-btn" id="jdBackupNow" type="button"><span>Back up now</span></button>
+                    <button class="jd-btn" id="jdRestoreBackup" type="button"><span>Restore backup</span></button>
+                  </div>
+                  <p class="jd-sub">Your bot's database is copied to permanent storage automatically, so it survives a redeploy. Restore overwrites current data.</p>
+                </div>
+
+                <!-- METRICS -->
+                <div class="jd-panel" id="jdPanelMetrics" role="tabpanel" aria-labelledby="jdTabMetrics" hidden>
+                  <div class="jd-stats">
+                    <div class="jd-stat"><span class="jd-k">State</span><span class="jd-v" id="jdState">—</span></div>
+                    <div class="jd-stat"><span class="jd-k">Uptime</span><span class="jd-v" id="jdUptime">—</span></div>
+                    <div class="jd-stat"><span class="jd-k">Restarts</span><span class="jd-v" id="jdRestarts">—</span></div>
+                    <div class="jd-stat"><span class="jd-k">Port</span><span class="jd-v mono" id="jdPort">—</span></div>
+                    <div class="jd-stat"><span class="jd-k">CPU</span><span class="jd-v" id="jdCpu">—</span></div>
+                    <div class="jd-stat"><span class="jd-k">Memory</span><span class="jd-v" id="jdMem">—</span></div>
+                  </div>
+                  <div class="jd-pane-head"><span class="jd-pane-title">Run history</span></div>
+                  <ol class="jd-timeline" id="jdTimeline"><li class="jd-empty">Events will appear here.</li></ol>
+                </div>
+
+                <!-- VERSIONS -->
+                <div class="jd-panel" id="jdPanelVersions" role="tabpanel" aria-labelledby="jdTabVersions" hidden>
+                  <div class="jd-pane-head"><span class="jd-pane-title">Deployment versions</span><button class="jd-icon-btn" id="jdVersionsRefresh" type="button" title="Refresh versions">↻</button></div>
+                  <p class="jd-sub">A failed update never replaces the last healthy source. Restore any previously healthy version.</p>
+                  <div class="jd-versions" id="jdVersions"><div class="jd-empty">Open this tab to load versions.</div></div>
+                </div>
+
+                <!-- SETTINGS -->
+                <div class="jd-panel" id="jdPanelSettings" role="tabpanel" aria-labelledby="jdTabSettings" hidden>
+                  <div class="jd-pane-head"><span class="jd-pane-title">Public URL</span></div>
+                  <div class="jd-url-row" id="jdUrlCard" hidden>
+                    <a class="jd-url mono" id="jdUrl" href="#" target="_blank" rel="noopener">—</a>
+                    <button class="jd-icon-btn" id="jdUrlCopy" type="button" title="Copy URL" aria-label="Copy URL">
+                      <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M2.5 10.5V3a1 1 0 0 1 1-1h7"/></svg>
+                    </button>
+                    <button class="jd-icon-btn" id="jdUrlOpen" type="button" title="Open URL" aria-label="Open URL">
+                      <svg viewBox="0 0 16 16" class="jd-i" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7 9"/><path d="M12.5 9.5v3a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3"/></svg>
+                    </button>
+                  </div>
+                  <p class="jd-sub">Only jobs that open a port get a public address.</p>
+
+                  <!-- Pre-installed tooling. Users kept asking "is ffmpeg
+                       available?"; the answer belongs in the product, not only
+                       in a markdown file they have to find. -->
+                  <div class="jd-pane-head"><span class="jd-pane-title">Pre-installed tools</span></div>
+                  <p class="jd-sub">Call these from your code with <code>subprocess</code> — no install step needed.</p>
+                  <div class="jd-tools">
+                    <span class="jd-tool" title="ffmpeg · ffprobe — audio/video">ffmpeg</span>
+                    <span class="jd-tool" title="convert · mogrify · identify — images">imagemagick</span>
+                    <span class="jd-tool" title="git — clone repositories">git</span>
+                    <span class="jd-tool" title="zip · unzip · tar · xz — archives">zip / unzip</span>
+                    <span class="jd-tool" title="curl · wget — HTTP downloads">curl / wget</span>
+                    <span class="jd-tool" title="sqlite3 — inspect a database">sqlite3</span>
+                    <span class="jd-tool" title="jq — JSON in shell pipelines">jq</span>
+                  </div>
+                  <p class="jd-sub">Python and Node libraries install automatically from your imports. System packages cannot be installed per bot because the hosting environment is shared. Need another tool? Ask on the Telegram channel and it can be added safely.</p>
+
+                  <div class="jd-pane-head"><span class="jd-pane-title">Danger zone</span></div>
+                  <p class="jd-sub">Deleting a job stops it and removes its workspace, including any database it wrote.</p>
+                </div>
+
+              </div>
+            </section>
+        </main>
+        <aside class="rs-insp" id="wbInspector" aria-label="Job inspector">
+          <div class="rs-insp-head">
+            <span class="rs-insp-title">Inspector</span>
+            <button type="button" class="rs-ghost-btn rs-sq rs-insp-close" id="wbInspClose"
+                    aria-label="Close inspector">
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></svg>
+            </button>
+          </div>
+
+          <div class="rs-insp-scroll">
+            <section class="rs-insp-sec">
+              <h4 class="rs-insp-h">Status</h4>
+              <dl class="rs-kv">
+                <dt>State</dt>    <dd><span class="rs-chip" id="inspState">—</span></dd>
+                <dt>Uptime</dt>   <dd id="inspUptime">—</dd>
+                <dt>Restarts</dt> <dd id="inspRestarts">—</dd>
+                <dt>Port</dt>     <dd id="inspPort">—</dd>
+              </dl>
+            </section>
+
+            <section class="rs-insp-sec">
+              <h4 class="rs-insp-h">Resources</h4>
+              <div class="rs-meter">
+                <div class="rs-meter-top"><span>CPU</span><span id="inspCpuVal">—</span></div>
+                <div class="rs-meter-track"><i class="rs-meter-fill" id="inspCpuBar" style="width:0%"></i></div>
+              </div>
+              <div class="rs-meter">
+                <div class="rs-meter-top"><span>Memory</span><span id="inspMemVal">—</span></div>
+                <div class="rs-meter-track"><i class="rs-meter-fill" id="inspMemBar" style="width:0%"></i></div>
+              </div>
+            </section>
+
+            <section class="rs-insp-sec">
+              <h4 class="rs-insp-h">Runtime</h4>
+              <dl class="rs-kv">
+                <dt>Language</dt> <dd id="inspLang">—</dd>
+                <dt>Public URL</dt>
+                <dd><a class="rs-insp-link" id="inspUrl" href="#" target="_blank" rel="noopener">—</a></dd>
+              </dl>
+            </section>
+
+            <section class="rs-insp-sec">
+              <h4 class="rs-insp-h">Environment <span class="rs-count" id="inspEnvCount">0</span></h4>
+              <!-- Keys only. Values can hold bot tokens and the API never
+                   returns them, so this must never pretend to show one. -->
+              <div class="rs-insp-envs" id="inspEnvList">
+                <p class="rs-insp-none">No variables set.</p>
+              </div>
+            </section>
+
+            <!-- The Details page is the full-screen view of exactly what this
+                 panel summarises, so its entry point belongs here — not as a
+                 fifth identical icon square in the header. -->
+            <section class="rs-insp-sec rs-insp-more">
+              <button type="button" class="rs-insp-btn" id="btnJobDetails">
+                <span>Open full details</span>
+                <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+              </button>
+            </section>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- TERMUX STANDALONE TAB — only reachable via /terminal URL -->
+    <div class="dash-tab-content term-page" id="tab-term">
+      <div class="term-standalone wb-term" id="termStandalone">
+        <button class="wb-term-exit-fab" id="termExit" title="Back to dashboard">
+          <svg viewBox="0 0 24 24" class="btn-svg"><use href="#i-x"/></svg>
+        </button>
+        <div class="wb-term-slots" id="standSlots"></div>
+        <div class="wb-term-body" id="standBody">
+          <div class="term-landing" id="standLanding">
+            <div>
+              <div class="art">    _    _               _
+   / \  | |__   __ _  __| |
+  / _ \ | '_ \ / _` |/ _` |
+ / ___ \| | | | (_| | (_| |
+/_/   \_\_| |_|\__,_|\__,_|</div>
+              <div class="hint">CodeNest &middot; Termux-compatible shell</div>
+              <div class="hint" style="margin-top:6px;">bash &middot; python3 &middot; node &middot; git &middot; pip &middot; pkg</div>
+              <div class="hint" style="margin-top:10px;color:#7c7c85;font-size:11px;max-width:320px;line-height:1.45;">⚠ Files snapshotted to your account (redeploys-এ হারায় না)। <tt style="color:#111113;">~/.ahad_autostart</tt> এ commands রাখলে 24/7 চালু থাকবে (TG/Discord bot — crash হলে auto-restart, nohup লাগে না)। Log: <tt>~/.ahad_autostart.log</tt></div>
+              <button class="term-connect-btn" id="standConnect">START SESSION</button>
+            </div>
+          </div>
+        </div>
+        <div class="wb-term-kbd" id="standKbd">
+          <div class="wb-kbd-row">
+            <button data-k="esc">ESC</button>
+            <button data-k="drawer">≡</button>
+            <button data-k="kbd">↕</button>
+            <button data-k="home">HOME</button>
+            <button data-k="up">↑</button>
+            <button data-k="end">END</button>
+            <button data-k="pgup">PGUP</button>
+            <button data-k="paste" class="kbd-paste">PASTE</button>
+            <button data-k="copy" class="kbd-copy">COPY</button>
+          </div>
+          <div class="wb-kbd-row">
+            <button data-k="tab">TAB</button>
+            <button data-k="ctrl">CTRL</button>
+            <button data-k="alt">ALT</button>
+            <button data-k="left">←</button>
+            <button data-k="down">↓</button>
+            <button data-k="right">→</button>
+            <button data-k="pgdn">PGDN</button>
+                <button data-k="save" class="kbd-nano">SAVE</button>
+                <button data-k="exit" class="kbd-nano">EXIT</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOT STORE — one complete Python file per listing -->
+    <div class="dash-tab-content" id="tab-store">
+      <div class="store-head">
+        <div class="store-head-copy">
+          <div class="eyebrow">BOT STORE</div>
+          <h1>Ready-made bots in plain Python</h1>
+          <p>Every listing is one complete <code>.py</code> file — real Python, real libraries, no custom language and no per-command snippets. Deploy it in one tap, then keep editing the same file you would have written yourself.</p>
+        </div>
+        <div class="store-head-actions">
+          <button class="btn-ghost" type="button" id="btnStoreLibrary">My library</button>
+          <button class="btn-primary" type="button" id="btnStorePublish">Publish a bot</button>
+        </div>
+      </div>
+
+      <div class="store-toolbar">
+        <input class="input-text" id="storeSearch" type="search" placeholder="Search the store — captcha, orders, OCR, referral…" autocomplete="off">
+        <div class="store-sorts" id="storeSorts">
+          <button type="button" class="store-chip is-active" data-sort="popular">Popular</button>
+          <button type="button" class="store-chip" data-sort="rating">Top rated</button>
+          <button type="button" class="store-chip" data-sort="newest">Newest</button>
+          <button type="button" class="store-chip" data-sort="name">A–Z</button>
+        </div>
+      </div>
+
+      <div class="store-categories" id="storeCategories"></div>
+      <div class="store-facets" id="storeFacets">Loading the store…</div>
+      <div class="store-grid" id="storeGrid"></div>
+      <div class="store-empty hidden" id="storeEmpty">
+        <b>Nothing matches that search.</b>
+        <span>Try another word, or clear the category filter.</span>
+      </div>
+    </div>
+
+    <!-- PROFILE / SETTINGS -->
+    <div class="dash-tab-content" id="tab-profile">
+      <div class="tab-head"><div><div class="eyebrow">SETTINGS</div><h2>Profile &amp; security</h2></div></div>
+      <div class="profile-grid">
+        <div class="profile-card">
+          <h3>Account</h3>
+          <label class="field"><span>Username</span><input type="text" id="profileUsername" class="input-text" disabled></label>
+          <label class="field"><span>Email</span><input type="email" id="profileEmail" class="input-text" disabled></label>
+          <p class="set-meta">Account contact details come from your sign-up and cannot be edited here.</p>
+        </div>
+
+        <!-- Password -->
+        <div class="profile-card set-group">
+          <div class="set-row">
+            <div class="set-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="14.5" r="4.5"/><path d="M11.2 11.3 19.5 3M15.8 6.7l3 3"/></svg></div>
+            <div class="set-tx">
+              <h3>Password</h3>
+              <p>Change the password you sign in with. Other devices are signed out automatically.</p>
+              <p class="set-meta" id="pwChangedAt">Last changed: —</p>
+            </div>
+          </div>
+          <button class="btn-secondary block left" onclick="openChangePassword()">Change password</button>
+        </div>
+
+        <!-- Two-factor authentication -->
+        <div class="profile-card set-group">
+          <div class="set-row">
+            <div class="set-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.5c0 4.5 3 7.6 7 9 4-1.4 7-4.5 7-9V6z"/><path d="M9.2 11.8l2 2 3.6-4"/></svg></div>
+            <div class="set-tx">
+              <h3>Two-factor authentication <span class="chip" id="tfaChip">—</span></h3>
+              <p>Require a 6-digit code from an authenticator app when signing in.</p>
+              <p class="set-meta" id="tfaMeta">Backup codes: —</p>
+            </div>
+          </div>
+          <button class="btn-secondary block left" id="btn2FA" onclick="manage2FA()">Manage 2FA</button>
+        </div>
+
+        <!-- Telegram -->
+        <div class="profile-card set-group">
+          <div class="set-row">
+            <div class="set-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4.5 3.5 11l4.8 1.7L19 6.5l-8 7.4v4.3l2.6-3.1 4.2 3z"/></svg></div>
+            <div class="set-tx">
+              <h3>Telegram <span class="chip" id="tgChip">—</span></h3>
+              <p>Deploy and manage your apps from a chat. The bot only answers a connected account.</p>
+              <p class="set-meta" id="tgMeta"></p>
+            </div>
+          </div>
+          <button class="btn-secondary block left" id="btnTelegram" onclick="manageTelegram()">Connect Telegram</button>
+        </div>
+
+        <!-- Security note -->
+        <div class="profile-card note-card">
+          <div class="set-row">
+            <div class="set-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.5c0 4.5 3 7.6 7 9 4-1.4 7-4.5 7-9V6z"/><path d="M9.2 11.8l2 2 3.6-4"/></svg></div>
+            <div class="set-tx">
+              <h3>Keep your account safe</h3>
+              <p>Use a strong password and keep 2FA on. Telegram keeps your bots reachable from anywhere.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- ADMIN CONSOLE (owner-only — the nav button stays hidden unless /profile says admin) -->
+    <div class="dash-tab-content" id="tab-admin">
+      <div class="tab-head">
+        <div><div class="eyebrow">OWNER CONSOLE</div><h2>Admin</h2></div>
+        <div class="adm-head-right">
+          <span class="adm-hint adm-fresh" id="admFresh"></span>
+          <button class="btn-ghost sm" id="admRefresh" onclick="loadAdminPanel(true)">↻ Refresh</button>
+        </div>
+      </div>
+      <nav class="adm-section-nav" aria-label="Admin sections">
+        <a href="#admOverviewSection" class="active">Overview</a><a href="#admBotsSection">Bots</a><a href="#admUsersSection">Users</a><a href="#admPackagesSection">Packages</a><a href="#admReportsSection">Reports</a><a href="#admAuditSection">Audit</a>
+      </nav>
+      <div class="adm-stats" id="admStats"></div>
+      <div class="adm-panel" id="admOverviewSection">
+        <div class="adm-panel-head"><h3>Signups · last 14 days</h3><span class="adm-hint" id="admCap"></span></div>
+        <div class="adm-spark" id="admSpark"></div>
+      </div>
+      <div class="adm-panel" id="admBotsSection">
+        <div class="adm-panel-head"><h3>Hosted bots</h3><span class="adm-hint">metadata only — code stays private</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admJobs"></table></div>
+      </div>
+      <div class="adm-panel" id="admPackagesSection">
+        <div class="adm-panel-head"><h3>Installed packages</h3><span class="adm-hint">across running jobs — hover a row for owners</span></div>
+        <div class="adm-libs" id="admLibs"></div>
+      </div>
+      <div class="adm-panel" id="admUsersSection">
+        <div class="adm-panel-head"><h3>Users</h3><span class="adm-hint">suspending needs your 2FA code</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admUsers"></table></div>
+      </div>
+      <div class="adm-panel" id="admReportsSection">
+        <div class="adm-panel-head"><h3>Abuse reports</h3><span class="adm-hint">sent from the public report page</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admReports"></table></div>
+      </div>
+      <div class="adm-panel" id="admAuditSection">
+        <div class="adm-panel-head"><h3>Audit log</h3><span class="adm-hint">every admin action, recorded</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admAudit"></table></div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ============ MOBILE BOTTOM NAV ============ -->
+  <nav class="bottom-nav bot-bottom-nav" id="bottomNav" aria-label="Main navigation">
+    <button class="bn-item active" data-tab="jobs"><span class="bn-ic"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M9 12h.01M15 12h.01M9 16h6M12 7V4"/></svg></span><span class="bn-l">Bots</span></button>
+    <button class="bn-item" data-tab="store"><span class="bn-ic"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16l-1 10.5H5z"/><path d="M8.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg></span><span class="bn-l">Store</span></button>
+    <button class="bn-item bn-add" id="bnAddBot" type="button"><span class="bn-add-circle">+</span><span class="bn-l">Add Bot</span></button>
+    <button class="bn-item" data-tab="code"><span class="bn-ic"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4.5 4L9 16M15 8l4.5 4L15 16"/></svg></span><span class="bn-l">Code</span></button>
+    <button class="bn-item" data-tab="profile"><span class="bn-ic"><svg class="tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20c.8-3.7 3.2-5.5 6.5-5.5s5.7 1.8 6.5 5.5"/></svg></span><span class="bn-l">Account</span></button>
+  </nav>
+  <button class="mobile-fab" id="mobileFabAdd" type="button" title="Add a bot" aria-label="Add a bot">
+    <svg viewBox="0 0 24 24" class="tab-ic" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+  <!-- (the old "more sheet" was removed — the left drawer is the ONE mobile menu;
+       two overlapping menus was the "mixed content" navigation bug) -->
+</div>
+
+<!-- ============ ADD BOT: TEMPLATE PICKER ============ -->
+<div class="ah-modal hidden rs-template-modal" id="rsTemplateModal">
+  <div class="ah-modal-card rs-template-modal-card">
+    <div class="ah-modal-head">
+      <div><h3>Choose from 7 complete bot products</h3><p>Tap a product — it deploys instantly with your verified token.</p></div>
+      <button class="ah-x" data-close aria-label="Close templates">✕</button>
+    </div>
+    <input class="input-text" id="rsTemplateSearch" type="search" placeholder="Search templates…" autocomplete="off">
+    <div class="rs-template-categories" id="rsTemplateCategories"></div>
+    <div class="rs-template-grid" id="rsTemplateGrid"></div>
+  </div>
+</div>
+
+<!-- ============ STORE: LISTING DETAIL ============ -->
+<div class="ah-modal hidden store-modal" id="storeModal">
+  <div class="ah-modal-card store-modal-card">
+    <div class="ah-modal-head">
+      <div>
+        <h3 id="storeDetailTitle">Listing</h3>
+        <p id="storeDetailSummary"></p>
+      </div>
+      <button class="ah-x" data-close aria-label="Close listing">✕</button>
+    </div>
+
+    <div class="store-detail-meta" id="storeDetailMeta"></div>
+    <div class="store-detail-features" id="storeDetailFeatures"></div>
+
+    <div class="store-code-head">
+      <span id="storeCodeLabel">One complete Python file</span>
+      <button class="btn-ghost sm" type="button" id="storeCopyCode">Copy code</button>
+    </div>
+    <pre class="store-code" id="storeDetailCode"></pre>
+
+    <div class="store-detail-actions">
+      <button class="btn-primary" type="button" id="storeDeployBtn">Deploy this bot</button>
+      <button class="btn-ghost" type="button" id="storeFavBtn">Save</button>
+    </div>
+    <div class="store-rating" id="storeRating"></div>
+    <div class="store-reviews" id="storeReviews"></div>
+  </div>
+</div>
+
+<!-- ============ STORE: PUBLISH A LISTING ============ -->
+<div class="ah-modal hidden store-modal" id="storePublishModal">
+  <div class="ah-modal-card store-modal-card">
+    <div class="ah-modal-head">
+      <div>
+        <h3>Publish a bot to the store</h3>
+        <p>One complete Python file. It must compile, read <code>BOT_TOKEN</code> from the environment, and contain no bot token. An owner reviews it before it goes live.</p>
+      </div>
+      <button class="ah-x" data-close aria-label="Close publish form">✕</button>
+    </div>
+
+    <div class="store-form">
+      <label class="field"><span>Title</span>
+        <input class="input-text" id="storePubTitle" maxlength="80" placeholder="Complete order tracker">
+      </label>
+      <label class="field"><span>One-line summary</span>
+        <input class="input-text" id="storePubSummary" maxlength="200" placeholder="What the bot does, in one sentence.">
+      </label>
+      <div class="store-form-row">
+        <label class="field"><span>Category</span>
+          <select class="input-text" id="storePubCategory"></select>
+        </label>
+        <label class="field"><span>Difficulty</span>
+          <select class="input-text" id="storePubDifficulty">
+            <option>Beginner</option><option selected>Intermediate</option><option>Advanced</option>
+          </select>
+        </label>
+        <label class="field"><span>Version</span>
+          <input class="input-text" id="storePubVersion" value="1.0.0" maxlength="20">
+        </label>
+      </div>
+      <label class="field"><span>Tags <small>comma separated</small></span>
+        <input class="input-text" id="storePubTags" placeholder="orders, tracking, support">
+      </label>
+      <label class="field"><span>Features <small>one per line</small></span>
+        <textarea class="input-text" id="storePubFeatures" rows="4" placeholder="Order history per buyer&#10;Status notifications&#10;Owner dashboard"></textarea>
+      </label>
+      <label class="field"><span>After deploy</span>
+        <input class="input-text" id="storePubSetup" maxlength="400" placeholder="Open Go to bot, press Start, then /panel.">
+      </label>
+      <label class="field"><span>Python file</span>
+        <textarea class="input-text store-code-input" id="storePubCode" rows="14" spellcheck="false" placeholder="# requirements: python-telegram-bot==21.4&#10;import os&#10;…"></textarea>
+      </label>
+      <div class="store-form-state" id="storePubState"></div>
+      <div class="store-form-actions">
+        <button class="btn-primary" type="button" id="storePubSubmit">Submit for review</button>
+        <button class="btn-ghost" type="button" data-close>Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STORE: MY LIBRARY ============ -->
+<div class="ah-modal hidden store-modal" id="storeLibraryModal">
+  <div class="ah-modal-card store-modal-card">
+    <div class="ah-modal-head">
+      <div>
+        <h3>My store library</h3>
+        <p>What you saved, what you deployed, and what you published.</p>
+      </div>
+      <button class="ah-x" data-close aria-label="Close library">✕</button>
+    </div>
+    <div class="store-library" id="storeLibrary"></div>
+  </div>
+</div>
+
+<!-- ============ COMMAND PALETTE / SEARCH ============ -->
+<div class="cmd-overlay hidden" id="cmdOverlay">
+  <div class="cmd-box">
+    <div class="cmd-input-row">
+      <span class="cmd-lead"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg></span>
+      <input type="text" id="cmdInput" placeholder="Search your snippets and apps…" autocomplete="off">
+      <kbd>Esc</kbd>
+    </div>
+    <div class="cmd-results" id="cmdResults">
+      <div class="cmd-empty">Start typing to search everything you've saved…</div>
+    </div>
+    <div class="cmd-foot">
+      <span>↑↓ navigate</span><span>↵ open</span><span>esc close</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ACTIVITY LOG SLIDE-IN PANEL ============ -->
+<aside class="activity-panel" id="activityPanel">
+  <div class="ap-head">
+    <h3>Activity log</h3>
+    <button class="ap-close" id="activityClose">✕</button>
+  </div>
+  <div class="ap-sub">Live security &amp; account events from this session.</div>
+  <div class="ap-list" id="activityList">
+    <div class="ap-empty">No activity yet. Events like sign-ups, OTP, and logins will appear here in real time.</div>
+  </div>
+  <button class="ap-clear" id="activityClear">Clear log</button>
+</aside>
+<div class="activity-overlay hidden" id="activityOverlay"></div>
+
+<!-- TOAST -->
+<!-- ============ MODAL: 2FA SETUP WIZARD + MANAGE ============ -->
+<div class="ah-modal hidden" id="tfaModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3 id="tfaTitle">Two-factor authentication</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <div class="ah-steps" id="tfaSteps">
+      <span class="ah-dot" data-s="1"></span><span class="ah-dot" data-s="2"></span><span class="ah-dot" data-s="3"></span><span class="ah-dot" data-s="4"></span>
+    </div>
+    <div id="tfaBody"></div>
+  </div>
+</div>
+
+<!-- ============ MODAL: CHANGE PASSWORD (Settings) ============ -->
+<div class="ah-modal hidden" id="pwModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3>Change password</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <div id="pwBody">
+      <p class="auth-hint">Confirm it's you, then choose a new password. All other devices will be signed out.</p>
+      <label class="field"><span>Current password</span><input type="password" id="cp_current" class="input-text" autocomplete="current-password"></label>
+      <label class="field"><span>New password</span><input type="password" id="cp_new" class="input-text" autocomplete="new-password"></label>
+      <div class="strength"><div id="strengthFill4"></div></div>
+      <p class="strength-label" id="strengthLabel4"></p>
+      <label class="field"><span>Confirm new password</span><input type="password" id="cp_confirm" class="input-text" autocomplete="new-password"></label>
+      <label class="field hidden" id="cpTotpRow"><span>Authenticator code (2FA)</span><input type="text" id="cp_totp" class="input-text" inputmode="numeric" maxlength="6" placeholder="6-digit code"></label>
+      <button class="btn-primary block" id="cpSubmit" onclick="submitChangePassword()">Update password</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: TELEGRAM LINK ============ -->
+<div class="ah-modal hidden" id="tgModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3 id="tgModalTitle">Connect Telegram</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <div id="tgModalBody"></div>
+  </div>
+</div>
+
+<!-- ============ MODAL: ADMIN ACTION CONFIRM ============ -->
+<div class="ah-modal hidden" id="adminModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3 id="adminModalTitle">Confirm admin action</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <p class="auth-hint" id="adminModalText"></p>
+    <button class="btn-primary block" id="adminModalGo" onclick="confirmAdminAction()">Confirm</button>
+  </div>
+</div>
+
+<!-- Long-press context menu for terminal (Copy / Paste / Select All) -->
+<div class="term-ctx" id="termCtxMenu" style="display:none">
+  <button type="button" data-act="paste">Paste</button>
+  <button type="button" data-act="copy">Copy</button>
+  <button type="button" data-act="selectAll">Select all</button>
+  <button type="button" data-act="ctrlc">Ctrl+C (stop)</button>
+  <button type="button" data-act="close" class="ctx-close">Cancel</button>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- CodeMirror 6 (self-hosted bundle, built from editor-src/). Must load
+     before pro.js, which creates the editors. -->
+<!-- CodeMirror (801KB) is deferred: it is the single largest asset on the
+     page and is not needed until an editor is actually shown. `defer` keeps
+     it off the critical path while still guaranteeing it runs before
+     DOMContentLoaded, which is what pro.js's boot waits on. -->
+<script defer src="/static/cm6.bundle.js?v=20260724m"></script>
+<!-- BEFORE pro.js: it sets window.__inTelegram and window.__tgAutoLogin,
+     which pro.js's boot path checks to decide whether to sign in first. -->
+<script src="/static/miniapp.js?v=20260729a"></script>
+<script src="/static/pro.js?v=20260908b"></script>
+<script src="/static/terminal.js?v=20260724m"></script>
+<script>
+/* Live activity — EasySell-style ticker/toasts, CodeNest copy (deploys, not money). */
+(function () {
+  var EVENTS = [
+    { name: "Rahim", handle: "@ShopBot", action: "deployed", lang: "Python", status: "live" },
+    { name: "Israt", handle: "@SupportBot", action: "is live", lang: "Python", status: "live" },
+    { name: "Karim", handle: "@QuizBot", action: "restarted", lang: "Node", status: "online" },
+    { name: "Nabila", handle: "@OrderBot", action: "installed a template", lang: "Python", status: "live" },
+    { name: "Ahad", handle: "@NewsBot", action: "went online", lang: "Python", status: "24/7" },
+    { name: "Farhan", handle: "@TicketBot", action: "deployed", lang: "Node", status: "live" },
+    { name: "Mim", handle: "@RemindBot", action: "is running 24/7", lang: "Python", status: "online" },
+    { name: "Rafi", handle: "@EchoBot", action: "connected a token", lang: "Python", status: "verified" },
+    { name: "Sadia", handle: "@PanelBot", action: "published from the store", lang: "Python", status: "live" },
+    { name: "Tanim", handle: "@FileBot", action: "auto-restarted after a crash", lang: "Python", status: "ok" },
+    { name: "Lamia", handle: "@PollBot", action: "deployed", lang: "Python", status: "live" },
+    { name: "Nayeem", handle: "@AlertBot", action: "is live", lang: "Node", status: "online" }
+  ];
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function hue(name) {
+    var n = 0;
+    for (var i = 0; i < name.length; i++) n = (n * 31 + name.charCodeAt(i)) >>> 0;
+    return 220 + (n % 80);
+  }
+  function chipHTML(ev) {
+    return '<span class="live-chip">' +
+      '<span class="live-ava" style="background:hsl(' + hue(ev.name) + ' 62% 46%)">' + esc(ev.name.charAt(0)) + '</span>' +
+      '<b>' + esc(ev.name) + '</b>' +
+      '<span>' + esc(ev.action) + '</span>' +
+      '<code>' + esc(ev.handle) + '</code>' +
+      '<em>' + esc(ev.status) + '</em>' +
+    '</span>';
+  }
+  function toastHTML(ev) {
+    return '<div class="live-toast">' +
+      '<span class="live-ava" style="background:hsl(' + hue(ev.name) + ' 62% 46%)">' + esc(ev.name.charAt(0)) + '</span>' +
+      '<div class="live-toast-copy">' +
+        '<b>' + esc(ev.name) + '</b> ' + esc(ev.action) +
+        ' <code>' + esc(ev.handle) + '</code>' +
+        '<small>just now · ' + esc(ev.lang) + ' · ' + esc(ev.status) + '</small>' +
+      '</div>' +
+    '</div>';
+  }
+  function rowHTML(ev) {
+    return '<div class="dash-live-row">' +
+      '<span class="live-ava sm" style="background:hsl(' + hue(ev.name) + ' 62% 46%)">' + esc(ev.name.charAt(0)) + '</span>' +
+      '<span class="dash-live-copy"><b>' + esc(ev.name) + '</b> ' + esc(ev.action) +
+      ' <code>' + esc(ev.handle) + '</code></span>' +
+      '<em>' + esc(ev.status) + '</em>' +
+    '</div>';
+  }
+
+  function fillTicker() {
+    var track = document.getElementById("liveTickerTrack");
+    if (!track) return;
+    var html = EVENTS.map(chipHTML).join("");
+    track.innerHTML = html + html;
+  }
+
+  var toastI = 0;
+  function pushToast() {
+    var host = document.getElementById("liveToasts");
+    if (!host) return;
+    var landing = document.getElementById("screen-landing");
+    if (landing && landing.classList.contains("hidden")) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    var ev = EVENTS[toastI % EVENTS.length];
+    toastI++;
+    var wrap = document.createElement("div");
+    wrap.innerHTML = toastHTML(ev);
+    var el = wrap.firstChild;
+    host.appendChild(el);
+    while (host.children.length > 3) host.removeChild(host.firstChild);
+    setTimeout(function () { el.classList.add("is-out"); }, 4200);
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 4800);
+  }
+
+  function fillDash() {
+    var list = document.getElementById("dashLiveList");
+    if (!list) return;
+    var start = toastI % EVENTS.length;
+    var html = "";
+    for (var i = 0; i < 5; i++) html += rowHTML(EVENTS[(start + i) % EVENTS.length]);
+    list.innerHTML = html;
+  }
+
+  function go() {
+    fillTicker();
+    fillDash();
+    pushToast();
+    setInterval(pushToast, 3200);
+    setInterval(fillDash, 6400);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", go);
+  else go();
+})();
+</script>
+<script>
+  // Safety net: never leave the user stuck on the splash — remove the
+  // booting class AND hard-hide the splash element, whatever went wrong.
+  //
+  // NOT INSIDE TELEGRAM, THOUGH. In a browser there is always a page under
+  // the splash, so uncovering it after 4s is strictly better than a spinner.
+  // In the Mini App there is nothing under it until sign-in returns a token,
+  // and on Render's free tier that takes 30-60s on a cold start. This timer
+  // was therefore uncovering an EMPTY dashboard ("Hello, User", no data) and
+  // leaving it there for the rest of the wait — the "I open it and nothing
+  // happens" report, reproduced exactly.
+  //
+  // pro.js sets __tgBootOwned when it takes charge of the splash; it clears
+  // it on success, on failure, and from its own 70s backstop, so the splash
+  // still cannot become permanent.
+  setTimeout(function () {
+    if (window.__tgBootOwned) return;
+    var h = document.documentElement;
+    if (h.classList.contains('booting')) h.classList.remove('booting');
+    var s = document.getElementById('bootSplash');
+    if (s && !s.classList.contains('hidden')) { s.classList.add('hidden'); s.style.display = 'none'; }
+  }, 4000);
+</script>
+</body>
+</html>
