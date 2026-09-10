@@ -4278,6 +4278,7 @@ async function _applyRunSpaceBotTemplate(templateId,templateName) {
     _setRunSpaceSourceMode("template");
     const selected=document.getElementById("rsSelectedTemplate");if(selected)selected.textContent=`${templateName||item.name} selected`;
     closeModal("rsTemplateModal");_rsBotAnalysis=null;_setBotWizardStage("code");
+    {const wizard=document.getElementById("rsTgSetup");if(wizard)wizard.hidden=true;}
     toast(`Deploying ${item.name}…`,"info");
     await _analyzeRunSpaceBot();
   }catch(e){toast(e.message,"error");}
@@ -4626,6 +4627,20 @@ function _reflectJobStatus(jobOrId) {
   if (seg) seg.hidden = !isSelected;
   const closeBtn = document.getElementById("btnDeselect");
   _show(closeBtn, !!isSelected || !!_composingNew);
+  const changeSourceMenuBtn = document.getElementById("btnChangeSourceInMenu");
+  if (changeSourceMenuBtn) {
+    changeSourceMenuBtn.hidden = !_composingNew;
+    if (!changeSourceMenuBtn.dataset.wired) {
+      changeSourceMenuBtn.dataset.wired = "1";
+      changeSourceMenuBtn.addEventListener("click", () => {
+        _setRunSpaceSourceMode(null);
+        _renderTemplateConfig([]);
+        const wizard = document.getElementById("rsTgSetup");
+        if (wizard) wizard.hidden = false;
+        _setBotWizardStage("code");
+      });
+    }
+  }
 
   // Breadcrumb: "RunSpace / <job>" plus a readable state chip. The old header
   // showed the literal string "RunSpace" forever — #rsTitle was never once
@@ -5216,7 +5231,7 @@ function _initWbWiring() {
   const browseTemplates=document.getElementById("rsBrowseTemplates");
   if(browseTemplates&&!browseTemplates.dataset.wired){browseTemplates.dataset.wired="1";browseTemplates.addEventListener("click",_openRunSpaceTemplates);}
   const ownCode=document.getElementById("rsUseOwnCode");
-  if(ownCode&&!ownCode.dataset.wired){ownCode.dataset.wired="1";ownCode.addEventListener("click",()=>{_setRunSpaceSourceMode("own");_renderTemplateConfig([]);_rsBotAnalysis=null;const selected=document.getElementById("rsSelectedTemplate");if(selected)selected.textContent=`${_rsTemplates.length||7} complete bot products`;_jobCmFocus();toast("Paste your Python bot code below — no template required.","info");});}
+  if(ownCode&&!ownCode.dataset.wired){ownCode.dataset.wired="1";ownCode.addEventListener("click",()=>{_setRunSpaceSourceMode("own");_renderTemplateConfig([]);_rsBotAnalysis=null;const selected=document.getElementById("rsSelectedTemplate");if(selected)selected.textContent=`${_rsTemplates.length||7} complete bot products`;const wizard=document.getElementById("rsTgSetup");if(wizard)wizard.hidden=true;_jobCmFocus();toast("Paste your Python bot code below — no template required.","info");});}
   const uploadCode=document.getElementById("rsUploadCode");
   if(uploadCode&&!uploadCode.dataset.wired){uploadCode.dataset.wired="1";uploadCode.addEventListener("click",()=>document.getElementById("rsFileInput")?.click());}
   const changeSource=document.getElementById("rsChangeSource");
@@ -8857,6 +8872,7 @@ async function _rsHandleUpload(file) {
   const selectedTemplate=document.getElementById("rsSelectedTemplate");if(selectedTemplate)selectedTemplate.textContent="7 complete bot products";
   _rsBotAnalysis=null;
   _setBotWizardStage("code");
+  const wizard = document.getElementById("rsTgSetup"); if (wizard) wizard.hidden = true;
   if (typeof _setHint === "function") _setHint("", "Loaded " + file.name);
 
   if (!lang) {
