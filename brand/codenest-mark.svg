@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="CodeNest">
+  <rect width="512" height="512" rx="116" fill="#0E1116"/>
+  <g fill="none" stroke="#5B6CFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="188,182 118,256 188,330"/>
+    <polyline points="324,182 394,256 324,330"/>
+    <line x1="286" y1="156" x2="226" y2="356"/>
+  </g>
+</svg>
