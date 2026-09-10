@@ -1,0 +1,128 @@
+<div class="dash-tab-content" id="tab-admin">
+      <div class="tab-head">
+        <div><div class="eyebrow">OWNER CONSOLE</div><h2>Admin</h2></div>
+        <div class="adm-head-right">
+          <span class="adm-hint adm-fresh" id="admFresh"></span>
+          <button class="btn-ghost sm" id="admRefresh" onclick="loadAdminPanel(true)">↻ Refresh</button>
+        </div>
+      </div>
+      <nav class="adm-section-nav" aria-label="Admin sections">
+        <a href="#admOverviewSection" class="active">Overview</a><a href="#admRunnerSection">Runners</a><a href="#admSecuritySection">Security</a><a href="#admTelegramSection">Telegram bots</a><a href="#admBotUsageSection">Bot usage</a><a href="#admAppsSection">Apps</a><a href="#admUsersSection">Users</a><a href="#admReportsSection">Reports</a><a href="#admAuditSection">Audit</a>
+      </nav>
+      <div class="adm-stats" id="admStats"></div>
+      <div class="adm-panel adm-runner-panel" id="admRunnerSection">
+        <div class="adm-panel-head"><div><h3>Runner fleet</h3><span class="adm-hint">Add or drain Render runner services without redeploying the main site</span></div><button class="btn-primary sm" id="admRunnerAddOpen">Add runner</button></div>
+        <div class="adm-stats" id="admRunnerStats"></div>
+        <div class="adm-runner-list" id="admRunners"></div>
+        <div class="adm-runner-setup" id="admRunnerSetup" hidden>
+          <h4>Add a Render runner</h4>
+          <ol><li>Render → New Web Service → connect this GitHub repository.</li><li>Set <b>Root Directory</b> to <code>runner</code>, Runtime to <b>Docker</b>, and deploy from <code>runner/Dockerfile</code>.</li><li>Generate a new secret below. Add that exact value to the new service as <code>RUNNER_SERVICE_SECRET</code>. Each admin-managed runner may use its own secret.</li><li>Add <code>PUBLIC_BASE_URL</code> with the new runner's own <code>https://…onrender.com</code> URL, then deploy.</li><li>Open <code>RUNNER_URL/health</code>. Continue only when it returns JSON with <code>"status":"ok"</code>.</li><li>Paste the base service URL (no <code>/health</code>) and the same secret here, then select <b>Test &amp; add runner</b>.</li></ol>
+          <div class="adm-runner-fields">
+            <label class="field"><span>Label</span><input class="input-text" id="admRunnerLabel" placeholder="Runner Singapore 2"></label>
+            <label class="field"><span>Service URL</span><input class="input-text" id="admRunnerUrl" type="url" placeholder="https://my-runner.onrender.com"></label>
+            <label class="field"><span>Runner secret</span><input class="input-text" id="admRunnerSecret" type="password" autocomplete="new-password" placeholder="Generate or paste the same secret"></label>
+          </div>
+          <div class="adm-runner-actions"><button class="btn-ghost" id="admRunnerGenerate">Generate secret</button><button class="btn-primary" id="admRunnerSave">Test &amp; add runner</button><button class="btn-ghost" id="admRunnerCancel">Cancel</button></div>
+          <p class="adm-hint" id="admRunnerMsg">The secret is encrypted at rest and is never shown again.</p>
+        </div>
+      </div>
+      <div class="adm-panel" id="admOverviewSection">
+        <div class="adm-panel-head"><h3>Signups · last 14 days</h3><span class="adm-hint" id="admCap"></span></div>
+        <div class="adm-spark" id="admSpark"></div>
+      </div>
+      <div class="adm-panel adm-risk-panel" id="admSecuritySection">
+        <div class="adm-panel-head">
+          <div><h3>Abuse prevention</h3><span class="adm-hint">shared IP is a signal, not proof — review accounts before blocking</span></div>
+          <button class="btn-ghost sm" id="admRiskRefresh">Refresh</button>
+        </div>
+        <div class="adm-stats" id="admRiskStats"></div>
+        <div class="adm-risk-help">
+          <b>Protection already active</b>
+          <span>Per-account, per-device and per-network job caps; signup rate limits; email verification; audited admin actions; session closure and job stop on suspension.</span>
+        </div>
+        <div class="adm-risk-grid">
+          <section><h4>Shared networks</h4><p class="adm-hint">Multiple accounts on one IP. Mobile carriers, homes and offices can be legitimate.</p><div id="admIpClusters"></div></section>
+          <section><h4>Shared devices</h4><p class="adm-hint">Same browser/device fingerprint is stronger evidence than IP alone.</p><div id="admFpClusters"></div></section>
+          <section><h4>Signup bursts</h4><p class="adm-hint">Rapid account creation is flagged for review, never auto-convicted.</p><div id="admSignupFlags"></div></section>
+        </div>
+        <div class="adm-panel-head adm-risk-block-head"><h4>Active restrictions</h4><span class="adm-hint">Blocks prevent new signups and new jobs; existing users keep access to their data.</span></div>
+        <div id="admActiveBlocks"></div>
+      </div>
+      <div class="adm-panel adm-tg-jobs-panel" id="admTelegramSection">
+        <div class="adm-panel-head"><div><h3>Telegram bots on RunSpace</h3><span class="adm-hint">detected from deployed code/env — tokens are never shown</span></div></div>
+        <div class="adm-stats" id="admTgJobStats"></div>
+        <div class="adm-tg-job-grid" id="admTgJobs"></div>
+        <div class="adm-panel-head adm-tg-history-head"><h4>Who ran what</h4><span class="adm-hint">run, update and restart history</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admTgJobEvents"></table></div>
+      </div>
+      <div class="adm-panel adm-bot-panel" id="admBotUsageSection">
+        <div class="adm-panel-head">
+          <h3>Telegram bot usage</h3>
+          <span class="adm-hint">people, actions and failures are recorded</span>
+          <select id="admBotDays" class="adm-range" aria-label="Bot usage range">
+            <option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option>
+          </select>
+          <button class="btn-ghost sm" id="admBotCsv">Download CSV</button>
+        </div>
+        <div class="adm-stats" id="admBotStats"></div>
+        <div class="adm-bot-grid">
+          <div><h4>Daily actions</h4><div class="adm-spark" id="admBotSpark"></div></div>
+          <div><h4>What people do</h4><div id="admBotCommands"></div></div>
+          <div><h4>Who used it</h4><div id="admBotPeople"></div></div>
+        </div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admBotEvents"></table></div>
+      </div>
+      <div class="adm-panel" id="admAppsSection">
+        <div class="adm-panel-head"><h3>RunSpace apps</h3><span class="adm-hint">tap an app for its full detail — code stays private</span></div>
+        <div class="adm-table-wrap"><table class="adm-table clickable" id="admJobs"></table></div>
+      </div>
+      <div class="adm-panel" id="admPackagesSection">
+        <div class="adm-panel-head"><h3>Installed packages</h3><span class="adm-hint" id="admLibsHint">by the memory of the jobs that import them</span></div>
+        <div class="adm-libs" id="admLibs"></div>
+      </div>
+      <div class="adm-panel" id="admUsersSection">
+        <div class="adm-panel-head"><h3>Users</h3><span class="adm-hint">tap a row for full account, session and linked-device details</span></div>
+        <div class="adm-table-wrap"><table class="adm-table clickable" id="admUsers"></table></div>
+      </div>
+      <div class="adm-panel" id="admReportsSection">
+        <div class="adm-panel-head"><h3>Abuse reports</h3><span class="adm-hint">sent from the public report page</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admReports"></table></div>
+      </div>
+      <div class="adm-panel" id="admAuditSection">
+        <div class="adm-panel-head"><h3>Audit log</h3><span class="adm-hint">every admin action, recorded</span></div>
+        <div class="adm-table-wrap"><table class="adm-table" id="admAudit"></table></div>
+      </div>
+    </div>
+
+<!-- Per-app detail. Opened from a row in "RunSpace apps"; lives inside the
+     admin fragment so a non-admin never receives this markup either. -->
+<div class="ah-modal hidden adm-detail-modal" id="admUserModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3 id="admUserTitle">Account</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <div id="admUserBody"></div>
+  </div>
+</div>
+
+<div class="ah-modal hidden adm-detail-modal" id="admBlockModal">
+  <div class="ah-modal-card adm-block-card">
+    <div class="ah-modal-head"><h3>Restrict abuse source</h3><button class="ah-x" data-close>✕</button></div>
+    <p class="adm-hint" id="admBlockTarget"></p>
+    <label class="field"><span>Duration</span><select class="input-text" id="admBlockDuration"><option value="24">24 hours</option><option value="168">7 days</option><option value="720">30 days</option><option value="0">Permanent</option></select></label>
+    <label class="field"><span>Reason (saved in audit log)</span><textarea class="input-text" id="admBlockReason" maxlength="300" placeholder="Example: 12 rapid signups and repeated quota evasion"></textarea></label>
+    <div class="adm-risk-warning">An IP may belong to a household, office, university or mobile carrier. Prefer suspending confirmed abusive accounts; block a network only when the evidence is clear.</div>
+    <button class="btn-primary block" id="admBlockConfirm">Apply restriction</button>
+  </div>
+</div>
+
+<div class="ah-modal hidden adm-detail-modal" id="admJobModal">
+  <div class="ah-modal-card">
+    <div class="ah-modal-head">
+      <h3 id="admJobTitle">App</h3>
+      <button class="ah-x" data-close>✕</button>
+    </div>
+    <div id="admJobBody"></div>
+  </div>
+</div>
