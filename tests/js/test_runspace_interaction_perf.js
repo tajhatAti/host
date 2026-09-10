@@ -1,0 +1,25 @@
+const fs=require('fs');
+const JS=fs.readFileSync('static/pro.js','utf8');
+const CSS=fs.readFileSync('static/app.css','utf8');
+let pass=0,fail=0;const ok=(n,c,e)=>{if(c)pass++;else{fail++;console.log(`  FAIL ${n}${e?' -> '+e:''}`)}};
+function fn(name){const start=JS.indexOf(`function ${name}(`);if(start<0)return'';const brace=JS.indexOf('{',start);let d=0;for(let i=brace;i<JS.length;i++){if(JS[i]==='{')d++;else if(JS[i]==='}'&&!--d)return JS.slice(start,i+1);}return'';}
+const swap=fn('_playSwap'),select=fn('selectJob'),load=fn('loadJobs'),render=fn('renderJobs'),reflect=fn('_reflectJobStatus'),stream=fn('restartLogStream');
+console.log('[1] click response');
+ok('cached workspace paints before detail fetch',select.indexOf('_showWorkspace(cached,false)')>=0&&select.indexOf('_showWorkspace(cached,false)')<select.indexOf('fetchJobDetail(id)'));
+ok('URL has no artificial 120ms delay',!/setTimeout[\s\S]{0,120}_updateJobUrl/.test(select));
+ok('uncached code gets an immediate loading veil',/_setJobSwitching\(true\)/.test(select)&&/rs-job-loading/.test(CSS));
+console.log('[2] no forced layout');
+ok('workspace swap never reads layout',!/(offsetWidth|offsetHeight|getBoundingClientRect)/.test(swap));
+ok('job-list render never reads layout',!/(offsetWidth|offsetHeight|getBoundingClientRect)/.test(render));
+ok('status feedback never reads layout',!/(offsetWidth|offsetHeight|getBoundingClientRect)/.test(reflect));
+ok('swap uses compositor animation',/\.animate\(\[\{opacity:/.test(swap));
+console.log('[3] bounded background work');
+ok('job loads cannot overlap',/_jobsLoadBusy/.test(load)&&/finally\s*\{\s*_jobsLoadBusy = false/.test(load));
+ok('background poll relaxed to 15 seconds',/setInterval\(loadJobs, 15000\)/.test(JS));
+ok('unchanged poll does not remount editor',!/if \(cur\) \{ _showWorkspace\(cur\)/.test(load)&&/_reflectJobStatus\(cur\)/.test(load));
+ok('SSE chrome repaint is throttled to 5 seconds',/now-_streamChromeAt>=5000/.test(stream));
+console.log('[4] calm visual design');
+ok('running dots have no infinite animation',/\.jstatus-dot\.running \{[\s\S]{0,180}animation: none/.test(CSS));
+ok('touch rows do not translate on hover',/@media \(hover:none\)[\s\S]{0,180}\.job-item:hover \{ transform:none/.test(CSS));
+ok('bot rows isolate layout and paint',/\.job-item \{\s*contain:layout paint/.test(CSS));
+console.log(`test_runspace_interaction_perf: ${pass} passed, ${fail} failed`);process.exit(fail?1:0);
