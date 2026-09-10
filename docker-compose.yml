@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # ---- Permanent storage via PostgreSQL (Supabase) ----
+      # Set DATABASE_URL to your Supabase connection string for permanent data.
+      # Leave it empty/unset to fall back to a local SQLite file (DB_PATH).
+      - DATABASE_URL=${DATABASE_URL:-}
+      # ---- SQLite fallback (used only when DATABASE_URL is unset) ----
+      - DB_PATH=/app/data/database.db
+      - BREVO_API_KEY=${BREVO_API_KEY}
+      - SENDER_EMAIL=${SENDER_EMAIL}
+      - SENDER_NAME=${SENDER_NAME:-Ahad Co}
+      - PG_SSLMODE=${PG_SSLMODE:-prefer}
+      - OTP_EXPIRY_MINUTES=10
+    volumes:
+      # Only used by the SQLite fallback; harmless when DATABASE_URL is set.
+      - app_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  app_data:
