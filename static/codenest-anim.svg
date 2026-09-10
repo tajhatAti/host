@@ -1,0 +1,204 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" preserveAspectRatio="xMidYMid meet">
+<defs>
+<style>
+  .ln { fill:none; stroke:#eaeaea; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+  .fl { fill:#eaeaea; stroke:none; }
+  svg { background:#000; display:block; }
+  /* 5s loop */
+  #la { animation: la 5s linear infinite; transform-origin: 170px 163px; }
+  #ra { animation: ra 5s linear infinite; transform-origin: 200px 163px; }
+  @keyframes la {
+    0%,35%,100% { transform:rotate(0deg) translateY(0); }
+    8%         { transform:rotate(-10deg) translateY(-4px); }
+    15%        { transform:rotate(5deg)   translateY(0); }
+    22%        { transform:rotate(-8deg)  translateY(-3px); }
+    30%        { transform:rotate(4deg)   translateY(0); }
+  }
+  @keyframes ra {
+    0%,35%,100% { transform:rotate(0deg) translateY(0); }
+    5%          { transform:rotate(8deg)  translateY(-3px); }
+    12%         { transform:rotate(-6deg) translateY(-4px); }
+    19%         { transform:rotate(6deg)  translateY(-2px); }
+    27%         { transform:rotate(-5deg) translateY(-3px); }
+  }
+  #head { animation: headBop 5s linear infinite; transform-origin: 125px 115px; }
+  @keyframes headBop {
+    0%,35%,100% { transform:translateY(0) rotate(0deg); }
+    10%         { transform:translateY(-2px) rotate(-3deg); }
+    25%         { transform:translateY(-1px) rotate(3deg); }
+    40%         { transform:rotate(10deg) translateY(-3px); }
+  }
+  #kb { animation: kb 5s linear infinite; transform-origin: 200px 202px; }
+  @keyframes kb {
+    0%,32%,100% { transform:scaleY(1); }
+    36%         { transform:scaleY(.82); }
+    38%         { transform:scaleY(1); }
+  }
+  #scrn { fill:#0a0a0a; animation: scrn 5s linear infinite; }
+  @keyframes scrn {
+    0%,34%,60%,100% { fill:#0a0a0a; }
+    37%,42%         { fill:#fff; }
+    45%             { fill:#0a0a0a; }
+  }
+  #spark { opacity:0; }
+  #spark-core {
+    cx:250; cy:178; r:3; fill:#fff;
+    animation: sparkT 5s linear infinite;
+  }
+  @keyframes sparkT {
+    0%,42%   { cx:250; cy:178; opacity:0; }
+    43%      { cx:250; cy:178; opacity:1; }
+    48%      { cx:318; cy:178; opacity:1; }
+    52%      { cx:318; cy:210; opacity:1; }
+    54%,100% { cx:318; cy:210; opacity:0; }
+  }
+  .fz { fill:#fff; opacity:0; }
+  #fz1 { animation: fz 5s linear infinite; }
+  #fz2 { animation: fz 5s linear infinite; animation-delay:.1s; }
+  #fz3 { animation: fz 5s linear infinite; animation-delay:.2s; }
+  #fz4 { animation: fz 5s linear infinite; animation-delay:.05s; }
+  @keyframes fz {
+    0%,50%,100% { opacity:0; transform:translate(0,0) scale(1); }
+    52%         { opacity:1; }
+    58%         { opacity:0; transform:translate(8px,10px) scale(.3); }
+  }
+  #rocket { animation: rocket 5s cubic-bezier(.34,1.56,.64,1) infinite; transform-origin: 318px 150px; }
+  @keyframes rocket {
+    0%,55%   { transform:translate(0,0); }
+    58%      { transform:translate(0,3px); }
+    62%      { transform:translate(0,-50px); }
+    72%      { transform:translate(0,-180px); opacity:1; }
+    82%      { transform:translate(0,-300px); opacity:0; }
+    84%,100% { transform:translate(0,0); opacity:0; }
+  }
+  #flame { opacity:0; transform-origin:318px 175px; animation: flame 5s cubic-bezier(.34,1.56,.64,1) infinite; }
+  @keyframes flame {
+    0%,54%,100% { opacity:0; transform:scale(.2); }
+    57%         { opacity:1; transform:scale(1); }
+    62%         { opacity:1; transform:scaleY(1.6) scaleX(.8); }
+    72%         { opacity:.8; transform:scaleY(2.2) scaleX(.5); }
+    80%         { opacity:0; transform:scaleY(2.8); }
+  }
+  .smk { fill:#aaa; opacity:0; }
+  #s1 { animation: smk 5s ease-out infinite; }
+  #s2 { animation: smk 5s ease-out infinite; animation-delay:.15s; }
+  #s3 { animation: smk 5s ease-out infinite; animation-delay:.3s; }
+  @keyframes smk {
+    0%,58%,100% { opacity:0; transform:translate(318px,180px) scale(.5); }
+    62%         { opacity:.45; transform:translate(318px,200px) scale(1); }
+    75%         { opacity:0; transform:translate(318px,250px) scale(2.2); }
+  }
+  #scene { animation: shake 5s linear infinite; transform-origin:200px 150px; }
+  @keyframes shake {
+    0%,59%,66%,100% { transform:translate(0,0); }
+    61% { transform:translate(-2px,1px); }
+    62% { transform:translate(2px,-1px); }
+    63% { transform:translate(-1px,2px); }
+    64% { transform:translate(1px,-2px); }
+  }
+</style>
+</defs>
+
+<g id="scene">
+  <!-- Floor -->
+  <line class="ln" x1="30" y1="245" x2="380" y2="245" />
+
+  <!-- DESK -->
+  <g>
+    <line class="ln" x1="140" y1="195" x2="280" y2="195" />
+    <line class="ln" x1="155" y1="195" x2="155" y2="245" />
+    <line class="ln" x1="265" y1="195" x2="265" y2="245" />
+    <line class="ln" x1="200" y1="195" x2="200" y2="205" />
+    <rect class="ln" x="180" y="205" width="40" height="6" rx="2" />
+    <!-- Monitor -->
+    <rect class="ln" x="160" y="125" width="90" height="68" rx="4" />
+    <rect id="scrn" x="166" y="131" width="78" height="52" rx="2" />
+    <!-- Keyboard -->
+    <g id="kb">
+      <rect class="ln" x="165" y="202" width="70" height="14" rx="3" />
+      <line class="ln" x1="172" y1="207" x2="228" y2="207" />
+      <line class="ln" x1="172" y1="211" x2="228" y2="211" />
+    </g>
+  </g>
+
+  <!-- CHAIR -->
+  <g>
+    <line class="ln" x1="105" y1="180" x2="105" y2="245" />
+    <line class="ln" x1="90"  y1="245" x2="120" y2="245" />
+    <rect class="ln" x="90" y="165" width="45" height="10" rx="3" />
+    <line class="ln" x1="135" y1="165" x2="135" y2="138" />
+    <line class="ln" x1="135" y1="138" x2="115" y2="145" />
+  </g>
+
+  <!-- STICK FIGURE (seated, elbows, hands, legs, head w/ eye) -->
+  <g>
+    <!-- Torso -->
+    <line class="ln" x1="125" y1="138" x2="138" y2="173" />
+    <!-- Thighs (seated horizontal) -->
+    <line class="ln" x1="138" y1="173" x2="110" y2="176" />
+    <line class="ln" x1="138" y1="173" x2="165" y2="180" />
+    <!-- Shins (down to floor) -->
+    <line class="ln" x1="110" y1="176" x2="110" y2="230" />
+    <line class="ln" x1="110" y1="230" x2="88"  y2="245" />
+    <line class="ln" x1="165" y1="180" x2="165" y2="235" />
+    <line class="ln" x1="165" y1="235" x2="185" y2="245" />
+    <!-- Neck -->
+    <line class="ln" x1="125" y1="138" x2="125" y2="125" />
+    <!-- Head (with eye + tiny smile) -->
+    <g id="head">
+      <circle class="ln" cx="125" cy="115" r="13" />
+      <circle class="fl" cx="131" cy="113" r="1.6" />
+      <path class="ln" d="M127 120 Q130 123 133 120" />
+    </g>
+    <!-- Upper arms (anchored, mostly still) -->
+    <line class="ln" x1="127" y1="145" x2="170" y2="163" />
+    <line class="ln" x1="129" y1="148" x2="200" y2="163" />
+    <!-- Forearms (animated typing) -->
+    <g id="la">
+      <line class="ln" x1="170" y1="163" x2="180" y2="200" />
+      <circle class="fl" cx="180" cy="202" r="2.6" />
+    </g>
+    <g id="ra">
+      <line class="ln" x1="200" y1="163" x2="215" y2="200" />
+      <circle class="fl" cx="215" cy="202" r="2.6" />
+    </g>
+  </g>
+
+  <!-- Wire from monitor edge to rocket pad (dashed) -->
+  <path class="ln" d="M250 178 L318 178 L318 215" stroke-dasharray="2 4" opacity=".55" />
+
+  <!-- ROCKET on launch pad -->
+  <g id="rocket">
+    <path class="ln" d="M318 105 L307 125 L329 125 Z" />
+    <rect class="ln" x="307" y="125" width="22" height="50" />
+    <circle class="ln" cx="318" cy="140" r="4.5" />
+    <circle class="fl" cx="318" cy="140" r="2.2" fill="#f59e0b"/>
+    <path class="ln" d="M307 165 L297 182 L307 180 Z" />
+    <path class="ln" d="M329 165 L339 182 L329 180 Z" />
+    <rect class="ln" x="313" y="175" width="10" height="6" />
+    <!-- Flame -->
+    <g id="flame">
+      <path class="fl" d="M312 182 Q 315 200 318 210 Q 321 200 324 182 Z" />
+      <path class="fl" d="M314 185 Q 318 200 322 185" opacity=".55" />
+    </g>
+    <!-- Pad -->
+    <line class="ln" x1="300" y1="215" x2="340" y2="215" />
+    <line class="ln" x1="305" y1="215" x2="305" y2="245" />
+    <line class="ln" x1="335" y1="215" x2="335" y2="245" />
+  </g>
+
+  <!-- Spark (point of light) -->
+  <circle id="spark-core" />
+
+  <!-- Fizzle particles -->
+  <circle class="fz" id="fz1" cx="318" cy="180" r="2" />
+  <circle class="fz" id="fz2" cx="318" cy="180" r="1.4" />
+  <circle class="fz" id="fz3" cx="318" cy="180" r="2" />
+  <circle class="fz" id="fz4" cx="318" cy="180" r="1.4" />
+
+  <!-- Smoke trail puffs -->
+  <circle class="smk" id="s1" cx="318" cy="185" r="10" />
+  <circle class="smk" id="s2" cx="318" cy="185" r="8" />
+  <circle class="smk" id="s3" cx="318" cy="185" r="12" />
+</g>
+</svg>
