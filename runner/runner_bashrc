@@ -1,0 +1,40 @@
+# ~/.bashrc for Ahad Co Termux shell (running as root in the container)
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+
+shopt -s checkwinsize cdspell histappend
+HISTSIZE=10000; HISTFILESIZE=20000; HISTCONTROL=ignoreboth:erasedups
+
+# Minimal Termux-style prompt: "~$ " in HOME, "dirname$ " elsewhere. # when root.
+PS1='\W\$ '
+
+# Colors for ls/grep (keep it light, no noise)
+if [ -x /usr/bin/dircolors ]; then
+    eval "$(dircolors -b 2>/dev/null)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+fi
+
+alias ll='ls -laFh'; alias la='ls -A'; alias l='ls -CF'
+alias ..='cd ..'; alias ...='cd ../..'; alias cls='clear'
+alias py='python3'
+alias pipu='pip install --user --upgrade'
+alias pkg='apt-get'
+alias apt='apt-get'
+
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PYTHONUSERBASE="$HOME/.local"; export PIP_USER=1
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+export LANG=C.UTF-8; export LC_ALL=C.UTF-8
+export TERM=xterm-256color
+export EDITOR=nano; export PAGER=less
+
+mkdir -p "$HOME/.local/bin" "$HOME/.npm-global" "$HOME/projects" 2>/dev/null
+
+# Tiny welcome (nothing else)
+if [ -z "$AHAD_WELCOMED" ]; then
+    export AHAD_WELCOMED=1
+    printf '\033[37mMini Terminal (24/7 mode)\r\n\033[90mFiles auto-snapshot to your account — redeploys never lose data.\r\nCommands in \033[37m~/.ahad_autostart\033[90m run 24/7 in the background and auto-restart on crash (TG/Discord bots live here — nohup/& দরকার নাই).\r\nLogs: \033[37m~/.ahad_autostart.log\033[90m\r\n\033[0m'
+fi
