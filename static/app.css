@@ -4472,36 +4472,38 @@ html.tg-no-auth body > #screen-forgot3 { display:none !important; }
    previous brief, and deleting it would hide why the values changed.
    ══════════════════════════════════════════════════════════════════════ */
 :root {
-  /* Surfaces — kei dark. */
-  --bg:        #090b10;
-  --bg-deep:   #05070c;
-  --bg-2:      #0d1017;
-  --bg-3:      #181d28;
-  --bar:       #0d1017;
-  --card:      #10131b;
-  --card-2:    #181d28;
-  --line:      #1e2431;
-  --line-2:    #2a3242;
+  /* Surfaces — exact hex spec, matching the rest of the site now (this
+     used to be a second, independent dark ramp that disagreed slightly
+     with the root fix above). */
+  --bg:        #0F0F11;
+  --bg-deep:   #0A0A0B;
+  --bg-2:      #151517;
+  --bg-3:      #1E1E22;
+  --bar:       #151517;
+  --card:      #1E1E22;
+  --card-2:    #232327;
+  --line:      #27272A;
+  --line-2:    #33333a;
 
   /* Ink */
-  --fg:        #edf0f6;
-  --fg-2:      #b9c1d0;
-  --fg-3:      #8993a5;
-  --fg-4:      #8993a5;
-  --fg-off:    #5b6577;
+  --fg:        #FFFFFF;
+  --fg-2:      #d4d4d8;
+  --fg-3:      #A1A1AA;
+  --fg-4:      #A1A1AA;
+  --fg-off:    #71717a;
 
-  /* ONE accent: indigo, and the SAME value in both themes. The reference
-     lightens it to #6366f1 on dark; measured against white label text that
-     is 4.46:1, one hundredth under the AA floor, so the filled button keeps
-     #4f46e5 (6.31:1) everywhere. The lighter tint survives as --acc-bright
-     for glow and icon tints, where no text sits on top of it. */
-  --acc:       #4f46e5;
-  --acc-fg:    #ffffff;
+  /* ONE accent: white slab, dark text — matches every other surface now.
+     This used to be a second, independent indigo definition (#4f46e5) that
+     silently won the cascade over the root fix above for anything outside
+     .auth (dashboard, the connect/source wizard) — that's why Verify bot /
+     Deploy bot kept rendering indigo after auth was already fixed. */
+  --acc:       #ffffff;
+  --acc-fg:    #0F0F11;
   --accent:    var(--acc);
-  --acc-bright:#6366f1;
-  --acc-soft:  rgb(99 102 241 / .16);
-  --ring:      rgb(99 102 241 / .5);
-  --chart-grid:#1a202d;
+  --acc-bright:#ffffff;
+  --acc-soft:  rgb(255 255 255 / .08);
+  --ring:      rgb(255 255 255 / .25);
+  --chart-grid:#27272A;
 
   /* Status — emerald / amber / rose, only where colour means something. */
   --ok:        #10b981;
@@ -4522,7 +4524,7 @@ html.tg-no-auth body > #screen-forgot3 { display:none !important; }
   --e2: var(--shadow-lift);
   --e3: 0 20px 48px -18px rgb(16 24 40 / .45);
   --rim: inset 0 1px 0 rgb(255 255 255 / .04);
-  --glow: 0 0 24px rgb(99 102 241 / .35);   /* decorative only, never behind text */
+  --glow: 0 0 24px rgb(255 255 255 / .18);   /* decorative only, never behind text */
 
   /* Type: display face for headings, Inter for everything else. */
   --display: 'Space Grotesk', 'Inter', var(--ui);
@@ -4550,35 +4552,12 @@ html.tg-no-auth body > #screen-forgot3 { display:none !important; }
    layers on top of each other" look reported. Pure dark means no glow. */
 #screen-landing, .auth { position: relative; isolation: isolate; }
 
-/* ── LIGHT surfaces: the landing page and the auth screens ──────────────
-   Scoped, not global: the app stays dark, the shop window goes light —
-   exactly how the reference dashboard defaults to light. */
-#screen-landing, .auth {
-  --bg:        #f3f4f7;
-  --bg-deep:   #0d1117;   /* the terminal transcript stays a console */
-  --bg-2:      #ffffff;
-  --bg-3:      #edeff3;
-  --bar:       #ffffff;
-  --card:      #ffffff;
-  --card-2:    #edeff3;
-  --line:      #e2e5eb;
-  --line-2:    #d3d8e0;
-  --fg:        #0d1420;
-  --fg-2:      #3d4757;
-  --fg-3:      #5e6a7a;
-  --fg-4:      #5e6a7a;
-  --fg-off:    #9aa3b2;
-  --acc:       #4f46e5;
-  --acc-soft:  rgb(79 70 229 / .10);
-  --ring:      rgb(79 70 229 / .4);
-  --ok:        #059669;
-  --warn:      #b45309;
-  --danger:    #e11d48;
-  --shadow-soft: 0 1px 2px rgb(16 24 40 / .05);
-  --shadow-lift: 0 16px 40px -16px rgb(16 24 40 / .25);
-  color-scheme: light;
-}
-
+/* Dead code removed here: a light-theme block for #screen-landing/.auth
+   (white bg, indigo #4f46e5 accent) that's now fully superseded by the
+   dark overrides for both selectors elsewhere in this file. Kept showing
+   up as a stray indigo source whenever a new property wasn't yet
+   re-overridden downstream — deleting it outright instead of chasing
+   every property one at a time. */
 /* ── Typography ──────────────────────────────────────────────────────── */
 h1, h2, h3, .hero-title, .auth-head h2, .store-head-copy h1,
 .auth-aside-copy h1, .welcome h1, .dash-tab-content > h2 {
@@ -4624,7 +4603,7 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px var(--ring);
 }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-::selection { background: rgb(99 102 241 / .22); }
+::selection { background: rgb(255 255 255 / .22); }
 
 /* ── Cards ───────────────────────────────────────────────────────────── */
 .card, .stat-card, .quick-card, .feat-card, .auth-card, .feat, .adm-panel,
@@ -5024,7 +5003,7 @@ body:has(#screen-landing:not(.hidden)) {
   font-family: var(--mono);
   font-size: var(--fs-2);
   color: var(--acc);
-  background: var(--acc-soft, rgb(79 70 229 / .10));
+  background: var(--acc-soft, rgb(255 255 255 / .1));
   padding: 2px 7px;
   border-radius: 999px;
 }
