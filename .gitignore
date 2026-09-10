@@ -1,0 +1,85 @@
+# ===========================================
+# Git Ignore - Ahad Co
+# ===========================================
+
+# Environment variables (NEVER commit .env)
+.env
+.env.local
+.env.production
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# Node (if you use it later)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Render
+.data/
+tests/e2e/pydeps/
+
+# CodeMirror 6 build deps (the built bundle in static/ IS committed)
+editor-src/node_modules/
+
+# Scratch: reference images pulled while designing, not part of the app
+image-search/
+.arena-shots/
+/20260906_173816.jpg
+/Screenshot_*.jpg
+
+# Local dependency trees (the sandbox wipes .venv/node_modules between turns)
+.pydeps/
+.jsdeps/
+.github/workflows/
