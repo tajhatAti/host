@@ -3092,7 +3092,12 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   // ⚡ Always-On Jobs wiring
   const btnStartJob = document.getElementById("btnStartJob");
-  if (btnStartJob) btnStartJob.addEventListener("click", startJob);
+  if (btnStartJob) {
+    // Runs in the CAPTURE phase — fires before the real startJob listener
+    // below, so it can stop the click before anything deploys.
+    btnStartJob.addEventListener("click", _requirementsGate, true);
+    btnStartJob.addEventListener("click", startJob);
+  }
   const jobLogClose = document.getElementById("jobLogClose");
   if (jobLogClose) jobLogClose.addEventListener("click", () => { deselectJob(); });
   // (RunSpace log controls are wired in _initIDEWiring to avoid double-binding)
@@ -3670,6 +3675,60 @@ function _jobCmGetValue() {
   const ta = document.getElementById("jobCode");
   const raw = _jobCm ? _jobCm.getValue() : (ta ? ta.value : "");
   return _applyRequirementsBoxToCode(raw);
+}
+
+// Python standard library — anything in here never needs a pip install.
+// Not exhaustive, but covers what bot code actually imports in practice.
+const _PY_STDLIB = new Set(("os,sys,time,re,io,json,math,random,string,typing,"
+  + "datetime,sqlite3,collections,itertools,functools,threading,subprocess,"
+  + "socket,http,urllib,pathlib,logging,asyncio,dataclasses,enum,csv,base64,"
+  + "hashlib,hmac,uuid,shutil,tempfile,glob,textwrap,unittest,argparse,"
+  + "configparser,pickle,copy,warnings,traceback,inspect,contextlib,abc,"
+  + "struct,signal,platform,getpass,zipfile,gzip,tarfile,ftplib,smtplib,"
+  + "email,xml,html,decimal,fractions,statistics,array,queue,multiprocessing,"
+  + "ctypes,ssl,ipaddress,secrets,operator,heapq,bisect,codecs,locale,gc,"
+  + "traceback,weakref,importlib,sched").split(","));
+// Import name -> actual pip package name, where they differ.
+const _PKG_NAME_MAP = {
+  PIL: "Pillow", cv2: "opencv-python", bs4: "beautifulsoup4", yaml: "PyYAML",
+  dotenv: "python-dotenv", Crypto: "pycryptodome", jwt: "PyJWT",
+  dateutil: "python-dateutil", sklearn: "scikit-learn", telegram: "python-telegram-bot",
+};
+function _scanForExternalPackages(code) {
+  const found = new Set();
+  const re = /^\s*(?:import\s+([a-zA-Z0-9_]+)|from\s+([a-zA-Z0-9_]+)\s+import)/gm;
+  let m;
+  while ((m = re.exec(code || ""))) {
+    const mod = m[1] || m[2];
+    if (mod && !_PY_STDLIB.has(mod)) found.add(_PKG_NAME_MAP[mod] || mod);
+  }
+  return Array.from(found);
+}
+
+// Fires before startJob on every Run click. Lets code that needs nothing
+// external run immediately — only interrupts when there's something to
+// actually suggest, and only once (filling the box is what lets the
+// next click through).
+let _reqGateSuggested = false;
+function _requirementsGate(e) {
+  const lang = document.getElementById("jobLang");
+  if (lang && lang.value && lang.value !== "python") return; // scanner is Python-only for now
+  const box = document.getElementById("jobRequirements");
+  if (!box) return;
+  if (box.value.trim()) { _reqGateSuggested = false; return; } // user already has something — trust it
+  const code = _jobCm ? _jobCm.getValue() : (document.getElementById("jobCode") || {}).value || "";
+  const externals = _scanForExternalPackages(code);
+  if (!externals.length) return; // nothing external — run goes straight through
+  if (_reqGateSuggested) { _reqGateSuggested = false; return; } // suggestion already shown once — let this click run
+  e.preventDefault(); e.stopImmediatePropagation();
+  box.value = externals.join(", ");
+  const row = document.getElementById("rsReqRow");
+  const chip = document.getElementById("rsReqChip");
+  if (row) row.style.display = "flex";
+  if (chip) chip.setAttribute("aria-expanded", "true");
+  box.focus(); box.select();
+  toast(`Looks like this needs: ${externals.join(", ")} — check it and hit Run again.`, "info");
+  _reqGateSuggested = true;
 }
 
 function _jobCmFocus() {
