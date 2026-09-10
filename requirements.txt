@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+httpx
+bcrypt
+pydantic
+requests
+email-validator
+pyotp
+qrcode[pil]
+gunicorn
+# PostgreSQL driver (Supabase / managed Postgres). Only loaded when DATABASE_URL
+# is set; without it the app falls back to SQLite (no extra setup needed locally).
+psycopg2-binary
+# Ed25519 verification of Telegram's `signature` field (third-party validation).
+# Used ONLY to diagnose a failed Mini App sign-in, never to accept one: it is
+# the single check that can tell "our bot token's secret is wrong" apart from
+# "this payload was signed for a different bot", because it needs the public
+# bot id and not the token. Absent, the diagnosis degrades to "unavailable"
+# and nothing else changes.
+cryptography
