@@ -1436,6 +1436,41 @@ body.signed-out-in .hero {
 }
 .rs-split   { flex-direction: column; }
 .rs-divider { height: 1px; background: var(--line); flex: 0 0 auto; }
+
+/* Code/Output tabs: one pane fills the whole space at a time instead of
+   both panes always being stacked and squeezed on a phone screen — that
+   squeeze is what read as "one thing sitting on top of another". */
+.rs-view-tabs {
+  display: flex; gap: 2px; padding: 0 var(--s3) var(--s2);
+  flex: 0 0 auto;
+}
+.rs-view-tab {
+  flex: 1; border: none; background: var(--bar); color: var(--fg-3);
+  font-size: var(--t-sm); font-weight: 600; padding: 7px; cursor: pointer;
+}
+.rs-view-tab:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.rs-view-tab:last-child  { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.rs-view-tab.is-active { background: var(--card-2); color: var(--fg); }
+.rs-split:not(.show-output) .rs-logs,
+.rs-split:not(.show-output) .rs-divider { display: none; }
+.rs-split.show-output .rs-editor { display: none; }
+.rs-split.show-output .rs-logs { flex: 1 1 auto; }
+
+/* Requirements: collapsed by default, one tap from the header chip — not
+   a permanent row, but never three taps deep in a menu either. */
+.rs-req-row {
+  display: none; align-items: center; gap: var(--s-2);
+  padding: var(--s-2) var(--s3); margin: 0 var(--s3) var(--s2);
+  background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  flex: 0 0 auto;
+}
+.rs-req-label { font-size: var(--t-xs); color: var(--fg-3); flex: 0 0 auto; }
+.rs-req-input {
+  flex: 1; background: transparent; border: none; color: var(--fg);
+  font-family: var(--mono); font-size: var(--t-sm); padding: 0;
+}
+.rs-req-input:focus { outline: none; }
+.rs-req-chip[aria-expanded="true"] { background: var(--card); border-color: var(--line-2); color: var(--fg); }
 .rs-tb      { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) var(--s3);
               background: var(--bar); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .rs-ws      { flex: 1 1 auto; }
