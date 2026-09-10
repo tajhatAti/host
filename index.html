@@ -937,6 +937,15 @@
               <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M7.25 2.75a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5Z"/></svg>
               <span class="rs-seg-label">Add Bot 🤖</span>
             </button>
+            <!-- Only meaningful while composing a NEW bot (the wizard is
+                 hidden once "Own code" is chosen — see the ownCode click
+                 handler — so this is the one way back to "choose source"
+                 without leaving the editor entirely). Toggled by
+                 _composingNew in refreshRunSpaceUI. -->
+            <button class="rs-menu-item" id="btnChangeSourceInMenu" role="menuitem" hidden>
+              <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg>
+              <span class="rs-seg-label">Change source</span>
+            </button>
             <!-- "Job list" REMOVED from this menu. The header already has a
                  dedicated hamburger button (#wbMenuBtn) whose only job is to
                  show the job list, and it sits three centimetres to the left
