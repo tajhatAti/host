@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" preserveAspectRatio="xMidYMid meet">
+<!-- CodeNest brand mark — rocket launch loop (replaces {N}/rocket glyph) -->
+<defs>
+<style>
+  .ln { fill:none; stroke:#fff; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+  .fl { fill:#fff; stroke:none; }
+  .dot { fill:#f59e0b; stroke:none; }
+  #body { transform-origin:16px 14px; animation: bob 4s ease-in-out infinite; }
+  @keyframes bob {
+    0%,40%,100% { transform:translateY(0); }
+    45% { transform:translateY(.5px); }
+  }
+  #spark-c {
+    cx:3; cy:26; r:1.2; fill:#fff;
+    animation: spark 4s linear infinite;
+  }
+  @keyframes spark {
+    0%,30%   { cx:3; cy:26; opacity:0; }
+    32%      { cx:3; cy:26; opacity:1; }
+    40%      { cx:11; cy:26; opacity:1; }
+    43%      { cx:13; cy:20; opacity:1; }
+    46%,100% { cx:13; cy:20; opacity:0; }
+  }
+  .fz { fill:#fff; opacity:0; }
+  #fz1 { animation: fz 4s linear infinite; }
+  #fz2 { animation: fz 4s linear infinite; animation-delay:.08s; }
+  #fz3 { animation: fz 4s linear infinite; animation-delay:.16s; }
+  @keyframes fz {
+    0%,44%,100% { opacity:0; transform:translate(0,0) scale(1); }
+    47%         { opacity:1; }
+    55%         { opacity:0; transform:translate(2px,3px) scale(.2); }
+  }
+  #rocket-g { animation: launch 4s cubic-bezier(.34,1.56,.64,1) infinite; transform-origin:16px 16px; }
+  @keyframes launch {
+    0%,48%   { transform:translate(0,0); }
+    52%      { transform:translate(0,1px); }
+    57%      { transform:translate(0,-4px); }
+    66%      { transform:translate(0,-14px); opacity:1; }
+    75%      { transform:translate(0,-26px); opacity:0; }
+    78%,100% { transform:translate(0,0); opacity:0; }
+  }
+  #flame-g { opacity:0; transform-origin:16px 20px; animation: flame 4s cubic-bezier(.34,1.56,.64,1) infinite; }
+  @keyframes flame {
+    0%,47%,100% { opacity:0; transform:scale(.2); }
+    50%         { opacity:1; transform:scale(1); }
+    57%         { opacity:1; transform:scaleY(1.5) scaleX(.75); }
+    68%         { opacity:.7; transform:scaleY(2) scaleX(.45); }
+    74%         { opacity:0; transform:scaleY(2.4); }
+  }
+  .smk { fill:#e6d5b8; opacity:0; }
+  #sm1 { animation: smk 4s ease-out infinite; }
+  #sm2 { animation: smk 4s ease-out infinite; animation-delay:.12s; }
+  @keyframes smk {
+    0%,50%,100% { opacity:0; transform:translate(16px,21px) scale(.4); }
+    55%         { opacity:.4; transform:translate(16px,23px) scale(.8); }
+    70%         { opacity:0; transform:translate(16px,28px) scale(1.8); }
+  }
+  #pad { animation: shake 4s linear infinite; }
+  @keyframes shake {
+    0%,53%,60%,100% { transform:translate(0,0); }
+    55% { transform:translate(-.6px,.3px); }
+    56% { transform:translate(.6px,-.3px); }
+    57% { transform:translate(-.4px,.5px); }
+  }
+</style>
+</defs>
+
+<path class="ln" d="M3 27 L13 27 L13 22" stroke-dasharray="1.5 2" opacity=".5"/>
+
+<circle id="spark-c"/>
+<circle class="fz" id="fz1" cx="13" cy="20" r="1.2"/>
+<circle class="fz" id="fz2" cx="13" cy="20" r=".8"/>
+<circle class="fz" id="fz3" cx="13" cy="20" r="1"/>
+
+<g id="rocket-g">
+  <g id="body">
+    <path class="ln" d="M16 6 L12 13 L20 13 Z"/>
+    <rect class="ln" x="12" y="13" width="8" height="9" rx=".3"/>
+    <circle class="ln" cx="16" cy="17" r="1.8"/>
+    <circle class="dot" cx="16" cy="17" r="1"/>
+    <path class="ln" d="M12 20 L10 23 L12 22 Z"/>
+    <path class="ln" d="M20 20 L22 23 L20 22 Z"/>
+    <rect class="ln" x="14.5" y="22" width="3" height="1.6" rx=".3"/>
+  </g>
+  <g id="flame-g">
+    <path class="fl" d="M14.4 23.6 Q 15.5 28 16 30 Q 16.5 28 17.6 23.6 Z"/>
+    <path class="fl" d="M15 24 Q 16 27.5 17 24" opacity=".5"/>
+  </g>
+</g>
+
+<circle class="smk" id="sm1" cx="16" cy="23" r="2.5"/>
+<circle class="smk" id="sm2" cx="16" cy="23" r="2"/>
+
+<g id="pad">
+  <line class="ln" x1="11" y1="27" x2="21" y2="27"/>
+  <line class="ln" x1="12" y1="27" x2="12" y2="30"/>
+  <line class="ln" x1="20" y1="27" x2="20" y2="30"/>
+</g>
+</svg>
