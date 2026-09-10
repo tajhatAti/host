@@ -4497,36 +4497,22 @@ html.tg-no-auth body > #screen-forgot3 { display:none !important; }
    white paper. Retuned onto the same colours so they stop reading as a
    different product sitting inside this one. */
 #tab-jobs, .code-studio, .workbench, #tab-jobs .jd {
-  --bg:     #090b10;
-  --bg-2:   #10131b;
-  --bg-3:   #181d28;
-  --line:   #1e2431;
-  --line-2: #2a3242;
-  --fg:     #edf0f6;
+  --bg:     #0F0F11;
+  --bg-2:   #151517;
+  --bg-3:   #1E1E22;
+  --line:   #27272A;
+  --line-2: #33333a;
+  --fg:     #FFFFFF;
 }
 
-/* ── Ambient aurora. Two soft radial washes, no blur, no image. ───────── */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(50rem 26rem at 82% -10%, rgb(99 102 241 / .15), transparent 65%),
-    radial-gradient(38rem 22rem at 6% -14%, rgb(14 165 233 / .09), transparent 60%);
-}
-/* The marketing surfaces are light, so they carry the light wash. */
-#screen-landing::before, .auth::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(50rem 26rem at 82% -10%, rgb(79 70 229 / .08), transparent 65%),
-    radial-gradient(38rem 22rem at 6% -14%, rgb(16 185 129 / .06), transparent 60%);
-}
+/* Removed: same reasoning as the auth/landing wash below — a colored glow
+   tuned for a light page now reads as a mismatched patch on pure dark
+   (#0F0F11). Pure dark, no glow, everywhere. */
+/* Removed: this radial-gradient wash (indigo + emerald) was tuned to sit
+   almost invisibly on a WHITE auth/landing background. Now that those
+   surfaces are pure dark (#0F0F11), the same wash reads as a distinct
+   colored patch floating behind the card — exactly the "floating box /
+   layers on top of each other" look reported. Pure dark means no glow. */
 #screen-landing, .auth { position: relative; isolation: isolate; }
 
 /* ── LIGHT surfaces: the landing page and the auth screens ──────────────
@@ -5212,6 +5198,16 @@ html.tg-no-auth .live-strip { display: none !important; }
   --fg-3:      #A1A1AA;
   --fg-4:      #A1A1AA;
   --fg-off:    #71717a;
+  /* These four were never overridden here, so they fell through from the
+     stale light block above (--acc: #4f46e5 indigo) — that's why Sign in
+     rendered purple instead of the white slab every screenshot showed. */
+  --acc:       #ffffff;
+  --acc-fg:    #0F0F11;
+  --acc-soft:  rgb(255 255 255 / .08);
+  --ring:      rgb(255 255 255 / .25);
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / .3);
+  --shadow-lift: 0 16px 40px -16px rgb(0 0 0 / .5);
+  --glow: 0 0 24px rgb(255 255 255 / .18);
   color-scheme: dark;
 }
 .auth .link,
