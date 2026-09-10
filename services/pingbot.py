@@ -908,11 +908,29 @@ def handle_update(upd):
                          display_name=_tg_display(cb.get("message", {})),
                          telegram_user_id=cb.get("from", {}).get("id"),
                          user_id=_row_id(linked))
-            if linked:
-                handle_callback(chat_id, data)
-            else:
-                event["outcome"] = "refused"
-            _tg("answerCallbackQuery", callback_query_id=cb["id"])
+            # Telegram requires answerCallbackQuery within ~30s or the
+            # button sits in a spinner / looks unresponsive on the user's
+            # phone. This used to run AFTER handle_callback with no
+            # try/finally, so any exception in handle_callback (a runner
+            # timeout, a job already deleted, a network hiccup) skipped
+            # the answer entirely — "the button sometimes doesn't work",
+            # intermittent because it only happened when the action
+            # itself failed. Now it's answered no matter what.
+            try:
+                if linked:
+                    handle_callback(chat_id, data)
+                else:
+                    event["outcome"] = "refused"
+                _tg("answerCallbackQuery", callback_query_id=cb["id"])
+            except Exception as cb_exc:
+                event["outcome"] = "error"
+                event["error"] = f"{type(cb_exc).__name__}: {cb_exc}"
+                try:
+                    _tg("answerCallbackQuery", callback_query_id=cb["id"],
+                        text="Something went wrong — try again.", show_alert=False)
+                except Exception:
+                    logger.exception("Could not even answer the callback query")
+                raise
     except Exception as exc:
         event["outcome"] = "error"
         event["error"] = f"{type(exc).__name__}: {exc}"
