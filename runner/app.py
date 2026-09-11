@@ -1685,6 +1685,14 @@ def _spawn(j: dict) -> None:
     if j.get("port"):
         env["PORT"] = str(j["port"])
         env["HOST"] = "0.0.0.0"
+        # Same public address routes/runner_client.py hands back to the
+        # dashboard as "web_url" (base + "/live/{slug}/") — exposed to the
+        # job itself so its own code can build links to its live page
+        # instead of hardcoding a domain.
+        if j.get("web_slug"):
+            env["WEB_SLUG"] = j["web_slug"]
+        if PUBLIC_BASE_URL:
+            env["PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     proc = subprocess.Popen(
         cmd, cwd=j["dir"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,  # merged, VPS-style
