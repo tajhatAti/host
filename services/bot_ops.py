@@ -70,7 +70,8 @@ def list_apps(user_id: int) -> list:
     conn = get_db_connection()
     try:
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, name, language, runner_job_id, worker_url, desired_state, created_at "
+            "SELECT id, name, language, runner_job_id, worker_url, desired_state, created_at, "
+            "telegram_bot_username "
             "FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,)
         ).fetchall()]
     finally:
@@ -410,12 +411,21 @@ def create_app(user_id: int, name: str, language: str, code: str) -> dict:
 
     info = resp.json()
     now = now_utc_str()
+    # Same detection the website's Connect step does — getMe against a token
+    # found in the pasted code. Never blocks the deploy: unverified/no token
+    # just means no "Open your bot" button later, not a rejected deploy.
+    from services import telegram_detector
+    bot_meta = telegram_detector.inspect_bot(code)
     conn = get_db_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,'running',?,?,?)",
-            (user_id,clean,language,code,info["id"],getattr(resp,"placed_on",None),None,now,now))
+            "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,"
+            "telegram_bot_detected,telegram_bot_username,telegram_bot_id,telegram_check_status,telegram_verified_at,"
+            "created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?)",
+            (user_id,clean,language,code,info["id"],getattr(resp,"placed_on",None),None,
+             1 if bot_meta.get("detected") else 0, bot_meta.get("username"), bot_meta.get("bot_id"),
+             bot_meta.get("check_status"), bot_meta.get("verified_at"), now,now))
         conn.commit()
         job_db_id = cursor.lastrowid
     finally:
@@ -423,6 +433,7 @@ def create_app(user_id: int, name: str, language: str, code: str) -> dict:
 
     web = runner_client._job_web_fields(info, getattr(resp, "placed_on", None))
     return {"ok": True, "name": clean, "job_db_id": job_db_id,
+            "telegram_bot_username": bot_meta.get("username") if bot_meta.get("check_status") == "verified" else None,
             "web": web.get("web") or web.get("web_url")}
 
 
@@ -439,13 +450,24 @@ def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict
     rid = row.get("runner_job_id")
     lang = language or row["language"]
     now = now_utc_str()
+    from services import telegram_detector
+    bot_meta = telegram_detector.inspect_bot(code)
     conn = get_db_connection()
     try:
-        conn.execute("UPDATE jobs SET code = ?, language = ?, updated_at = ? WHERE id = ?",
-                     (code, lang, now, row["id"]))
+        conn.execute(
+            "UPDATE jobs SET code = ?, language = ?, updated_at = ?, "
+            "telegram_bot_detected = ?, telegram_bot_username = ?, telegram_bot_id = ?, "
+            "telegram_check_status = ?, telegram_verified_at = ? WHERE id = ?",
+            (code, lang, now,
+             1 if bot_meta.get("detected") else 0, bot_meta.get("username"), bot_meta.get("bot_id"),
+             bot_meta.get("check_status"), bot_meta.get("verified_at"), row["id"]))
         conn.commit()
     finally:
         conn.close()
+    # Reflect the fresh detection in the row we return — callers (like the
+    # chat bot's "Open your bot" button) read this immediately, before any
+    # separate re-fetch would see the UPDATE above.
+    row["telegram_bot_username"] = bot_meta.get("username") if bot_meta.get("check_status") == "verified" else None
 
     env = _row_env(row)
 
