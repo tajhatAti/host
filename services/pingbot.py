@@ -753,10 +753,14 @@ def handle_pending_code(chat_id, msg, pending):
             _send(chat_id, f"❌ {res['error']}")
             return
         url = res.get("web") or ""
+        note = ""
+        if not res.get("telegram_bot_username"):
+            note = "\n⚠️ Couldn't verify a Telegram bot token in this code — no “Open your bot” button yet."
         _send(chat_id, f"✅ *{res['name']}* created and running ({lang}).\n"
-                       + (url + "\n" if url else "")
-                       + f"`/status {res['name']}` for details.",
-              reply_markup=_app_buttons(res["job_db_id"], url=url))
+                       + (url + "\n" if url else "") + note
+                       + f"\n`/status {res['name']}` for details.",
+              reply_markup=_app_buttons(res["job_db_id"], url=url,
+                                         bot_username=res.get("telegram_bot_username") or ""))
     else:
         # /update never changes the runtime on its own — a .js file dropped
         # onto a python app would silently swap what it runs. Only apply the
