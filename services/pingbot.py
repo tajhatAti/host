@@ -429,7 +429,7 @@ def handle_ping(chat_id, text):
 
 
 # ==================== APP BUTTONS ====================
-def _app_buttons(job_id, url=""):
+def _app_buttons(job_id, url="", bot_username=""):
     """Buttons keyed on the SITE job id, not the runner id.
 
     The runner id changes when a job is recreated, so buttons attached to an
@@ -443,6 +443,12 @@ def _app_buttons(job_id, url=""):
          {"text": "⏹ Stop", "callback_data": f"stop:{job_id}"}],
         [{"text": "📥 Download data", "callback_data": f"db:{job_id}"}],
     ]
+    # The whole point of this platform is deploying a Telegram bot — so the
+    # single most relevant thing to do right after a deploy is open THAT
+    # bot and talk to it. This button was missing entirely; every other
+    # action here manages the deployment, none of them let you use it.
+    if bot_username:
+        rows.append([{"text": "🤖 Open your bot", "url": f"https://t.me/{bot_username.lstrip('@')}"}])
     if url:
         rows.append([{"text": "🌐 Open live URL", "url": url}])
     btn = _open_button("🚀 Open in CodeNest")
@@ -520,7 +526,7 @@ def cmd_status(chat_id, user, ref=""):
             # KEY NAMES ONLY — the values are bot tokens.
             txt.append(f"Env keys: `{', '.join(info['env_keys'])}`")
         _send(chat_id, "\n".join(txt),
-              reply_markup=_app_buttons(job["id"]))
+              reply_markup=_app_buttons(job["id"], bot_username=job.get("telegram_bot_username") or ""))
         return
 
     apps = bot_ops.list_apps(user["id"])
@@ -548,7 +554,7 @@ def cmd_logs(chat_id, user, ref):
         body = "…\n" + body[-3500:]
     head = "📜 last lines" + (" (trimmed)" if res.get("truncated") else "")
     _send(chat_id, f"*{res['job']['name']}* — {head}\n```\n{body}\n```",
-          reply_markup=_app_buttons(res["job"]["id"]))
+          reply_markup=_app_buttons(res["job"]["id"], bot_username=res["job"].get("telegram_bot_username") or ""))
 
 
 def cmd_restart(chat_id, user, ref):
@@ -620,11 +626,12 @@ def cmd_code_start(chat_id, user, name):
         return
     _pending[chat_id] = {
         "mode": "create", "user_id": user["id"], "name": clean,
+        "step": "requirements",
         "expires": time.time() + _PENDING_TTL_S,
     }
-    _send(chat_id, f"📦 Creating *{clean}*. Send its source now — paste it as "
-                   f"a message, or upload a file (.py/.js/.sh/.rb/.php). "
-                   f"Expires in 5 minutes. `/cancel` to stop.")
+    _send(chat_id, f"📦 Creating *{clean}*. Any pip packages it needs? "
+                   f"Reply with names (e.g. `python-telegram-bot==21.4, requests`), "
+                   f"or `/skip` if none. `/cancel` to stop.")
 
 
 def cmd_update_start(chat_id, user, ref):
@@ -640,12 +647,12 @@ def cmd_update_start(chat_id, user, ref):
         return
     _pending[chat_id] = {
         "mode": "update", "user_id": user["id"], "ref": row["name"],
+        "step": "requirements",
         "expires": time.time() + _PENDING_TTL_S,
     }
-    _send(chat_id, f"📦 Updating *{row['name']}*. Send the new source now — "
-                   f"paste it as a message, or upload a file. It will "
-                   f"auto-save and restart once received. Expires in 5 "
-                   f"minutes. `/cancel` to stop.")
+    _send(chat_id, f"📦 Updating *{row['name']}*. Any pip packages the new "
+                   f"code needs? Reply with names, or `/skip` to leave "
+                   f"requirements as they are. `/cancel` to stop.")
 
 
 def cmd_cancel_pending(chat_id):
@@ -703,6 +710,22 @@ def _lang_for_document(filename: str) -> str:
 def handle_pending_code(chat_id, msg, pending):
     """A text or document message arrived while /code or /update was
     waiting on this chat. Resolve it to source + language and deploy."""
+    # Requirements are asked as their OWN step, before code — pasting code
+    # that must also correctly contain a hand-typed "# requirements: ..."
+    # comment is exactly what caused trouble: easy to forget, easy to
+    # place wrong, easy to mistype. This way the runner still only ever
+    # reads that same comment line (nothing changes downstream) — it's
+    # just the bot's job to write it correctly, not the user's.
+    if pending.get("step") == "requirements":
+        text = (msg.get("text") or "").strip()
+        if text and text.lower() != "/skip":
+            pending["requirements"] = text
+        pending["step"] = "code"
+        pending["expires"] = time.time() + _PENDING_TTL_S
+        _send(chat_id, "Now send the source — paste it as a message, or "
+                       "upload a file (.py/.js/.sh/.rb/.php). `/cancel` to stop.")
+        return
+
     doc = msg.get("document")
     if doc:
         code, err = _download_document(doc)
@@ -717,6 +740,10 @@ def handle_pending_code(chat_id, msg, pending):
             _send(chat_id, "Send the source as text or a file, or `/cancel`.")
             return
 
+    reqs = (pending.get("requirements") or "").strip()
+    if reqs and not re.search(r"^#\s*requirements:", code, re.I | re.M):
+        code = f"# requirements: {reqs}\n{code}"
+
     _pending.pop(chat_id, None)  # slot consumed either way from here on
 
     if pending["mode"] == "create":
@@ -728,7 +755,8 @@ def handle_pending_code(chat_id, msg, pending):
         url = res.get("web") or ""
         _send(chat_id, f"✅ *{res['name']}* created and running ({lang}).\n"
                        + (url + "\n" if url else "")
-                       + f"`/status {res['name']}` for details.")
+                       + f"`/status {res['name']}` for details.",
+              reply_markup=_app_buttons(res["job_db_id"], url=url))
     else:
         # /update never changes the runtime on its own — a .js file dropped
         # onto a python app would silently swap what it runs. Only apply the
@@ -740,7 +768,9 @@ def handle_pending_code(chat_id, msg, pending):
         if not res.get("ok"):
             _send(chat_id, f"❌ {res['error']}")
             return
-        _send(chat_id, f"✅ *{res['job']['name']}* updated, saved and restarted.")
+        _send(chat_id, f"✅ *{res['job']['name']}* updated, saved and restarted.",
+              reply_markup=_app_buttons(res["job"]["id"],
+                                         bot_username=res["job"].get("telegram_bot_username") or ""))
 
 
 # ==================== CALLBACK HANDLER ====================
@@ -864,8 +894,14 @@ def handle_update(upd):
             event["user_id"] = _row_id(linked)
 
             # A pending upload/text is claimed before normal non-command input.
-            if not command:
-                pending = _get_pending(chat_id)
+            # "/skip" is the one command-shaped exception: it's only ever
+            # meaningful as the answer to the requirements step below, so it
+            # must reach handle_pending_code instead of falling through to
+            # "unknown command" like every other slash-word would.
+            pending_now = _get_pending(chat_id)
+            skipping = command == "/skip" and pending_now and pending_now.get("step") == "requirements"
+            if not command or skipping:
+                pending = pending_now
                 if pending:
                     event["event_type"] = "code_upload"
                     event["payload"] = str(pending.get("name") or pending.get("ref") or "")
