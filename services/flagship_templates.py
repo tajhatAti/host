@@ -357,7 +357,7 @@ def build_flagship_templates():
         ),
         "complete-file-share": _flagship(
             "Complete file share",
-            "One file sharing bot with Telegram links, expiry dates, download limits, per-user link settings, revoke/delete and owner statistics.",
+            "One file sharing bot with a shareable web page (media tag, icon and a Download button — opens for anyone, no Telegram needed) alongside the Telegram deep link, expiry dates, download limits, per-user link settings, revoke/delete and owner statistics.",
             "Files", file_share_code(), (),
             "Open Go to bot and press Start to claim owner controls, then /panel.",
         ),
