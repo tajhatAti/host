@@ -573,6 +573,18 @@ def cmd_delete(chat_id, user, ref):
     if not ref:
         _send(chat_id, "Which app? `/delete <name>` — this cannot be undone.")
         return
+    app = bot_ops.find_app(user["id"], ref)
+    if not app:
+        _send(chat_id, f"❌ No app called “{ref}”.")
+        return
+    _send(chat_id, f"Delete *{app['name']}*? This cannot be undone.",
+          {"inline_keyboard": [
+              [{"text": "🗑 Yes, delete", "callback_data": f"delconfirm:{app['id']}"},
+               {"text": "✖️ Cancel", "callback_data": f"delcancel:{app['id']}"}],
+          ]})
+
+
+def _cmd_delete_confirmed(chat_id, user, ref):
     res = bot_ops.delete(user["id"], ref)
     _send(chat_id, f"🗑 Deleted *{res['job']['name']}*." if res.get("ok")
           else f"❌ {res['error']}")
@@ -757,6 +769,10 @@ def handle_callback(chat_id, data):
         cmd_stop(chat_id, user, ref)
     elif action == "db":
         _send_job_data(chat_id, user, ref)
+    elif action == "delconfirm":
+        _cmd_delete_confirmed(chat_id, user, ref)
+    elif action == "delcancel":
+        _send(chat_id, "Cancelled — nothing was deleted.")
 
 
 def _send_job_data(chat_id, user, ref):
