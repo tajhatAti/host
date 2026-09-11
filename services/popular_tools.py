@@ -9,10 +9,15 @@ def product(name,desc,category,code,fields=(),badge="Top",priority=950,claim=Tru
 
 def file_share_code():
  return '''# requirements: python-telegram-bot==21.4
-import os,secrets,sqlite3,time
+import html,json,mimetypes,os,secrets,sqlite3,threading,time,urllib.parse,urllib.request
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder,CommandHandler,ContextTypes,MessageHandler,filters
-CLAIM=os.getenv("ADMIN_CLAIM_CODE","");DB=sqlite3.connect("file_share.db",check_same_thread=False);DB.execute("PRAGMA journal_mode=WAL");DB.executescript("CREATE TABLE IF NOT EXISTS settings(user_id INTEGER,key TEXT,value TEXT,PRIMARY KEY(user_id,key));CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,banned INTEGER DEFAULT 0);CREATE TABLE IF NOT EXISTS files(code TEXT PRIMARY KEY,owner INTEGER,file_id TEXT,kind TEXT,name TEXT,size INTEGER,created INTEGER,expires INTEGER,max_downloads INTEGER,downloads INTEGER DEFAULT 0,active INTEGER DEFAULT 1);");DB.commit()
+TOKEN=os.getenv("BOT_TOKEN","");CLAIM=os.getenv("ADMIN_CLAIM_CODE","")
+PUBLIC_URL=(os.getenv("PUBLIC_BASE_URL","").rstrip("/")+"/live/"+os.getenv("WEB_SLUG","").strip("/")+"/") if os.getenv("PUBLIC_BASE_URL") and os.getenv("WEB_SLUG") else ""
+BOT_USERNAME=""
+DB=sqlite3.connect("file_share.db",check_same_thread=False);DB.execute("PRAGMA journal_mode=WAL");DB.executescript("CREATE TABLE IF NOT EXISTS settings(user_id INTEGER,key TEXT,value TEXT,PRIMARY KEY(user_id,key));CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,banned INTEGER DEFAULT 0);CREATE TABLE IF NOT EXISTS files(code TEXT PRIMARY KEY,owner INTEGER,file_id TEXT,kind TEXT,name TEXT,size INTEGER,created INTEGER,expires INTEGER,max_downloads INTEGER,downloads INTEGER DEFAULT 0,active INTEGER DEFAULT 1);");DB.commit()
+DB_LOCK=threading.Lock()
 def cfg(uid,key,default):
  r=DB.execute("SELECT value FROM settings WHERE user_id=? AND key=?",(uid,key)).fetchone();return r[0] if r else default
 def admin():
@@ -22,7 +27,7 @@ async def start(u:Update,c:ContextTypes.DEFAULT_TYPE):
  if not admin() and c.args and c.args[0]=="claim_"+CLAIM:DB.execute("INSERT INTO settings VALUES(0,'admin',?)",(str(uid),));DB.commit();await u.message.reply_text("Owner connected. File sharing is ready.");return
  DB.execute("INSERT OR IGNORE INTO users(id) VALUES(?)",(uid,));DB.commit()
  if c.args and c.args[0].startswith("f_"):await deliver(u,c,c.args[0][2:]);return
- await u.message.reply_text("Send a document, photo, video or audio. I will return a shareable Telegram link.\\n/files · /settings DAYS MAX_DOWNLOADS · /delete CODE")
+ await u.message.reply_text("Send a document, photo, video or audio. I will return a share page (opens as a website, Telegram not required) plus a Telegram link.\\n/files · /settings DAYS MAX_DOWNLOADS · /delete CODE")
 def media(m):
  if m.document:return m.document,"document",m.document.file_name or "document"
  if m.video:return m.video,"video",m.video.file_name or "video.mp4"
@@ -36,11 +41,16 @@ async def save(u:Update,c:ContextTypes.DEFAULT_TYPE):
  obj,kind,name=media(u.message)
  if not obj:return
  days=max(1,min(365,int(cfg(uid,"days","30"))));limit=max(1,min(100000,int(cfg(uid,"downloads","1000"))));code=secrets.token_urlsafe(8).replace('-','').replace('_','')[:10];expires=int(time.time())+days*86400
- DB.execute("INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,0,1)",(code,uid,obj.file_id,kind,name[:200],getattr(obj,'file_size',0) or 0,int(time.time()),expires,limit));DB.commit();me=await c.bot.get_me();await u.message.reply_text(f"Saved: {name}\\nhttps://t.me/{me.username}?start=f_{code}\\nExpires: {days} days · Limit: {limit} downloads")
+ DB.execute("INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,0,1)",(code,uid,obj.file_id,kind,name[:200],getattr(obj,'file_size',0) or 0,int(time.time()),expires,limit));DB.commit()
+ msg=f"Saved: {name}\\n"
+ if PUBLIC_URL:msg+=f"Share page: {PUBLIC_URL}f/{code}\\n"
+ msg+=f"Telegram link: https://t.me/{BOT_USERNAME}?start=f_{code}\\nExpires: {days} days · Limit: {limit} downloads"
+ await u.message.reply_text(msg)
 async def deliver(u,c,code):
  row=DB.execute("SELECT file_id,kind,name,expires,max_downloads,downloads,active FROM files WHERE code=?",(code,)).fetchone()
  if not row or not row[6] or row[3]<int(time.time()) or row[5]>=row[4]:await u.effective_message.reply_text("This link expired, reached its limit, or was removed.");return
- send={"document":c.bot.send_document,"video":c.bot.send_video,"audio":c.bot.send_audio,"voice":c.bot.send_voice,"photo":c.bot.send_photo}.get(row[1],c.bot.send_document);await send(u.effective_chat.id,row[0],caption=row[2]);DB.execute("UPDATE files SET downloads=downloads+1 WHERE code=?",(code,));DB.commit()
+ send={"document":c.bot.send_document,"video":c.bot.send_video,"audio":c.bot.send_audio,"voice":c.bot.send_voice,"photo":c.bot.send_photo}.get(row[1],c.bot.send_document);await send(u.effective_chat.id,row[0],caption=row[2])
+ with DB_LOCK:DB.execute("UPDATE files SET downloads=downloads+1 WHERE code=?",(code,));DB.commit()
 async def getfile(u,c):
  if c.args:await deliver(u,c,c.args[0])
 async def files(u,c):
@@ -54,7 +64,82 @@ async def delete(u,c):
 async def panel(u,c):
  if u.effective_user.id!=admin():return
  users=DB.execute("SELECT COUNT(*) FROM users").fetchone()[0];files=DB.execute("SELECT COUNT(*) FROM files").fetchone()[0];downloads=DB.execute("SELECT COALESCE(SUM(downloads),0) FROM files").fetchone()[0];await u.message.reply_text(f"Users {users} · Files {files} · Downloads {downloads}")
-app=ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+
+KIND_TAG={"document":("📄","Document","#6366f1"),"video":("🎬","Video","#f5a623"),"audio":("🎵","Audio","#22c1c3"),"voice":("🎤","Voice","#22c1c3"),"photo":("🖼️","Photo","#3fd67e")}
+def _human(n):
+ n=float(n or 0)
+ for unit in ("B","KB","MB","GB"):
+  if n<1024:return f"{n:.0f}{unit}" if unit=="B" else f"{n:.1f}{unit}"
+  n/=1024
+ return f"{n:.1f}TB"
+def _row(code):
+ return DB.execute("SELECT file_id,kind,name,size,expires,max_downloads,downloads,active FROM files WHERE code=?",(code,)).fetchone()
+def _tg_file_path(file_id):
+ try:
+  with urllib.request.urlopen(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={urllib.parse.quote(file_id)}",timeout=15) as r:data=json.loads(r.read())
+  return data.get("result",{}).get("file_path") if data.get("ok") else None
+ except Exception:return None
+
+_PAGE="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,"><title>{name}</title>
+<style>:root{{--bg:#0F0F11;--card:#1E1E22;--line:#27272A;--fg:#fff;--fg-3:#A1A1AA}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}}.card{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;max-width:380px;width:calc(100% - 32px);text-align:center}}.tag{{display:inline-block;background:{color}22;color:{color};border:1px solid {color}55;border-radius:999px;padding:4px 12px;font-size:12px;font-weight:600;margin-bottom:14px}}.icon{{width:72px;height:72px;border-radius:16px;background:var(--bg);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:32px}}h1{{font-size:16px;margin:0 0 6px;word-break:break-word}}p.meta{{font-size:12px;color:var(--fg-3);margin:0 0 22px}}.btn{{display:block;width:100%;padding:13px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;margin-bottom:10px}}.dl{{background:#fff;color:#0F0F11}}.tgb{{background:var(--bg);color:var(--fg);border:1px solid var(--line)}}.foot{{font-size:11px;color:var(--fg-3);margin-top:6px}}</style></head>
+<body><div class="card"><span class="tag">{emoji} {label}</span><div class="icon">{emoji}</div><h1>{name}</h1><p class="meta">{size} · expires {expires} · {left} downloads left</p>{buttons}<div class="foot">Shared via CodeNest</div></div></body></html>"""
+
+_GONE="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Link unavailable</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0F0F11;color:#A1A1AA;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}.card{text-align:center;padding:0 20px}h1{color:#fff;font-size:18px}</style></head>
+<body><div class="card"><h1>Link unavailable</h1><p>This share expired, reached its download limit, or was removed.</p></div></body></html>"""
+
+class _Handler(BaseHTTPRequestHandler):
+ def log_message(self,*a):pass
+ def handle_one_request(self):
+  try:super().handle_one_request()
+  except Exception:pass
+ def _send(self,code,body,ctype):
+  self.send_response(code);self.send_header("Content-Type",ctype);self.send_header("Content-Length",str(len(body)));self.send_header("Cache-Control","no-store");self.end_headers()
+  if self.command!="HEAD":self.wfile.write(body)
+ def do_HEAD(self):self.do_GET()
+ def do_GET(self):
+  parts=self.path.split("?",1)[0].strip("/").split("/")
+  if parts[:1]==["health"]:self._send(200,b"ok","text/plain");return
+  if len(parts)>=2 and parts[0]=="f":
+   code=parts[1];row=_row(code)
+   live=bool(row) and row[7] and row[4]>=int(time.time()) and row[6]<row[5]
+   if len(parts)==3 and parts[2]=="dl":
+    if not live:self._send(404,b"Link unavailable","text/plain");return
+    if self.command=="HEAD":
+     self.send_response(200);self.send_header("Content-Type",mimetypes.guess_type(row[2])[0] or "application/octet-stream");self.end_headers();return
+    path=_tg_file_path(row[0])
+    if not path:
+     self._send(502,b"Telegram could not prepare this file for direct download (it may be over 20MB) - use the Get via Telegram button instead.","text/plain");return
+    try:
+     with urllib.request.urlopen(f"https://api.telegram.org/file/bot{TOKEN}/{path}",timeout=30) as tgr:
+      self.send_response(200);self.send_header("Content-Type",mimetypes.guess_type(row[2])[0] or "application/octet-stream")
+      self.send_header("Content-Disposition",f'attachment; filename="{row[2]}"');self.send_header("Cache-Control","no-store");self.end_headers()
+      while True:
+       chunk=tgr.read(65536)
+       if not chunk:break
+       self.wfile.write(chunk)
+    except Exception:
+     return
+    with DB_LOCK:DB.execute("UPDATE files SET downloads=downloads+1 WHERE code=?",(code,));DB.commit()
+    return
+   if not live:self._send(404,_GONE.encode(),"text/html; charset=utf-8");return
+   emoji,label,color=KIND_TAG.get(row[1],("📁","File","#A1A1AA"))
+   buttons=f'<a class="btn dl" href="/f/{code}/dl">Download</a>'
+   if BOT_USERNAME:buttons+=f'<a class="btn tgb" href="https://t.me/{BOT_USERNAME}?start=f_{code}">Get via Telegram</a>'
+   body=_PAGE.format(name=html.escape(row[2]),emoji=emoji,label=label,color=color,size=_human(row[3]),expires=time.strftime('%Y-%m-%d',time.gmtime(row[4])),left=max(0,row[5]-row[6]),buttons=buttons).encode()
+   self._send(200,body,"text/html; charset=utf-8");return
+  self._send(404,b"Not found","text/plain")
+
+def _serve_web():
+ try:ThreadingHTTPServer(("0.0.0.0",int(os.getenv("PORT","8000"))),_Handler).serve_forever()
+ except OSError:pass
+
+async def _ready(a):
+ global BOT_USERNAME
+ me=await a.bot.get_me();BOT_USERNAME=me.username
+ threading.Thread(target=_serve_web,daemon=True).start()
+
+app=ApplicationBuilder().token(TOKEN).post_init(_ready).build()
 for x,h in [("start",start),("get",getfile),("files",files),("settings",settings),("delete",delete),("panel",panel)]:app.add_handler(CommandHandler(x,h))
 app.add_handler(MessageHandler(filters.Document.ALL|filters.PHOTO|filters.VIDEO|filters.AUDIO|filters.VOICE,save));app.run_polling()
 '''
@@ -288,7 +373,7 @@ app.add_handler(CallbackQueryHandler(captcha,pattern="^cap:"));app.add_handler(C
 def build_popular_tools():
  audio_fields=[fld("AUDIO_API_KEY","Speech provider API key"),fld("AUDIO_API_BASE","OpenAI-compatible audio API base",False,True,"https://api.openai.com/v1"),fld("AUDIO_MODEL","Audio model",False,True)]
  return {
-  "file-share-pro":product("File sharing and deep-link storage","Telegram file_id storage, expiring share links, download limits, owner library, revocation and usage analytics.","Files",file_share_code(),priority=990),
+  "file-share-pro":product("File sharing and deep-link storage","Telegram file_id storage, a shareable web page (thumbnail-style card + Download button, no Telegram needed) plus a Telegram deep link, expiry, download limits, owner library, revocation and usage analytics.","Files",file_share_code(),priority=990),
   "voice-to-text-pro":product("Voice to text transcription","Voice/audio transcription through an OpenAI-compatible API with 20 MB limits, daily quotas and provider error handling.","AI Audio",audio_code("stt"),audio_fields,priority=985),
   "text-to-voice-pro":product("Text to voice studio","OpenAI-compatible text-to-speech with selectable voices, MP3 output, daily quotas and usage analytics.","AI Audio",audio_code("tts"),audio_fields,priority=984),
   "universal-converter-pro":product("Image and PDF converter","JPG, PNG, WebP, image-to-PDF and PDF-to-text conversion in memory with no file retention.","Files",converter_code(),priority=982),
