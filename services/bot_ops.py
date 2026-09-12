@@ -369,6 +369,73 @@ def logs(user_id: int, ref: str, lines: int = 40) -> dict:
 
 # ── /code and /update — see the module docstring before changing these ────
 
+def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "") -> dict:
+    """GitHub-import variant of create_app, for /import in chat.
+
+    Same uniqueness/cap rules as create_app. No inline code is sent — the
+    runner clones the repo itself and auto-detects which file to run (see
+    runner/app.py:_detect_entry: conventional names like main.py/bot.py
+    first, then a manifest-aware fallback). No Telegram token check here
+    yet, since there's no code text to inspect before the clone happens —
+    unlike /code, so a repo-imported bot won't get an "Open your bot"
+    button until its first /update or a manual check.
+    """
+    clean = slugify_name(name)
+    if not clean:
+        return {"ok": False, "error": "That name has no usable characters."}
+
+    conn = get_db_connection()
+    try:
+        dup = conn.execute(
+            "SELECT id FROM jobs WHERE user_id = ? AND LOWER(name) = LOWER(?)",
+            (user_id, clean)).fetchone()
+        if dup:
+            return {"ok": False,
+                    "error": f"You already have an app called “{clean}”. Use /update {clean} instead."}
+        rows = conn.execute(
+            "SELECT runner_job_id,desired_state FROM jobs WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    live = set(runner_client.fleet_jobs())
+    active = (sum(1 for r in rows if dict(r).get("runner_job_id") in live)
+              if live else sum(1 for r in rows if dict(r).get("desired_state") != "stopped"))
+    if active >= MAX_JOBS_PER_USER:
+        return {"ok": False,
+                "error": (f"You already have {active} of {MAX_JOBS_PER_USER} bots "
+                          f"running — stop one before making another.")}
+
+    body = {"language": language or "", "code": "", "name": f"u{user_id}-{clean}",
+            "env": {}, "repo_url": repo_url}
+    resp = runner_client._runner_http("POST", "/internal/jobs", body)
+    if resp.status_code != 201:
+        try:
+            detail = resp.json().get("detail", "Runner rejected the app.")
+        except Exception:
+            detail = "Runner rejected the app."
+        return {"ok": False, "error": detail}
+
+    info = resp.json()
+    now = now_utc_str()
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,"
+            "created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'running',?,?,?)",
+            (user_id, clean, info.get("language") or language or "python", "",
+             info["id"], getattr(resp, "placed_on", None), None, now, now))
+        conn.commit()
+        job_db_id = cursor.lastrowid
+    finally:
+        conn.close()
+
+    web = runner_client._job_web_fields(info, getattr(resp, "placed_on", None))
+    return {"ok": True, "name": clean, "job_db_id": job_db_id,
+            "web": web.get("web") or web.get("web_url")}
+
+
 def create_app(user_id: int, name: str, language: str, code: str) -> dict:
     """Make a brand-new app from chat-supplied name + code. Identical rules
     to POST /api/jobs: per-user name uniqueness, the MAX_JOBS_PER_USER cap,
