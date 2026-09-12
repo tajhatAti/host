@@ -207,7 +207,7 @@ def user_for_chat(telegram_id: int) -> dict:
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT id, username, email, is_suspended, is_admin FROM users "
+            "SELECT id, username, email, is_suspended, is_admin, can_upload_zip FROM users "
             "WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
     finally:
@@ -250,3 +250,66 @@ def unlink(user_id: int) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+# ── Admin operations for the /admin chat command ────────────────────────
+# Kept here rather than in bot_ops.py: this is account/identity
+# administration (who is an admin, who may upload zip bundles), not bot
+# deployment — the same separation the rest of this module already draws.
+
+def resolve_user_ref(ref: str) -> dict:
+    """Find a user by CodeNest username or by their linked Telegram id.
+    Accepts whichever the admin has on hand — they usually know one or
+    the other, rarely the internal numeric user id."""
+    ref = (ref or "").strip().lstrip("@")
+    if not ref:
+        return None
+    conn = get_db_connection()
+    try:
+        row = None
+        if ref.isdigit():
+            row = conn.execute(
+                "SELECT id, username, telegram_id, is_admin, can_upload_zip "
+                "FROM users WHERE telegram_id = ?", (int(ref),)
+            ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT id, username, telegram_id, is_admin, can_upload_zip "
+                "FROM users WHERE LOWER(username) = LOWER(?)", (ref,)
+            ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def set_admin(user_id: int, value: bool) -> None:
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE users SET is_admin = ?, updated_at = ? WHERE id = ?",
+                     (1 if value else 0, now_utc_str(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_zip_permission(user_id: int, value: bool) -> None:
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE users SET can_upload_zip = ?, updated_at = ? WHERE id = ?",
+                     (1 if value else 0, now_utc_str(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_admin_overview(limit: int = 30) -> list:
+    """Recent users with their admin/zip flags, newest first — for /admin users."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "FROM users ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
