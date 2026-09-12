@@ -325,6 +325,7 @@ def _help_text(user):
         "(text or a file)\n"
         "`/update <name>` — push new code to an existing app, then send it "
         "(auto-saves & restarts)\n"
+        "`/import <github url> [name]` — clone a public repo and deploy it\n"
         "`/apps` — everything you have, with live status\n"
         "`/status [name]` — account summary, or one app in full\n"
         "`/logs <name>` — the last lines it printed\n"
@@ -611,6 +612,53 @@ def cmd_rename(chat_id, user, args):
 
 
 # ==================== /code AND /update — see the module comment above ====
+
+def cmd_import(chat_id, user, arg):
+    """/import <github url> [name] — clone a public GitHub repo and deploy it.
+    The runner auto-detects which file to run (main.py/bot.py/app.py first,
+    then a manifest-aware fallback — same logic the website's import uses,
+    see runner/app.py:_detect_entry). A static site (index.html, no
+    requirements.txt/package.json) is served as-is."""
+    if not arg:
+        _send(chat_id, "Usage: `/import <github.com/user/repo>`\n"
+                       "Optionally name it yourself: `/import <url> myapp`\n"
+                       "Only public repos are supported right now.")
+        return
+    parts = arg.split(None, 1)
+    url = parts[0]
+    name = parts[1].strip() if len(parts) > 1 else ""
+    m = re.search(r"github\.com/([^/\s]+)/([^/\s]+)", url)
+    if not m:
+        _send(chat_id, "That doesn't look like a github.com repo URL — "
+                       "expected something like `github.com/user/repo`.")
+        return
+    if not name:
+        name = m.group(2).replace(".git", "")
+    clean = bot_ops.slugify_name(name)
+    if not clean:
+        _send(chat_id, "That name has no usable characters — letters, numbers, "
+                       "spaces, `-` and `_` only.")
+        return
+    if bot_ops.find_app(user["id"], clean):
+        _send(chat_id, f"You already have an app called “{clean}”. Pick a "
+                       f"different name: `/import {url} <name>`.")
+        return
+    _send(chat_id, f"📥 Cloning and deploying *{clean}*… this can take a "
+                   f"little longer than /code, since the repo has to be "
+                   f"fetched first.")
+    res = bot_ops.create_app_from_repo(user["id"], clean, url)
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    url_web = res.get("web") or ""
+    _send(chat_id, f"✅ *{res['name']}* imported and running.\n"
+                   + (url_web + "\n" if url_web else "")
+                   + "⚠️ No Telegram bot token check on import yet — if this "
+                     f"is meant to be a Telegram bot, run `/status {res['name']}` "
+                     f"to confirm it's actually polling.\n"
+                   + f"`/logs {res['name']}` if anything looks wrong.",
+          reply_markup=_app_buttons(res["job_db_id"], url=url_web))
+
 
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
@@ -948,6 +996,7 @@ def handle_update(upd):
                 "/rename": lambda: gated(lambda u: cmd_rename(chat_id, u, arg)),
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
+                "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
             }
