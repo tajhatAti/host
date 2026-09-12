@@ -313,3 +313,45 @@ def list_admin_overview(limit: int = 30) -> list:
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+def admin_overview_stats() -> dict:
+    """A trimmed version of routes/admin.py's /admin/overview — the numbers
+    that matter for a quick check from Telegram, not the full dashboard."""
+    conn = get_db_connection()
+    try:
+        def count(sql, params=()):
+            return dict(conn.execute(sql, params).fetchone())["c"]
+        return {
+            "users": count("SELECT COUNT(*) AS c FROM users"),
+            "suspended": count("SELECT COUNT(*) AS c FROM users WHERE is_suspended=1"),
+            "admins": count("SELECT COUNT(*) AS c FROM users WHERE is_admin=1"),
+            "zip_allowed": count("SELECT COUNT(*) AS c FROM users WHERE can_upload_zip=1"),
+            "tg_linked": count("SELECT COUNT(*) AS c FROM users WHERE telegram_id IS NOT NULL"),
+            "jobs_total": count("SELECT COUNT(*) AS c FROM jobs"),
+            "jobs_deployed": count("SELECT COUNT(*) AS c FROM jobs WHERE runner_job_id IS NOT NULL"),
+        }
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id: int) -> dict:
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def set_suspended(user_id: int, value: bool) -> None:
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE users SET is_suspended = ?, updated_at = ? WHERE id = ?",
+                     (1 if value else 0, now_utc_str(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
