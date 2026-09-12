@@ -369,6 +369,70 @@ def logs(user_id: int, ref: str, lines: int = 40) -> dict:
 
 # ── /code and /update — see the module docstring before changing these ────
 
+def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str = "") -> dict:
+    """Multi-file variant of create_app: the runner extracts the WHOLE zip
+    into the job's directory and picks the entry point itself (same
+    _detect_entry pipeline as a GitHub import), instead of the old chat
+    behaviour of reading one file out of the zip and silently dropping
+    the rest — which broke any app whose entry file imported a sibling
+    module that never made it onto disk."""
+    import base64
+    clean = slugify_name(name)
+    if not clean:
+        return {"ok": False, "error": "That name has no usable characters."}
+
+    conn = get_db_connection()
+    try:
+        dup = conn.execute(
+            "SELECT id FROM jobs WHERE user_id = ? AND LOWER(name) = LOWER(?)",
+            (user_id, clean)).fetchone()
+        if dup:
+            return {"ok": False,
+                    "error": f"You already have an app called “{clean}”. Use /update {clean} instead."}
+        rows = conn.execute(
+            "SELECT runner_job_id,desired_state FROM jobs WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    live = set(runner_client.fleet_jobs())
+    active = (sum(1 for r in rows if dict(r).get("runner_job_id") in live)
+              if live else sum(1 for r in rows if dict(r).get("desired_state") != "stopped"))
+    if active >= MAX_JOBS_PER_USER:
+        return {"ok": False,
+                "error": (f"You already have {active} of {MAX_JOBS_PER_USER} bots "
+                          f"running — stop one before making another.")}
+
+    body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
+            "env": {}, "zip_b64": base64.b64encode(zip_bytes).decode("ascii")}
+    resp = runner_client._runner_http("POST", "/internal/jobs", body)
+    if resp.status_code != 201:
+        try:
+            detail = resp.json().get("detail", "Runner rejected the app.")
+        except Exception:
+            detail = "Runner rejected the app."
+        return {"ok": False, "error": detail}
+
+    info = resp.json()
+    now = now_utc_str()
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,"
+            "created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'running',?,?,?)",
+            (user_id, clean, info.get("language") or language or "python", "",
+             info["id"], getattr(resp, "placed_on", None), None, now, now))
+        conn.commit()
+        job_db_id = cursor.lastrowid
+    finally:
+        conn.close()
+
+    web = runner_client._job_web_fields(info, getattr(resp, "placed_on", None))
+    return {"ok": True, "name": clean, "job_db_id": job_db_id,
+            "web": web.get("web") or web.get("web_url")}
+
+
 def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "") -> dict:
     """GitHub-import variant of create_app, for /import in chat.
 
