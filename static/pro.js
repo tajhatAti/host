@@ -5584,37 +5584,19 @@ function _initWbWiring() {
     _updateStats();
   });
 
-  // GitHub import helper — bound once; e.stopPropagation prevents bubbling
-  async function _handleImportGh() {
+  // GitHub import — this used to be its own deploy implementation that
+  // called /api/jobs directly without ever attaching the verified bot
+  // token or telegram_verification_id, so the backend rejected every
+  // single import with "Verify your Telegram bot token first". The real
+  // Deploy button's startJob() already does GitHub import correctly (it
+  // reads the same #jobRepoUrl field) — so this button now just drives
+  // that one correct path instead of maintaining a second, drifted copy
+  // of the same logic.
+  function _handleImportGh() {
     const u = ((document.getElementById("jobRepoUrl") || {}).value || "").trim();
     if (!u) { toast("Paste a GitHub repo URL first", "warn"); return; }
-    btnGh.classList.add("loading");
-    btnGh.disabled = true;
-    _setHint("warn", "");
-    try {
-      let autoName = "";
-      const mm = u.match(/github\.com\/[^/]+\/([^/]+)/);
-      if (mm) autoName = mm[1].replace(/\.git$/,"");
-      const nameInp = document.getElementById("jobName");
-      if (nameInp && !nameInp.value.trim() && autoName) nameInp.value = autoName;
-      if (nameInp && !nameInp.value.trim()) nameInp.value = "Untitled Job";
-      const editingId = btnStart && btnStart.dataset.editingId;
-      const name = nameInp ? nameInp.value.trim() : (autoName || "Untitled Job");
-      const body = { repo_url: u, name, language: document.getElementById("jobLang").value, code: _jobCmGetValue() || "" };
-      const info = editingId
-        ? await api("/api/jobs/" + editingId, "PATCH", body, true)
-        : await api("/api/jobs", "POST", body, true);
-      toast("Repo deployed", "success");
-      await loadJobs();
-      if (info && info.job_db_id) selectJob(info.job_db_id);
-      _setHint("ok","");
-    } catch (err) {
-      toast(err.message, "error");
-      _setHint("err", err.message);
-    } finally {
-      btnGh.disabled = false;
-      btnGh.classList.remove("loading");
-    }
+    const real = document.getElementById("btnStartJob");
+    if (real) real.click();
   }
   const btnGh = document.getElementById("btnImportGh");
   if (btnGh && !btnGh._w) {
