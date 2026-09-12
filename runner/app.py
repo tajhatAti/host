@@ -2237,6 +2237,7 @@ class JobUpdateRequest(BaseModel):
     env: Optional[dict] = None
     repo_url: Optional[str] = ""
     entry: Optional[str] = ""
+    zip_b64: Optional[str] = ""
 
 
 @app.patch("/internal/jobs/{job_id}")
@@ -2265,6 +2266,53 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
     if req.env is not None:
         j["env"] = _clean_env(req.env)
     cfg = LANGS[j["lang"]]
+
+    repo_url = (req.repo_url or "").strip()
+    zip_b64 = (req.zip_b64 or "").strip()
+    if repo_url or zip_b64:
+        # This field existed on the model since the first version of this
+        # endpoint but was never read — an /update with a new repo_url or
+        # zip_b64 silently fell through to "no code, nothing changes"
+        # instead of actually re-fetching anything. Multi-file apps could
+        # never be updated at all, only recreated from scratch.
+        update_log = deque(maxlen=JOB_LOG_LINES)
+        jdir = j["dir"]
+        ok = (_clone_repo(repo_url, jdir, update_log) if repo_url
+              else _extract_zip_bundle(zip_b64, jdir, update_log))
+        if not ok:
+            kind = "Repo clone" if repo_url else "Zip extraction"
+            raise HTTPException(400, detail=f"{kind} failed:\n" + "\n".join(update_log)[-2000:])
+        user_entry = (req.entry or "").strip()
+        if user_entry:
+            fp = os.path.join(jdir, user_entry)
+            if not os.path.isfile(fp):
+                raise HTTPException(400, detail=f"Entry file '{user_entry}' not found.")
+            detected_src = fp
+        else:
+            _, detected_src = _detect_entry(jdir, False, update_log)
+        if detected_src:
+            expected = os.path.join(jdir, "main." + cfg["ext"])
+            if os.path.abspath(detected_src) != os.path.abspath(expected):
+                if cfg["ext"] == "py":
+                    with open(expected, "w") as f:
+                        f.write(f"import runpy, sys; sys.path.insert(0, {repr(jdir)}); "
+                                 f"runpy.run_path({repr(detected_src)}, run_name='__main__')")
+                elif cfg["ext"] == "js":
+                    with open(expected, "w") as f:
+                        rel = os.path.relpath(detected_src, jdir)
+                        f.write(f"require('./{rel.replace(chr(92),'/')}');\n")
+                else:
+                    expected = detected_src
+            j["file"] = expected
+            j["bin"] = os.path.join(jdir, "main.bin")
+        j["log"].append(f"[system] {'Repo' if repo_url else 'Zip'} updated — restarting")
+        if not j.get("port"):
+            j["port"] = _alloc_port()
+        j["status"] = "starting"
+        _spawn(j)
+        logger.info("Job %s updated from %s (dir: %s)", job_id,
+                    "repo" if repo_url else "zip", jdir)
+        return _job_public(j)
 
     if req.code is not None and req.code.strip():
         # Re-derive file/bin paths in case language changed
