@@ -955,6 +955,13 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(conn, "users", "agreed_terms_at"):
             conn.execute("ALTER TABLE users ADD COLUMN agreed_terms_at TEXT")
+        # .zip bundles are extracted for real onto the runner's filesystem
+        # (services/pingbot.py + runner/app.py:_extract_zip_bundle) — more
+        # surface than a single pasted file, so it's admin-granted rather
+        # than open to everyone by default. Off (0) until an admin turns it
+        # on for a specific user.
+        if not _column_exists(conn, "users", "can_upload_zip"):
+            conn.execute("ALTER TABLE users ADD COLUMN can_upload_zip INTEGER NOT NULL DEFAULT 0")
 
         # Telegram login + device/IP tracking. These live in the CREATE TABLE
         # above, so FRESH databases already have them — but an existing
