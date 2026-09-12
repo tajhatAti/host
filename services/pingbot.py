@@ -6,11 +6,13 @@ Features:
 - Inline buttons after deploy
 - Real logs, Uptime, Download DB
 """
+import io
 import json
 import os
 import re
 import threading
 import time
+import zipfile
 import requests
 from collections import defaultdict
 
@@ -26,6 +28,88 @@ from services import bot_analytics  # noqa: E402
 
 import logging
 logger = logging.getLogger("codenest-app")
+
+# Hardcoded, not an env var (by request) — this Telegram account always has
+# full admin rights over the bot regardless of the users.is_admin DB flag,
+# so there's never a chicken-and-egg problem bootstrapping the very first
+# admin. It can grant/revoke admin and zip-upload permission for anyone
+# else via /admin — see cmd_admin below.
+SUPER_ADMIN_TG_ID = 8768764605
+
+
+def _is_admin(user, telegram_user_id=None) -> bool:
+    if telegram_user_id == SUPER_ADMIN_TG_ID:
+        return True
+    return bool(user and user.get("is_admin"))
+
+
+def cmd_admin(chat_id, telegram_user_id, arg):
+    """/admin — the hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1.
+    Subcommands: users, grant <ref>, revoke <ref>, allowzip <ref>, denyzip <ref>.
+    <ref> is a CodeNest username or a Telegram user id — whichever the
+    admin has on hand."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        _send(chat_id, "🔒 Admin only.")
+        return
+
+    parts = (arg or "").split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    ref = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("", "help"):
+        _send(chat_id,
+              "*Admin panel*\n"
+              "`/admin users` — recent users and their flags\n"
+              "`/admin grant <username|telegram_id>` — make someone admin\n"
+              "`/admin revoke <username|telegram_id>` — remove admin\n"
+              "`/admin allowzip <username|telegram_id>` — allow .zip uploads\n"
+              "`/admin denyzip <username|telegram_id>` — block .zip uploads")
+        return
+
+    if sub == "users":
+        rows = telegram_link.list_admin_overview()
+        if not rows:
+            _send(chat_id, "No users yet.")
+            return
+        lines = ["*Recent users:*"]
+        for r in rows:
+            flags = []
+            if r.get("is_admin"): flags.append("admin")
+            if r.get("can_upload_zip"): flags.append("zip")
+            if r.get("is_suspended"): flags.append("suspended")
+            tag = f" [{', '.join(flags)}]" if flags else ""
+            tid = r.get("telegram_id") or "—"
+            lines.append(f"#{r['id']} {r.get('username') or '(no username)'} · tg:{tid}{tag}")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    if sub in ("grant", "revoke", "allowzip", "denyzip"):
+        if not ref:
+            _send(chat_id, f"Usage: `/admin {sub} <username or telegram_id>`")
+            return
+        target = telegram_link.resolve_user_ref(ref)
+        if not target:
+            _send(chat_id, f"No user found for “{ref}”.")
+            return
+        if sub == "grant":
+            telegram_link.set_admin(target["id"], True)
+            _send(chat_id, f"✅ {target.get('username') or ref} is now an admin.")
+        elif sub == "revoke":
+            if target.get("telegram_id") == SUPER_ADMIN_TG_ID:
+                _send(chat_id, "Can't revoke the built-in super-admin.")
+                return
+            telegram_link.set_admin(target["id"], False)
+            _send(chat_id, f"✅ {target.get('username') or ref} is no longer an admin.")
+        elif sub == "allowzip":
+            telegram_link.set_zip_permission(target["id"], True)
+            _send(chat_id, f"✅ {target.get('username') or ref} can now upload .zip bundles.")
+        else:
+            telegram_link.set_zip_permission(target["id"], False)
+            _send(chat_id, f"✅ {target.get('username') or ref} can no longer upload .zip bundles.")
+        return
+
+    _send(chat_id, f"Unknown admin subcommand “{sub}”. Try `/admin` for the list.")
 
 # CODE-VIA-CHAT — READ THIS BEFORE TOUCHING /code, /update, or _pending.
 #
@@ -325,7 +409,6 @@ def _help_text(user):
         "(text or a file)\n"
         "`/update <name>` — push new code to an existing app, then send it "
         "(auto-saves & restarts)\n"
-        "`/import <github url> [name]` — clone a public repo and deploy it\n"
         "`/apps` — everything you have, with live status\n"
         "`/status [name]` — account summary, or one app in full\n"
         "`/logs <name>` — the last lines it printed\n"
@@ -526,10 +609,8 @@ def cmd_status(chat_id, user, ref=""):
         if info.get("env_keys"):
             # KEY NAMES ONLY — the values are bot tokens.
             txt.append(f"Env keys: `{', '.join(info['env_keys'])}`")
-        web = runner_client._job_web_fields(info, bot_ops._worker_of(job)) or {}
         _send(chat_id, "\n".join(txt),
-              reply_markup=_app_buttons(job["id"], url=web.get("web") or web.get("web_url") or "",
-                                         bot_username=job.get("telegram_bot_username") or ""))
+              reply_markup=_app_buttons(job["id"], bot_username=job.get("telegram_bot_username") or ""))
         return
 
     apps = bot_ops.list_apps(user["id"])
@@ -556,10 +637,8 @@ def cmd_logs(chat_id, user, ref):
     if len(body) > 3500:
         body = "…\n" + body[-3500:]
     head = "📜 last lines" + (" (trimmed)" if res.get("truncated") else "")
-    web = runner_client._job_web_fields(res.get("info") or {}, bot_ops._worker_of(res["job"])) or {}
     _send(chat_id, f"*{res['job']['name']}* — {head}\n```\n{body}\n```",
-          reply_markup=_app_buttons(res["job"]["id"], url=web.get("web") or web.get("web_url") or "",
-                                     bot_username=res["job"].get("telegram_bot_username") or ""))
+          reply_markup=_app_buttons(res["job"]["id"], bot_username=res["job"].get("telegram_bot_username") or ""))
 
 
 def cmd_restart(chat_id, user, ref):
@@ -612,53 +691,6 @@ def cmd_rename(chat_id, user, args):
 
 
 # ==================== /code AND /update — see the module comment above ====
-
-def cmd_import(chat_id, user, arg):
-    """/import <github url> [name] — clone a public GitHub repo and deploy it.
-    The runner auto-detects which file to run (main.py/bot.py/app.py first,
-    then a manifest-aware fallback — same logic the website's import uses,
-    see runner/app.py:_detect_entry). A static site (index.html, no
-    requirements.txt/package.json) is served as-is."""
-    if not arg:
-        _send(chat_id, "Usage: `/import <github.com/user/repo>`\n"
-                       "Optionally name it yourself: `/import <url> myapp`\n"
-                       "Only public repos are supported right now.")
-        return
-    parts = arg.split(None, 1)
-    url = parts[0]
-    name = parts[1].strip() if len(parts) > 1 else ""
-    m = re.search(r"github\.com/([^/\s]+)/([^/\s]+)", url)
-    if not m:
-        _send(chat_id, "That doesn't look like a github.com repo URL — "
-                       "expected something like `github.com/user/repo`.")
-        return
-    if not name:
-        name = m.group(2).replace(".git", "")
-    clean = bot_ops.slugify_name(name)
-    if not clean:
-        _send(chat_id, "That name has no usable characters — letters, numbers, "
-                       "spaces, `-` and `_` only.")
-        return
-    if bot_ops.find_app(user["id"], clean):
-        _send(chat_id, f"You already have an app called “{clean}”. Pick a "
-                       f"different name: `/import {url} <name>`.")
-        return
-    _send(chat_id, f"📥 Cloning and deploying *{clean}*… this can take a "
-                   f"little longer than /code, since the repo has to be "
-                   f"fetched first.")
-    res = bot_ops.create_app_from_repo(user["id"], clean, url)
-    if not res.get("ok"):
-        _send(chat_id, f"❌ {res['error']}")
-        return
-    url_web = res.get("web") or ""
-    _send(chat_id, f"✅ *{res['name']}* imported and running.\n"
-                   + (url_web + "\n" if url_web else "")
-                   + "⚠️ No Telegram bot token check on import yet — if this "
-                     f"is meant to be a Telegram bot, run `/status {res['name']}` "
-                     f"to confirm it's actually polling.\n"
-                   + f"`/logs {res['name']}` if anything looks wrong.",
-          reply_markup=_app_buttons(res["job_db_id"], url=url_web))
-
 
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
@@ -726,32 +758,124 @@ def _get_pending(chat_id):
 
 TG_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024   # Telegram bot API download ceiling
 
+# .zip bundles: RunSpace only ever runs ONE source file (see _CODE_EXT_LANG —
+# the runner has no multi-file support), so a zip is just a convenience for
+# "my code plus a requirements.txt in one upload", not a real multi-file app.
+# Extraction reads member bytes straight out of the ZipFile object in memory
+# — nothing is ever written to disk — so there's no zip-slip path-traversal
+# surface here at all.
+ZIP_MAX_UNCOMPRESSED_BYTES = 5 * 1024 * 1024   # 5MB unzipped, plenty for source
+ZIP_MAX_ENTRIES = 500
+_ZIP_ENTRY_PREFERENCE = ("main", "bot", "app", "index", "run")
+
+
+def _pick_zip_entry(code_names: list) -> str:
+    """Choose which code file in the zip to deploy, preferring conventional
+    entry-point names and shallower paths."""
+    def sort_key(name):
+        base = name.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0].lower()
+        depth = name.count("/")
+        pref_rank = (_ZIP_ENTRY_PREFERENCE.index(stem)
+                     if stem in _ZIP_ENTRY_PREFERENCE else len(_ZIP_ENTRY_PREFERENCE))
+        return (depth, pref_rank, name)
+    return sorted(code_names, key=sort_key)[0]
+
+
+def _extract_zip_document(raw: bytes) -> tuple:
+    """Pull one runnable source file (+ optional requirements.txt) out of an
+    uploaded .zip. Returns (code, lang, requirements, note, error) — same
+    error-tuple convention as _download_document, just two extra slots for
+    the requirements text pulled from the zip and a heads-up note to show
+    the user (e.g. "other files were ignored")."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        return None, None, None, None, "That .zip file looks corrupted — try re-exporting it."
+
+    infos = [i for i in zf.infolist() if not i.is_dir()]
+    if len(infos) > ZIP_MAX_ENTRIES:
+        return None, None, None, None, f"That zip has {len(infos)} files — over the {ZIP_MAX_ENTRIES} limit."
+    total = sum(i.file_size for i in infos)
+    if total > ZIP_MAX_UNCOMPRESSED_BYTES:
+        mb = ZIP_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)
+        return None, None, None, None, f"Unzipped that's over {mb}MB — too big for a RunSpace bundle."
+
+    names = [
+        i.filename for i in infos
+        if not i.filename.startswith("__MACOSX/")
+        and not i.filename.rsplit("/", 1)[-1].startswith(".")
+    ]
+    code_names = [
+        n for n in names
+        if "." in n.rsplit("/", 1)[-1]
+        and n.rsplit(".", 1)[-1].lower() in _CODE_EXT_LANG
+    ]
+    if not code_names:
+        return None, None, None, None, ("No runnable file found inside — need one of "
+                                         ".py/.js/.sh/.rb/.php (e.g. `main.py`).")
+
+    entry = _pick_zip_entry(code_names)
+    lang = _CODE_EXT_LANG[entry.rsplit(".", 1)[-1].lower()]
+    try:
+        code = zf.read(entry).decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None, None, None, f"`{entry}` isn't plain text — can't deploy a binary as source code."
+
+    req_name = next((n for n in names if n.rsplit("/", 1)[-1].lower() == "requirements.txt"), None)
+    reqs = None
+    if req_name:
+        try:
+            reqs = zf.read(req_name).decode("utf-8").strip() or None
+        except UnicodeDecodeError:
+            reqs = None
+
+    ignored = len(code_names) - 1
+    note = None
+    if ignored > 0:
+        note = (f"📦 Using `{entry}` as the entry point ({ignored} other code "
+                f"file(s) in the zip were ignored — RunSpace apps run a single file).")
+
+    return code, lang, reqs, note, None
+
 
 def _download_document(doc) -> tuple:
-    """Fetch an uploaded document's text content.
+    """Fetch an uploaded document and resolve it to deployable source.
 
-    Returns (text, error). error is a user-facing string, or None on success.
-    Binary files (images, zips, compiled anything) are rejected here rather
-    than silently mangled — RunSpace runs source text, nothing else.
+    Returns (code, lang, requirements, note, error):
+      - error is a user-facing string, or None on success.
+      - lang/requirements/note are None for a plain source file; a .zip can
+        populate lang (from whichever entry file it picked) and requirements
+        (from a requirements.txt inside it) and note (a heads-up about
+        files that were ignored).
+    Binary files (images, compiled anything) are rejected — RunSpace runs
+    source text, nothing else. .zip is the one archive format supported,
+    handled by _extract_zip_document.
     """
     size = doc.get("file_size") or 0
     if size > TG_MAX_DOWNLOAD_BYTES:
-        return None, f"That file is {size // (1024*1024)}MB — Telegram bots can only download up to 20MB."
+        return None, None, None, None, f"That file is {size // (1024*1024)}MB — Telegram bots can only download up to 20MB."
     try:
         meta = _tg("getFile", file_id=doc["file_id"])
         file_path = (meta.get("result") or {}).get("file_path")
         if not file_path:
-            return None, "Telegram didn't return that file. Try sending it again."
+            return None, None, None, None, "Telegram didn't return that file. Try sending it again."
         r = requests.get(f"{TG_FILE_API}/{file_path}", timeout=60)
         r.raise_for_status()
         raw = r.content
     except Exception as exc:  # noqa: BLE001
         logger.warning("bot document download failed: %s", exc)
-        return None, "Couldn't download that file from Telegram. Try again."
+        return None, None, None, None, "Couldn't download that file from Telegram. Try again."
+
+    filename = doc.get("file_name") or ""
+    if filename.lower().endswith(".zip"):
+        return _extract_zip_document(raw)
+
     try:
-        return raw.decode("utf-8"), None
+        code = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None, "That file isn't plain text (looks binary) — RunSpace runs source code, not compiled files or archives."
+        return None, None, None, None, "That file isn't plain text (looks binary) — RunSpace runs source code, not compiled files or archives."
+    return code, _lang_for_document(filename), None, None, None
 
 
 def _lang_for_document(filename: str) -> str:
@@ -775,16 +899,70 @@ def handle_pending_code(chat_id, msg, pending):
         pending["step"] = "code"
         pending["expires"] = time.time() + _PENDING_TTL_S
         _send(chat_id, "Now send the source — paste it as a message, or "
-                       "upload a file (.py/.js/.sh/.rb/.php). `/cancel` to stop.")
+                       "upload a file (.py/.js/.sh/.rb/.php) or a .zip bundle. `/cancel` to stop.")
         return
 
     doc = msg.get("document")
+    zip_raw = None
+    if doc and (doc.get("file_name") or "").lower().endswith(".zip"):
+        tg_uid = (msg.get("from") or {}).get("id")
+        linked_user = telegram_link.user_for_chat(tg_uid)
+        if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")):
+            _send(chat_id, "🔒 .zip uploads need admin approval on this account. "
+                           "Ask an admin to run `/admin allowzip` for you, or send a "
+                           "single source file instead.")
+            return
+        if pending["mode"] == "create":
+            # Multi-file path: hand the WHOLE zip to the runner, which
+            # extracts it for real (see runner/app.py:_extract_zip_bundle)
+            # instead of the old behaviour of reading one file out of it and
+            # dropping every other file in the zip — which is exactly what
+            # broke any app whose entry file imported a sibling module.
+            size = doc.get("file_size") or 0
+            if size > TG_MAX_DOWNLOAD_BYTES:
+                _send(chat_id, f"❌ That file is {size // (1024*1024)}MB — "
+                               f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`.")
+                return
+            try:
+                meta = _tg("getFile", file_id=doc["file_id"])
+                file_path = (meta.get("result") or {}).get("file_path")
+                r = requests.get(f"{TG_FILE_API}/{file_path}", timeout=60)
+                r.raise_for_status()
+                zip_raw = r.content
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("bot zip download failed: %s", exc)
+                _send(chat_id, "❌ Couldn't download that zip from Telegram. Try again, or `/cancel`.")
+                return
+        else:
+            _send(chat_id, "⚠️ Note: `/update` with a .zip still only replaces the single entry "
+                           "file, not the whole bundle — full multi-file update isn't built yet. "
+                           "For a multi-file change, `/delete` and recreate with `/code` instead.")
+
+    if zip_raw is not None:
+        _pending.pop(chat_id, None)
+        _send(chat_id, f"📦 Extracting *{pending['name']}*…")
+        res = bot_ops.create_app_from_zip(pending["user_id"], pending["name"], zip_raw)
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res['error']}")
+            return
+        url = res.get("web") or ""
+        _send(chat_id, f"✅ *{res['name']}* created and running.\n"
+                       + (url + "\n" if url else "")
+                       + "⚠️ No Telegram bot token check on a zip import yet — if this is a "
+                         f"bot, `/update {res['name']}` once (with the same entry file's code) "
+                         f"to verify it.\n`/status {res['name']}` for details.",
+              reply_markup=_app_buttons(res["job_db_id"], url=url))
+        return
+
     if doc:
-        code, err = _download_document(doc)
+        code, doc_lang, zip_reqs, note, err = _download_document(doc)
         if err:
             _send(chat_id, f"❌ {err}\nSend the file again, or `/cancel`.")
             return  # slot stays open — let them retry without re-typing the command
-        doc_lang = _lang_for_document(doc.get("file_name", ""))
+        if note:
+            _send(chat_id, note)
+        if zip_reqs and not (pending.get("requirements") or "").strip():
+            pending["requirements"] = zip_reqs
     else:
         code = (msg.get("text") or "").strip()
         doc_lang = None
@@ -996,7 +1174,7 @@ def handle_update(upd):
                 "/rename": lambda: gated(lambda u: cmd_rename(chat_id, u, arg)),
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
-                "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
+                "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
             }
