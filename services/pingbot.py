@@ -43,73 +43,128 @@ def _is_admin(user, telegram_user_id=None) -> bool:
     return bool(user and user.get("is_admin"))
 
 
+def _admin_menu_kb():
+    return {"inline_keyboard": [
+        [{"text": "📊 Overview", "callback_data": "admin:overview"},
+         {"text": "👥 Users", "callback_data": "admin:users:0"}],
+    ]}
+
+
+def _admin_user_row_kb(target: dict):
+    uid = target["id"]
+    admin_lbl = "➖ Revoke admin" if target.get("is_admin") else "➕ Grant admin"
+    zip_lbl = "🚫 Deny zip" if target.get("can_upload_zip") else "📦 Allow zip"
+    susp_lbl = "✅ Unsuspend" if target.get("is_suspended") else "⛔ Suspend"
+    rows = [
+        [{"text": admin_lbl, "callback_data": f"admin:togadmin:{uid}"},
+         {"text": zip_lbl, "callback_data": f"admin:togzip:{uid}"}],
+        [{"text": susp_lbl, "callback_data": f"admin:togsuspend:{uid}"}],
+        [{"text": "⬅️ Users", "callback_data": "admin:users:0"}],
+    ]
+    return {"inline_keyboard": rows}
+
+
+def _admin_user_detail_text(target: dict) -> str:
+    flags = []
+    if target.get("is_admin"): flags.append("admin")
+    if target.get("can_upload_zip"): flags.append("zip-allowed")
+    if target.get("is_suspended"): flags.append("suspended")
+    tag = ", ".join(flags) or "no special flags"
+    tid = target.get("telegram_id") or "not linked"
+    return (f"*{target.get('username') or '(no username)'}* (#{target['id']})\n"
+            f"Telegram: `{tid}`\n"
+            f"Flags: {tag}")
+
+
 def cmd_admin(chat_id, telegram_user_id, arg):
-    """/admin — the hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1.
-    Subcommands: users, grant <ref>, revoke <ref>, allowzip <ref>, denyzip <ref>.
-    <ref> is a CodeNest username or a Telegram user id — whichever the
-    admin has on hand."""
+    """/admin — inline-button panel. The hardcoded SUPER_ADMIN_TG_ID or any
+    user with is_admin=1 can open it; every button re-checks admin status
+    on press, since callback_data is attacker-suppliable in principle."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        _send(chat_id, "🔒 Admin only.")
+        return
+    _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
+
+
+def _admin_users_kb(page: int):
+    rows = telegram_link.list_admin_overview(limit=200)
+    per_page = 8
+    start = page * per_page
+    page_rows = rows[start:start + per_page]
+    kb = []
+    for r in page_rows:
+        flags = []
+        if r.get("is_admin"): flags.append("A")
+        if r.get("can_upload_zip"): flags.append("Z")
+        if r.get("is_suspended"): flags.append("S")
+        label = r.get("username") or f"#{r['id']}"
+        if flags:
+            label += " [" + "".join(flags) + "]"
+        kb.append([{"text": label, "callback_data": f"admin:user:{r['id']}"}])
+    nav = []
+    if start > 0:
+        nav.append({"text": "◀️ Prev", "callback_data": f"admin:users:{page-1}"})
+    if start + per_page < len(rows):
+        nav.append({"text": "Next ▶️", "callback_data": f"admin:users:{page+1}"})
+    if nav:
+        kb.append(nav)
+    kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+    return {"inline_keyboard": kb}
+
+
+def handle_admin_callback(chat_id, telegram_user_id, action, ref):
+    """Every admin: callback lands here. Re-checks admin status on every
+    single press — a button label is not a permission, whoever crafted the
+    tap is."""
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
         _send(chat_id, "🔒 Admin only.")
         return
 
-    parts = (arg or "").split(None, 1)
-    sub = parts[0].lower() if parts else ""
-    ref = parts[1].strip() if len(parts) > 1 else ""
-
-    if sub in ("", "help"):
-        _send(chat_id,
-              "*Admin panel*\n"
-              "`/admin users` — recent users and their flags\n"
-              "`/admin grant <username|telegram_id>` — make someone admin\n"
-              "`/admin revoke <username|telegram_id>` — remove admin\n"
-              "`/admin allowzip <username|telegram_id>` — allow .zip uploads\n"
-              "`/admin denyzip <username|telegram_id>` — block .zip uploads")
+    if action == "menu":
+        _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
         return
 
-    if sub == "users":
-        rows = telegram_link.list_admin_overview()
-        if not rows:
-            _send(chat_id, "No users yet.")
-            return
-        lines = ["*Recent users:*"]
-        for r in rows:
-            flags = []
-            if r.get("is_admin"): flags.append("admin")
-            if r.get("can_upload_zip"): flags.append("zip")
-            if r.get("is_suspended"): flags.append("suspended")
-            tag = f" [{', '.join(flags)}]" if flags else ""
-            tid = r.get("telegram_id") or "—"
-            lines.append(f"#{r['id']} {r.get('username') or '(no username)'} · tg:{tid}{tag}")
-        _send(chat_id, "\n".join(lines))
+    if action == "overview":
+        s = telegram_link.admin_overview_stats()
+        text = ("📊 *Overview*\n"
+                f"Users: *{s['users']}* ({s['tg_linked']} linked to Telegram)\n"
+                f"Admins: *{s['admins']}* · Zip-allowed: *{s['zip_allowed']}* · Suspended: *{s['suspended']}*\n"
+                f"Jobs: *{s['jobs_total']}* total, *{s['jobs_deployed']}* deployed")
+        _send(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
-    if sub in ("grant", "revoke", "allowzip", "denyzip"):
-        if not ref:
-            _send(chat_id, f"Usage: `/admin {sub} <username or telegram_id>`")
-            return
-        target = telegram_link.resolve_user_ref(ref)
+    if action == "users":
+        page = int(ref) if ref.isdigit() else 0
+        _send(chat_id, "👥 *Users* — tap one to manage:", reply_markup=_admin_users_kb(page))
+        return
+
+    if action == "user":
+        target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
         if not target:
-            _send(chat_id, f"No user found for “{ref}”.")
+            _send(chat_id, "That user no longer exists.")
             return
-        if sub == "grant":
-            telegram_link.set_admin(target["id"], True)
-            _send(chat_id, f"✅ {target.get('username') or ref} is now an admin.")
-        elif sub == "revoke":
-            if target.get("telegram_id") == SUPER_ADMIN_TG_ID:
-                _send(chat_id, "Can't revoke the built-in super-admin.")
-                return
-            telegram_link.set_admin(target["id"], False)
-            _send(chat_id, f"✅ {target.get('username') or ref} is no longer an admin.")
-        elif sub == "allowzip":
-            telegram_link.set_zip_permission(target["id"], True)
-            _send(chat_id, f"✅ {target.get('username') or ref} can now upload .zip bundles.")
-        else:
-            telegram_link.set_zip_permission(target["id"], False)
-            _send(chat_id, f"✅ {target.get('username') or ref} can no longer upload .zip bundles.")
+        _send(chat_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
         return
 
-    _send(chat_id, f"Unknown admin subcommand “{sub}”. Try `/admin` for the list.")
+    if action in ("togadmin", "togzip", "togsuspend"):
+        target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
+        if not target:
+            _send(chat_id, "That user no longer exists.")
+            return
+        if action == "togadmin":
+            if target.get("telegram_id") == SUPER_ADMIN_TG_ID and target.get("is_admin"):
+                _send(chat_id, "Can't revoke the built-in super-admin.")
+            else:
+                telegram_link.set_admin(target["id"], not target.get("is_admin"))
+        elif action == "togzip":
+            telegram_link.set_zip_permission(target["id"], not target.get("can_upload_zip"))
+        else:
+            telegram_link.set_suspended(target["id"], not target.get("is_suspended"))
+        target = telegram_link.get_user_by_id(target["id"])  # fresh flags
+        _send(chat_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        return
 
 # CODE-VIA-CHAT — READ THIS BEFORE TOUCHING /code, /update, or _pending.
 #
@@ -409,6 +464,7 @@ def _help_text(user):
         "(text or a file)\n"
         "`/update <name>` — push new code to an existing app, then send it "
         "(auto-saves & restarts)\n"
+        "`/import <github url> [name]` — clone a public repo and deploy it\n"
         "`/apps` — everything you have, with live status\n"
         "`/status [name]` — account summary, or one app in full\n"
         "`/logs <name>` — the last lines it printed\n"
@@ -691,6 +747,53 @@ def cmd_rename(chat_id, user, args):
 
 
 # ==================== /code AND /update — see the module comment above ====
+
+def cmd_import(chat_id, user, arg):
+    """/import <github url> [name] — clone a public GitHub repo and deploy it.
+    The runner auto-detects which file to run (main.py/bot.py/app.py first,
+    then a manifest-aware fallback — see runner/app.py:_detect_entry). A
+    static site (index.html, no requirements.txt/package.json) is served
+    as-is."""
+    if not arg:
+        _send(chat_id, "Usage: `/import <github.com/user/repo>`\n"
+                       "Optionally name it yourself: `/import <url> myapp`\n"
+                       "Only public repos are supported right now.")
+        return
+    parts = arg.split(None, 1)
+    url = parts[0]
+    name = parts[1].strip() if len(parts) > 1 else ""
+    m = re.search(r"github\.com/([^/\s]+)/([^/\s]+)", url)
+    if not m:
+        _send(chat_id, "That doesn't look like a github.com repo URL — "
+                       "expected something like `github.com/user/repo`.")
+        return
+    if not name:
+        name = m.group(2).replace(".git", "")
+    clean = bot_ops.slugify_name(name)
+    if not clean:
+        _send(chat_id, "That name has no usable characters — letters, numbers, "
+                       "spaces, `-` and `_` only.")
+        return
+    if bot_ops.find_app(user["id"], clean):
+        _send(chat_id, f"You already have an app called “{clean}”. Pick a "
+                       f"different name: `/import {url} <name>`.")
+        return
+    _send(chat_id, f"📥 Cloning and deploying *{clean}*… this can take a "
+                   f"little longer than /code, since the repo has to be "
+                   f"fetched first.")
+    res = bot_ops.create_app_from_repo(user["id"], clean, url)
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    url_web = res.get("web") or ""
+    _send(chat_id, f"✅ *{res['name']}* imported and running.\n"
+                   + (url_web + "\n" if url_web else "")
+                   + "⚠️ No Telegram bot token check on import yet — if this "
+                     f"is meant to be a Telegram bot, run `/status {res['name']}` "
+                     f"to confirm it's actually polling.\n"
+                   + f"`/logs {res['name']}` if anything looks wrong.",
+          reply_markup=_app_buttons(res["job_db_id"], url=url_web))
+
 
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
@@ -1027,6 +1130,17 @@ def handle_callback(chat_id, data):
         action, ref = data.split(":", 1)
     except Exception:
         return
+
+    if action == "admin":
+        try:
+            sub_action, sub_ref = ref.split(":", 1)
+        except ValueError:
+            sub_action, sub_ref = ref, ""
+        # Private chat: chat_id IS the Telegram user id of whoever pressed
+        # the button — same identity handle_admin_callback re-checks itself.
+        handle_admin_callback(chat_id, chat_id, sub_action, sub_ref)
+        return
+
     user = telegram_link.user_for_chat(chat_id)
     if not user:
         return
@@ -1182,6 +1296,7 @@ def handle_update(upd):
                 "/rename": lambda: gated(lambda u: cmd_rename(chat_id, u, arg)),
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
+                "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
