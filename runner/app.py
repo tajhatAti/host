@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import zipfile
 import tempfile
 import threading
 import time
@@ -711,6 +712,12 @@ class JobStartRequest(BaseModel):
     restart: Optional[bool] = True
     repo_url: Optional[str] = ""
     entry: Optional[str] = ""
+    # Base64-encoded .zip bundle: an alternative to repo_url for multi-file
+    # apps that aren't on GitHub. Extracted into the job's own directory the
+    # same way a repo clone is, then goes through the SAME _detect_entry
+    # pipeline — so imports between files in the bundle work exactly like
+    # they do for a cloned repo.
+    zip_b64: Optional[str] = ""
     # User-supplied environment variables (API keys, bot tokens, ...). These
     # are injected into the job process at spawn time.
     env: Optional[dict] = None
@@ -824,6 +831,66 @@ def _detect_imports(code: str) -> list:
     for p in _parse_requirements(code):
         pkgs.add(p)
     return sorted(pkgs)[:20]  # sanity cap
+
+
+ZIP_BUNDLE_MAX_BYTES = 5 * 1024 * 1024   # 5MB uncompressed
+ZIP_BUNDLE_MAX_ENTRIES = 500
+
+
+def _extract_zip_bundle(zip_b64: str, target_dir: str, log: deque) -> bool:
+    """Extract a base64-encoded .zip into target_dir. Returns True on success.
+
+    Sibling to _clone_repo: same role (get a whole multi-file app onto disk
+    before _detect_entry runs), different source. Every member path is
+    resolved and checked against target_dir before writing — a zip entry
+    like "../../etc/passwd" or an absolute path is rejected outright
+    (zip-slip), not merely warned about.
+    """
+    try:
+        raw = base64.b64decode(zip_b64, validate=True)
+    except Exception:
+        log.append("[system] ✗ zip bundle was not valid base64")
+        return False
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        log.append("[system] ✗ zip bundle is corrupted")
+        return False
+
+    infos = [i for i in zf.infolist() if not i.is_dir()]
+    if len(infos) > ZIP_BUNDLE_MAX_ENTRIES:
+        log.append(f"[system] ✗ zip has {len(infos)} files, over the {ZIP_BUNDLE_MAX_ENTRIES} limit")
+        return False
+    total = sum(i.file_size for i in infos)
+    if total > ZIP_BUNDLE_MAX_BYTES:
+        mb = ZIP_BUNDLE_MAX_BYTES // (1024 * 1024)
+        log.append(f"[system] ✗ zip unpacks to over {mb}MB")
+        return False
+
+    os.makedirs(target_dir, exist_ok=True)
+    real_target = os.path.realpath(target_dir)
+    written = 0
+    for info in infos:
+        name = info.filename
+        if name.startswith("__MACOSX/") or name.rsplit("/", 1)[-1].startswith("."):
+            continue
+        # Zip-slip guard: resolve where this member would actually land and
+        # refuse anything that escapes target_dir — "../x", an absolute
+        # path, or a symlink-like trick all fail this the same way.
+        dest = os.path.realpath(os.path.join(target_dir, name))
+        if os.path.commonpath([dest, real_target]) != real_target:
+            log.append(f"[system] ✗ skipped unsafe path in zip: {name}")
+            continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with zf.open(info) as src, open(dest, "wb") as out:
+            out.write(src.read())
+        written += 1
+
+    if written == 0:
+        log.append("[system] ✗ zip had no usable files after filtering")
+        return False
+    log.append(f"[system] extracted {written} file(s) from the uploaded zip")
+    return True
 
 
 def _clone_repo(repo_url: str, target_dir: str, log: deque) -> bool:
@@ -1781,7 +1848,7 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
     # A repo job legitimately has NO inline code: the source arrives with the
     # clone. This check ran before the clone and rejected every repo import
     # outright -- reported as "code empty" on a repo that plainly has files.
-    if not code.strip() and not (req.repo_url or "").strip():
+    if not code.strip() and not (req.repo_url or "").strip() and not (req.zip_b64 or "").strip():
         raise HTTPException(400, detail="Code is empty.")
 
     # Admission by MEASURED memory, not by job count. Counting assumed every
@@ -1817,6 +1884,12 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
             shutil.rmtree(jdir, ignore_errors=True)
             raise HTTPException(400, detail="Repo clone failed:\n" + "\n".join(repo_log)[-2000:])
 
+    zip_b64 = (req.zip_b64 or "").strip()
+    if zip_b64:
+        if not _extract_zip_bundle(zip_b64, jdir, repo_log):
+            shutil.rmtree(jdir, ignore_errors=True)
+            raise HTTPException(400, detail="Zip extraction failed:\n" + "\n".join(repo_log)[-2000:])
+
     # Detect entry point — either user-supplied, auto-detected, or falls back to inline code.
     inline_has_code = bool(code.strip())
     detected_lang, detected_src = None, None
@@ -1832,7 +1905,7 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
         if detected_lang and detected_lang in LANGS:
             lang = detected_lang
     else:
-        dl, ds = _detect_entry(jdir, inline_has_code and not repo_url, repo_log)
+        dl, ds = _detect_entry(jdir, inline_has_code and not repo_url and not zip_b64, repo_log)
         if dl and ds:
             detected_lang, detected_src = dl, ds
             if not inline_has_code:
