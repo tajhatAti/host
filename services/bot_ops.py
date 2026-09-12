@@ -568,6 +568,90 @@ def create_app(user_id: int, name: str, language: str, code: str) -> dict:
             "web": web.get("web") or web.get("web_url")}
 
 
+def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = None) -> dict:
+    """Multi-file variant of update_code, for a permitted /update with a
+    .zip. The runner extracts the WHOLE zip into the app's existing
+    workspace (files not in the zip — a database, a session file — are
+    left alone, since extraction only ever WRITES what's inside the zip,
+    never clears the directory first) and re-detects the entry point."""
+    import base64
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. /apps lists yours."}
+
+    rid = row.get("runner_job_id")
+    lang = language or row["language"]
+    now = now_utc_str()
+    zip_b64 = base64.b64encode(zip_bytes).decode("ascii")
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET language = ?, updated_at = ? WHERE id = ?",
+                     (lang, now, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    env = _row_env(row)
+
+    if not rid:
+        body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
+                "env": env, "zip_b64": zip_b64}
+        resp = runner_client._runner_http("POST", "/internal/jobs", body)
+        if resp.status_code != 201:
+            try:
+                detail = resp.json().get("detail", "Runner rejected the app.")
+            except Exception:
+                detail = "Runner rejected the app."
+            return {"ok": False, "error": detail}
+        info = resp.json()
+        conn = get_db_connection()
+        try:
+            conn.execute("UPDATE jobs SET runner_job_id=?,worker_url=?,desired_state='running',updated_at=? WHERE id=?",
+                         (info["id"],getattr(resp,"placed_on",None),now_utc_str(),row["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "job": row}
+
+    try:
+        from services import snapshots
+        snapshots.save_snapshot(row["id"], rid, worker=_worker_of(row))
+    except Exception as exc:
+        logger.warning("bot update_from_zip: pre-update snapshot failed for job %s: %s", row["id"], exc)
+
+    patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64}
+    resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch_body,
+                                       worker=_worker_of(row))
+    if resp.status_code == 200:
+        _set_assignment(row, rid, _worker_of(row), "running")
+        return {"ok": True, "job": row}
+
+    if resp.status_code == 404:
+        create_body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
+                       "env": env, "zip_b64": zip_b64}
+        resp2 = runner_client._runner_http("POST", "/internal/jobs", create_body)
+        if resp2.status_code != 201:
+            try:
+                detail = resp2.json().get("detail", "Runner rejected the update.")
+            except Exception:
+                detail = "Runner rejected the update."
+            return {"ok": False, "error": detail}
+        info = resp2.json()
+        conn = get_db_connection()
+        try:
+            conn.execute("UPDATE jobs SET runner_job_id=?,worker_url=?,desired_state='running',updated_at=? WHERE id=?",
+                         (info["id"],getattr(resp2,"placed_on",None),now_utc_str(),row["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "job": row}
+
+    try:
+        detail = resp.json().get("detail", "Runner rejected the update.")
+    except Exception:
+        detail = "Runner rejected the update."
+    return {"ok": False, "error": detail}
+
+
 def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict:
     """Redeploy an EXISTING app in place with new code — the chat equivalent
     of PATCH /api/jobs/{id}. Same worker, same slug/URL, same persistent
