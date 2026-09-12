@@ -6,11 +6,13 @@ Features:
 - Inline buttons after deploy
 - Real logs, Uptime, Download DB
 """
+import io
 import json
 import os
 import re
 import threading
 import time
+import zipfile
 import requests
 from collections import defaultdict
 
@@ -674,32 +676,124 @@ def _get_pending(chat_id):
 
 TG_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024   # Telegram bot API download ceiling
 
+# .zip bundles: RunSpace only ever runs ONE source file (see _CODE_EXT_LANG —
+# the runner has no multi-file support), so a zip is just a convenience for
+# "my code plus a requirements.txt in one upload", not a real multi-file app.
+# Extraction reads member bytes straight out of the ZipFile object in memory
+# — nothing is ever written to disk — so there's no zip-slip path-traversal
+# surface here at all.
+ZIP_MAX_UNCOMPRESSED_BYTES = 5 * 1024 * 1024   # 5MB unzipped, plenty for source
+ZIP_MAX_ENTRIES = 500
+_ZIP_ENTRY_PREFERENCE = ("main", "bot", "app", "index", "run")
+
+
+def _pick_zip_entry(code_names: list) -> str:
+    """Choose which code file in the zip to deploy, preferring conventional
+    entry-point names and shallower paths."""
+    def sort_key(name):
+        base = name.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0].lower()
+        depth = name.count("/")
+        pref_rank = (_ZIP_ENTRY_PREFERENCE.index(stem)
+                     if stem in _ZIP_ENTRY_PREFERENCE else len(_ZIP_ENTRY_PREFERENCE))
+        return (depth, pref_rank, name)
+    return sorted(code_names, key=sort_key)[0]
+
+
+def _extract_zip_document(raw: bytes) -> tuple:
+    """Pull one runnable source file (+ optional requirements.txt) out of an
+    uploaded .zip. Returns (code, lang, requirements, note, error) — same
+    error-tuple convention as _download_document, just two extra slots for
+    the requirements text pulled from the zip and a heads-up note to show
+    the user (e.g. "other files were ignored")."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        return None, None, None, None, "That .zip file looks corrupted — try re-exporting it."
+
+    infos = [i for i in zf.infolist() if not i.is_dir()]
+    if len(infos) > ZIP_MAX_ENTRIES:
+        return None, None, None, None, f"That zip has {len(infos)} files — over the {ZIP_MAX_ENTRIES} limit."
+    total = sum(i.file_size for i in infos)
+    if total > ZIP_MAX_UNCOMPRESSED_BYTES:
+        mb = ZIP_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)
+        return None, None, None, None, f"Unzipped that's over {mb}MB — too big for a RunSpace bundle."
+
+    names = [
+        i.filename for i in infos
+        if not i.filename.startswith("__MACOSX/")
+        and not i.filename.rsplit("/", 1)[-1].startswith(".")
+    ]
+    code_names = [
+        n for n in names
+        if "." in n.rsplit("/", 1)[-1]
+        and n.rsplit(".", 1)[-1].lower() in _CODE_EXT_LANG
+    ]
+    if not code_names:
+        return None, None, None, None, ("No runnable file found inside — need one of "
+                                         ".py/.js/.sh/.rb/.php (e.g. `main.py`).")
+
+    entry = _pick_zip_entry(code_names)
+    lang = _CODE_EXT_LANG[entry.rsplit(".", 1)[-1].lower()]
+    try:
+        code = zf.read(entry).decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None, None, None, f"`{entry}` isn't plain text — can't deploy a binary as source code."
+
+    req_name = next((n for n in names if n.rsplit("/", 1)[-1].lower() == "requirements.txt"), None)
+    reqs = None
+    if req_name:
+        try:
+            reqs = zf.read(req_name).decode("utf-8").strip() or None
+        except UnicodeDecodeError:
+            reqs = None
+
+    ignored = len(code_names) - 1
+    note = None
+    if ignored > 0:
+        note = (f"📦 Using `{entry}` as the entry point ({ignored} other code "
+                f"file(s) in the zip were ignored — RunSpace apps run a single file).")
+
+    return code, lang, reqs, note, None
+
 
 def _download_document(doc) -> tuple:
-    """Fetch an uploaded document's text content.
+    """Fetch an uploaded document and resolve it to deployable source.
 
-    Returns (text, error). error is a user-facing string, or None on success.
-    Binary files (images, zips, compiled anything) are rejected here rather
-    than silently mangled — RunSpace runs source text, nothing else.
+    Returns (code, lang, requirements, note, error):
+      - error is a user-facing string, or None on success.
+      - lang/requirements/note are None for a plain source file; a .zip can
+        populate lang (from whichever entry file it picked) and requirements
+        (from a requirements.txt inside it) and note (a heads-up about
+        files that were ignored).
+    Binary files (images, compiled anything) are rejected — RunSpace runs
+    source text, nothing else. .zip is the one archive format supported,
+    handled by _extract_zip_document.
     """
     size = doc.get("file_size") or 0
     if size > TG_MAX_DOWNLOAD_BYTES:
-        return None, f"That file is {size // (1024*1024)}MB — Telegram bots can only download up to 20MB."
+        return None, None, None, None, f"That file is {size // (1024*1024)}MB — Telegram bots can only download up to 20MB."
     try:
         meta = _tg("getFile", file_id=doc["file_id"])
         file_path = (meta.get("result") or {}).get("file_path")
         if not file_path:
-            return None, "Telegram didn't return that file. Try sending it again."
+            return None, None, None, None, "Telegram didn't return that file. Try sending it again."
         r = requests.get(f"{TG_FILE_API}/{file_path}", timeout=60)
         r.raise_for_status()
         raw = r.content
     except Exception as exc:  # noqa: BLE001
         logger.warning("bot document download failed: %s", exc)
-        return None, "Couldn't download that file from Telegram. Try again."
+        return None, None, None, None, "Couldn't download that file from Telegram. Try again."
+
+    filename = doc.get("file_name") or ""
+    if filename.lower().endswith(".zip"):
+        return _extract_zip_document(raw)
+
     try:
-        return raw.decode("utf-8"), None
+        code = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None, "That file isn't plain text (looks binary) — RunSpace runs source code, not compiled files or archives."
+        return None, None, None, None, "That file isn't plain text (looks binary) — RunSpace runs source code, not compiled files or archives."
+    return code, _lang_for_document(filename), None, None, None
 
 
 def _lang_for_document(filename: str) -> str:
@@ -723,16 +817,19 @@ def handle_pending_code(chat_id, msg, pending):
         pending["step"] = "code"
         pending["expires"] = time.time() + _PENDING_TTL_S
         _send(chat_id, "Now send the source — paste it as a message, or "
-                       "upload a file (.py/.js/.sh/.rb/.php). `/cancel` to stop.")
+                       "upload a file (.py/.js/.sh/.rb/.php) or a .zip bundle. `/cancel` to stop.")
         return
 
     doc = msg.get("document")
     if doc:
-        code, err = _download_document(doc)
+        code, doc_lang, zip_reqs, note, err = _download_document(doc)
         if err:
             _send(chat_id, f"❌ {err}\nSend the file again, or `/cancel`.")
             return  # slot stays open — let them retry without re-typing the command
-        doc_lang = _lang_for_document(doc.get("file_name", ""))
+        if note:
+            _send(chat_id, note)
+        if zip_reqs and not (pending.get("requirements") or "").strip():
+            pending["requirements"] = zip_reqs
     else:
         code = (msg.get("text") or "").strip()
         doc_lang = None
