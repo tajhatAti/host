@@ -24,7 +24,8 @@ BOT_TOKEN = (os.getenv("BOT_TOKEN", "").strip()
 from services import telegram_link  # noqa: E402
 from services import bot_ops  # noqa: E402
 from services import runner_client  # noqa: E402
-from services import bot_analytics  # noqa: E402
+from services import bot_analytics
+from services import telegram_admin_ext  # noqa: E402
 
 import logging
 logger = logging.getLogger("codenest-app")
@@ -47,6 +48,11 @@ def _admin_menu_kb():
     return {"inline_keyboard": [
         [{"text": "📊 Overview", "callback_data": "admin:overview"},
          {"text": "👥 Users", "callback_data": "admin:users:0"}],
+        [{"text": "🖥 Runners", "callback_data": "admin:runners"},
+         {"text": "📦 Jobs", "callback_data": "admin:jobs:0"}],
+        [{"text": "📝 Audit log", "callback_data": "admin:audit"},
+         {"text": "🚩 Abuse reports", "callback_data": "admin:abuse"}],
+        [{"text": "🔍 Security", "callback_data": "admin:security"}],
     ]}
 
 
@@ -164,6 +170,108 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
             telegram_link.set_suspended(target["id"], not target.get("is_suspended"))
         target = telegram_link.get_user_by_id(target["id"])  # fresh flags
         _send(chat_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        return
+
+    if action == "runners":
+        data = telegram_admin_ext.runners_overview()
+        lines = ["🖥 *Runners*"]
+        kb = []
+        for r in data["runners"]:
+            dot = "🟢" if r.get("online") else "⚪"
+            lines.append(f"{dot} {r['label']} — {'enabled' if r['enabled'] else 'disabled'} "
+                         f"· {r.get('jobs', 0)}/{r.get('capacity', 0)} jobs")
+            kb.append([{"text": f"{'Disable' if r['enabled'] else 'Enable'} {r['label']}",
+                        "callback_data": f"admin:togrunner:{r['id']}"}])
+        if data.get("embedded"):
+            e = data["embedded"]
+            lines.append(f"{'🟢' if e['online'] else '⚪'} embedded · {e.get('jobs',0)}/{e.get('capacity',0)} jobs")
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "togrunner":
+        res = telegram_admin_ext.toggle_runner(int(ref)) if ref.isdigit() else None
+        if not res:
+            _send(chat_id, "That runner no longer exists.")
+            return
+        _send(chat_id, f"✅ {res['label']} is now {'enabled' if res['enabled'] else 'disabled'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "runners", "")
+        return
+
+    if action == "jobs":
+        page = int(ref) if ref.isdigit() else 0
+        per_page = 8
+        rows, total = telegram_admin_ext.jobs_recent(limit=per_page, offset=page * per_page)
+        kb = []
+        for j in rows:
+            label = f"{j['name']} · {j['owner']} · {j['live_status']}"
+            kb.append([{"text": label[:60], "callback_data": f"admin:job:{j['id']}"}])
+        nav = []
+        if page > 0:
+            nav.append({"text": "◀️ Prev", "callback_data": f"admin:jobs:{page-1}"})
+        if (page + 1) * per_page < total:
+            nav.append({"text": "Next ▶️", "callback_data": f"admin:jobs:{page+1}"})
+        if nav:
+            kb.append(nav)
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _send(chat_id, f"📦 *Jobs* ({total} total) — tap one:", reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "job":
+        j = telegram_admin_ext.job_detail(int(ref)) if ref.isdigit() else None
+        if not j:
+            _send(chat_id, "That job no longer exists.")
+            return
+        bot_line = f"\nBot: @{j['telegram_bot_username']}" if j.get("telegram_bot_username") else ""
+        text = (f"*{j['name']}* (#{j['id']})\n"
+                f"Owner: {j['owner']}{' ⛔suspended' if j.get('owner_suspended') else ''}\n"
+                f"Language: {j['language']} · Status: {j.get('live_status') or 'unknown'}\n"
+                f"Uptime: {j.get('uptime_s') or 0}s · Mem: {j.get('mem_mb') or 0}MB · "
+                f"Restarts: {j.get('restarts') or 0}{bot_line}")
+        kb = {"inline_keyboard": [[{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}]]}
+        _send(chat_id, text, reply_markup=kb)
+        return
+
+    if action == "audit":
+        rows = telegram_admin_ext.audit_log_recent()
+        if not rows:
+            lines = ["📝 *Audit log* — nothing recorded yet."]
+        else:
+            lines = ["📝 *Audit log* (most recent):"]
+            for r in rows:
+                who = r.get("admin_name") or "system"
+                lines.append(f"· {who} {r['action']} → {r.get('target') or '—'} ({r['created_at']})")
+        _send(chat_id, "\n".join(lines),
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "abuse":
+        rows = telegram_admin_ext.abuse_reports_open()
+        kb = []
+        if not rows:
+            lines = ["🚩 *Abuse reports* — none open."]
+        else:
+            lines = ["🚩 *Open abuse reports*:"]
+            for r in rows:
+                lines.append(f"#{r['id']} · {r.get('reason') or 'no reason given'} · {r['url'][:40]}")
+                kb.append([{"text": f"✅ Resolve #{r['id']}", "callback_data": f"admin:resolveabuse:{r['id']}"}])
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "resolveabuse":
+        ok = telegram_admin_ext.resolve_abuse_report(int(ref)) if ref.isdigit() else False
+        _send(chat_id, "✅ Marked resolved." if ok else "Couldn't find that report.")
+        handle_admin_callback(chat_id, telegram_user_id, "abuse", "")
+        return
+
+    if action == "security":
+        s = telegram_admin_ext.security_clusters_summary()
+        text = (f"🔍 *Security summary*\n"
+                f"Fingerprint clusters (shared device across accounts): *{s['fingerprint_clusters']}*\n\n"
+                f"This is a count only — open the website's admin panel for the actual "
+                f"IP/fingerprint cluster breakdown, that view needs a wider screen.")
+        _send(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
 # CODE-VIA-CHAT — READ THIS BEFORE TOUCHING /code, /update, or _pending.
