@@ -912,46 +912,54 @@ def handle_pending_code(chat_id, msg, pending):
                            "Ask an admin to run `/admin allowzip` for you, or send a "
                            "single source file instead.")
             return
-        if pending["mode"] == "create":
-            # Multi-file path: hand the WHOLE zip to the runner, which
-            # extracts it for real (see runner/app.py:_extract_zip_bundle)
-            # instead of the old behaviour of reading one file out of it and
-            # dropping every other file in the zip — which is exactly what
-            # broke any app whose entry file imported a sibling module.
-            size = doc.get("file_size") or 0
-            if size > TG_MAX_DOWNLOAD_BYTES:
-                _send(chat_id, f"❌ That file is {size // (1024*1024)}MB — "
-                               f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`.")
-                return
-            try:
-                meta = _tg("getFile", file_id=doc["file_id"])
-                file_path = (meta.get("result") or {}).get("file_path")
-                r = requests.get(f"{TG_FILE_API}/{file_path}", timeout=60)
-                r.raise_for_status()
-                zip_raw = r.content
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("bot zip download failed: %s", exc)
-                _send(chat_id, "❌ Couldn't download that zip from Telegram. Try again, or `/cancel`.")
-                return
-        else:
-            _send(chat_id, "⚠️ Note: `/update` with a .zip still only replaces the single entry "
-                           "file, not the whole bundle — full multi-file update isn't built yet. "
-                           "For a multi-file change, `/delete` and recreate with `/code` instead.")
+        # Multi-file path for BOTH create and update: hand the WHOLE zip to
+        # the runner, which extracts it for real (see
+        # runner/app.py:_extract_zip_bundle / the PATCH re-extraction added
+        # alongside it) instead of the old behaviour of reading one file out
+        # of the zip and dropping every other file in it — which is exactly
+        # what broke any app whose entry file imported a sibling module.
+        size = doc.get("file_size") or 0
+        if size > TG_MAX_DOWNLOAD_BYTES:
+            _send(chat_id, f"❌ That file is {size // (1024*1024)}MB — "
+                           f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`.")
+            return
+        try:
+            meta = _tg("getFile", file_id=doc["file_id"])
+            file_path = (meta.get("result") or {}).get("file_path")
+            r = requests.get(f"{TG_FILE_API}/{file_path}", timeout=60)
+            r.raise_for_status()
+            zip_raw = r.content
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bot zip download failed: %s", exc)
+            _send(chat_id, "❌ Couldn't download that zip from Telegram. Try again, or `/cancel`.")
+            return
 
     if zip_raw is not None:
         _pending.pop(chat_id, None)
-        _send(chat_id, f"📦 Extracting *{pending['name']}*…")
-        res = bot_ops.create_app_from_zip(pending["user_id"], pending["name"], zip_raw)
-        if not res.get("ok"):
-            _send(chat_id, f"❌ {res['error']}")
-            return
-        url = res.get("web") or ""
-        _send(chat_id, f"✅ *{res['name']}* created and running.\n"
-                       + (url + "\n" if url else "")
-                       + "⚠️ No Telegram bot token check on a zip import yet — if this is a "
-                         f"bot, `/update {res['name']}` once (with the same entry file's code) "
-                         f"to verify it.\n`/status {res['name']}` for details.",
-              reply_markup=_app_buttons(res["job_db_id"], url=url))
+        if pending["mode"] == "create":
+            _send(chat_id, f"📦 Extracting *{pending['name']}*…")
+            res = bot_ops.create_app_from_zip(pending["user_id"], pending["name"], zip_raw)
+            if not res.get("ok"):
+                _send(chat_id, f"❌ {res['error']}")
+                return
+            url = res.get("web") or ""
+            _send(chat_id, f"✅ *{res['name']}* created and running.\n"
+                           + (url + "\n" if url else "")
+                           + "⚠️ No Telegram bot token check on a zip import yet — if this is a "
+                             f"bot, `/update {res['name']}` once (with the same entry file's code) "
+                             f"to verify it.\n`/status {res['name']}` for details.",
+                  reply_markup=_app_buttons(res["job_db_id"], url=url))
+        else:
+            _send(chat_id, f"📦 Extracting into *{pending['ref']}*…")
+            res = bot_ops.update_from_zip(pending["user_id"], pending["ref"], zip_raw)
+            if not res.get("ok"):
+                _send(chat_id, f"❌ {res['error']}")
+                return
+            _send(chat_id, f"✅ *{res['job']['name']}* updated from zip and restarted.\n"
+                           f"Existing data files (databases, sessions) were left alone — "
+                           f"only what's in the zip was written.",
+                  reply_markup=_app_buttons(res["job"]["id"],
+                                             bot_username=res["job"].get("telegram_bot_username") or ""))
         return
 
     if doc:
