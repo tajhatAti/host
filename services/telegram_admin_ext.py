@@ -139,6 +139,52 @@ def admin_delete_job(job_id: int) -> dict:
     return bot_ops.delete(row["user_id"], str(row["id"]))
 
 
+def jobs_for_user(user_id: int) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, language, runner_job_id FROM jobs "
+            "WHERE user_id = ? ORDER BY id DESC", (user_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    live = runner_client.fleet_jobs()
+    out = []
+    for r in rows:
+        d = dict(r)
+        info = live.get(d.get("runner_job_id")) or {}
+        d["live_status"] = info.get("status") or "unknown"
+        out.append(d)
+    return out
+
+
+def job_full_detail_with_code(user_id: int, job_ref: str) -> dict:
+    """Unlike job_detail() above, this INCLUDES the actual source code —
+    an explicit investigation tool for /see, not the general admin job
+    view. Scoped to the given user_id so /see <them> <job> can only ever
+    return code that user actually owns, never an arbitrary job id."""
+    conn = get_db_connection()
+    try:
+        if job_ref.isdigit():
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE user_id = ? AND id = ?",
+                (user_id, int(job_ref))).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE user_id = ? AND LOWER(name) = LOWER(?)",
+                (user_id, job_ref)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    live = runner_client.fleet_jobs()
+    info = live.get(d.get("runner_job_id")) or {}
+    d.update(live_status=info.get("status"), uptime_s=info.get("uptime_s"),
+              mem_mb=info.get("mem_mb"), restarts=info.get("restarts"))
+    return d
+
+
 # ── Runners / worker pool — mirrors GET /admin/runners ─────────────────
 
 def runners_overview() -> dict:
