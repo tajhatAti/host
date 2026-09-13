@@ -7,6 +7,7 @@ Features:
 - Real logs, Uptime, Download DB
 """
 import io
+import tempfile
 import json
 import os
 import re
@@ -103,6 +104,79 @@ def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
     telegram_link.set_zip_permission(target["id"], sub == "allowzip")
     verb = "can now upload" if sub == "allowzip" else "can no longer upload"
     _send(chat_id, f"✅ {target.get('username') or ref} {verb} .zip bundles.")
+
+
+def cmd_see(chat_id, telegram_user_id, arg):
+    """/see <username|telegram_id> — that user's account + job list.
+    /see <username|telegram_id> <job id|name> — full detail on one job,
+    INCLUDING the actual code, sent as a real file. This deliberately
+    bypasses the no-code-shown rule the rest of the admin panel follows
+    (job_detail/jobs_recent never return code) — /see exists specifically
+    for investigating a reported account, so showing the code IS the
+    point. Admin-only; silent for anyone else, same posture as /admin."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return
+    parts = (arg or "").split(None, 1)
+    if not parts:
+        _send(chat_id, "Usage:\n`/see <username|telegram_id>` — account + jobs\n"
+                       "`/see <username|telegram_id> <job id|name>` — full job + code")
+        return
+    target = telegram_link.resolve_user_ref(parts[0])
+    if not target:
+        _send(chat_id, f"No user found for “{parts[0]}”.")
+        return
+
+    if len(parts) == 1:
+        jobs = telegram_admin_ext.jobs_for_user(target["id"])
+        flags = []
+        if target.get("is_admin"): flags.append("admin")
+        if target.get("can_upload_zip"): flags.append("zip")
+        if target.get("is_suspended"): flags.append("suspended")
+        tag = f" [{', '.join(flags)}]" if flags else ""
+        lines = [f"👤 *{target.get('username') or '(no username)'}* (#{target['id']}){tag}",
+                 f"Telegram: `{target.get('telegram_id') or 'not linked'}`", ""]
+        if not jobs:
+            lines.append("No jobs.")
+        else:
+            lines.append(f"*{len(jobs)} job(s):*")
+            for j in jobs:
+                lines.append(f"· #{j['id']} {j['name']} · {j['language']} · {j['live_status']}")
+            lines.append(f"\nFor full detail + code: `/see {parts[0]} <job id or name>`")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    job_ref = parts[1].strip()
+    j = telegram_admin_ext.job_full_detail_with_code(target["id"], job_ref)
+    if not j:
+        _send(chat_id, f"No job “{job_ref}” for {target.get('username') or parts[0]}.")
+        return
+
+    bot_line = f"\nBot: @{j['telegram_bot_username']}" if j.get("telegram_bot_username") else ""
+    text = (f"*{j['name']}* (#{j['id']}) — owned by {target.get('username') or parts[0]}\n"
+            f"Language: {j['language']} · Status: {j.get('live_status') or 'unknown'}\n"
+            f"Created: {j.get('created_at')}\n"
+            f"Uptime: {j.get('uptime_s') or 0}s · Mem: {j.get('mem_mb') or 0}MB · "
+            f"Restarts: {j.get('restarts') or 0}{bot_line}")
+    _send(chat_id, text)
+
+    code = j.get("code") or ""
+    if not code.strip():
+        _send(chat_id, "(No inline code stored for this job — it may be a repo/zip import; "
+                       "check the runner's own copy on disk if you need the actual files.)")
+        return
+    ext = {"python": "py", "node": "js", "bash": "sh", "ruby": "rb", "php": "php"}.get(j["language"], "txt")
+    fname = f"{j['name']}.{ext}"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{fname}", delete=False, encoding="utf-8") as f:
+        f.write(code)
+        tmp_path = f.name
+    try:
+        _send_document(chat_id, tmp_path, caption=f"{j['name']} — source as stored")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def cmd_admin(chat_id, telegram_user_id, arg):
@@ -1619,6 +1693,7 @@ def handle_update(upd):
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
+                "/see": lambda: cmd_see(chat_id, msg.get("from", {}).get("id"), arg),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
             }
