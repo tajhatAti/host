@@ -64,6 +64,12 @@ def recover_once():
         try:
             response = runner_client._runner_http("POST", "/internal/jobs", body)
             if response.status_code != 201:
+                try:
+                    detail = response.json().get("detail", response.text[:200])
+                except Exception:
+                    detail = response.text[:200]
+                logger.error("Recovery rejected for bot %s: runner returned %s — %s",
+                             row["id"], response.status_code, detail)
                 unresolved += 1
                 continue
             info = response.json()
