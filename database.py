@@ -629,6 +629,19 @@ _SCHEMA_TABLES = [
     )
     """,
     """
+    -- Telegram-level ban: blocks a raw Telegram user id from the bot
+    -- entirely (before /link, before any account exists). Nothing like
+    -- this exists on the website — is_suspended there always requires an
+    -- account row to hang the flag off of, so it can't stop someone who
+    -- has never linked/signed up from spamming the bot itself.
+    CREATE TABLE IF NOT EXISTS banned_telegram_ids (
+        telegram_id INTEGER PRIMARY KEY,
+        banned_by INTEGER,
+        reason TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
     -- Public "Report abuse" inbox for live URLs / published pages.
     CREATE TABLE IF NOT EXISTS abuse_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -962,6 +975,11 @@ def init_db():
         # on for a specific user.
         if not _column_exists(conn, "users", "can_upload_zip"):
             conn.execute("ALTER TABLE users ADD COLUMN can_upload_zip INTEGER NOT NULL DEFAULT 0")
+        # Per-user override of MAX_JOBS_PER_USER. NULL means "use the global
+        # default" — this doesn't exist on the website admin panel at all;
+        # the limit is currently one fixed number for every account.
+        if not _column_exists(conn, "users", "job_limit_override"):
+            conn.execute("ALTER TABLE users ADD COLUMN job_limit_override INTEGER")
 
         # Telegram login + device/IP tracking. These live in the CREATE TABLE
         # above, so FRESH databases already have them — but an existing
