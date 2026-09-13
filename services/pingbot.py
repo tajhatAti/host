@@ -1692,6 +1692,68 @@ def handle_update(upd):
 
 
 # ==================== MAIN LOOP ====================
+import hashlib
+from fastapi import APIRouter, Request
+
+# secret_token Telegram echoes back in the X-Telegram-Bot-Api-Secret-Token
+# header on every webhook delivery — derived from BOT_TOKEN itself so no
+# new secret has to be generated, stored, or set as an env var.
+_WEBHOOK_SECRET = hashlib.sha256((BOT_TOKEN or "unset").encode()).hexdigest()[:32]
+
+webhook_router = APIRouter()
+
+
+@webhook_router.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """WHY THIS EXISTS: this bot used to ONLY long-poll (see poll_loop
+    below) — getUpdates in a background thread inside the same web
+    process. On a host that suspends the whole process after a period of
+    no INCOMING HTTP traffic (Render's free tier does exactly this), the
+    polling thread dies right along with everything else, because polling
+    only ever makes OUTBOUND requests — it never gives the platform a
+    reason to consider the service "active". Button presses queue up on
+    Telegram's side with nobody fetching them, and the service only wakes
+    up again when something else happens to hit an HTTP endpoint — which
+    is why 10-20 taps could go nowhere and then one would suddenly land.
+
+    A webhook flips the direction: Telegram POSTs the update TO this
+    endpoint. That POST *is* incoming HTTP traffic, so it wakes a sleeping
+    dyno itself, and even a slow cold-start response just makes THIS
+    delivery slow — Telegram retries automatically, and the retry lands on
+    an already-warm process in well under a second.
+    """
+    got = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if got != _WEBHOOK_SECRET:
+        return {"ok": False}  # not from Telegram (or a stale secret) — drop it
+    try:
+        upd = await request.json()
+    except Exception:
+        return {"ok": False}
+    try:
+        handle_update(upd)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook handle_update failed: %s", exc)
+    return {"ok": True}  # Telegram only cares that this came back fast
+
+
+def enable_webhook():
+    """Point Telegram at telegram_webhook instead of polling. Call this
+    from start_bot INSTEAD OF starting poll_loop's thread — running both
+    at once makes Telegram reject getUpdates with 409 "webhook is active"
+    (see poll_loop's own self-healing comment for that exact failure)."""
+    if not BOT_TOKEN or not SITE_BASE:
+        logger.error("Cannot enable webhook: BOT_TOKEN or SITE_BASE is not set.")
+        return False
+    url = f"{SITE_BASE.rstrip('/')}/telegram/webhook"
+    res = _tg("setWebhook", url=url, secret_token=_WEBHOOK_SECRET,
+              allowed_updates=json.dumps(["message", "callback_query"]))
+    if (res or {}).get("ok"):
+        logger.warning("TELEGRAM: webhook registered at %s — polling is NOT started.", url)
+        return True
+    logger.error("TELEGRAM: setWebhook failed: %s", res)
+    return False
+
+
 def poll_loop():
     if not BOT_TOKEN:
         return
@@ -1856,5 +1918,20 @@ def start_bot():
     except Exception as exc:  # noqa: BLE001
         print("menu button registration failed:", exc)
     t = threading.Thread(target=poll_loop, daemon=True)
-    t.start()
-    print("✅ Advanced Bot started (with 5s buffer + inline controls)")
+    if enable_webhook():
+        # Webhook registered — do NOT also start polling. Telegram refuses
+        # getUpdates with 409 "webhook is active" the moment both are
+        # attempted on the same token (see poll_loop's own comment on that
+        # exact failure), so this is an either/or, never both.
+        print("✅ Advanced Bot started (webhook mode)")
+    else:
+        # Only reached if SITE_BASE/BOT_TOKEN are missing or Telegram
+        # rejected setWebhook — falling back to the old polling behaviour
+        # so the bot still works, just with the slow-wake problem webhook
+        # mode exists to fix.
+        logger.warning("TELEGRAM: falling back to polling — buttons/messages "
+                       "may be slow to respond on a host that sleeps between "
+                       "requests. Fix SITE_BASE/BOT_TOKEN and redeploy to use "
+                       "the webhook instead.")
+        t.start()
+        print("✅ Advanced Bot started (polling mode, fallback)")
