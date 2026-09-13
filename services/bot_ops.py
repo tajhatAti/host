@@ -58,6 +58,20 @@ from services.runner_client import MAX_JOBS_PER_USER  # noqa: F401
 
 logger = logging.getLogger("codenest-app")
 
+def _effective_job_limit(user_id: int) -> int:
+    """MAX_JOBS_PER_USER, unless an admin set a per-user override via
+    /admin limit in the Telegram bot — see database.py's job_limit_override
+    column. NULL means "use the global default"."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT job_limit_override FROM users WHERE id = ?",
+                            (user_id,)).fetchone()
+    finally:
+        conn.close()
+    override = row["job_limit_override"] if row else None
+    return override if override is not None else MAX_JOBS_PER_USER
+
+
 def slugify_name(raw: str) -> str:
     """A job name the site would also accept. Used by /rename."""
     s = re.sub(r"[^A-Za-z0-9 _-]+", "", (raw or "")).strip()
@@ -398,9 +412,10 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
     live = set(runner_client.fleet_jobs())
     active = (sum(1 for r in rows if dict(r).get("runner_job_id") in live)
               if live else sum(1 for r in rows if dict(r).get("desired_state") != "stopped"))
-    if active >= MAX_JOBS_PER_USER:
+    _limit = _effective_job_limit(user_id)
+    if active >= _limit:
         return {"ok": False,
-                "error": (f"You already have {active} of {MAX_JOBS_PER_USER} bots "
+                "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
     body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
@@ -465,9 +480,10 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
     live = set(runner_client.fleet_jobs())
     active = (sum(1 for r in rows if dict(r).get("runner_job_id") in live)
               if live else sum(1 for r in rows if dict(r).get("desired_state") != "stopped"))
-    if active >= MAX_JOBS_PER_USER:
+    _limit = _effective_job_limit(user_id)
+    if active >= _limit:
         return {"ok": False,
-                "error": (f"You already have {active} of {MAX_JOBS_PER_USER} bots "
+                "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
     body = {"language": language or "", "code": "", "name": f"u{user_id}-{clean}",
@@ -526,9 +542,10 @@ def create_app(user_id: int, name: str, language: str, code: str) -> dict:
     live = set(runner_client.fleet_jobs())
     active = (sum(1 for r in rows if dict(r).get("runner_job_id") in live)
               if live else sum(1 for r in rows if dict(r).get("desired_state") != "stopped"))
-    if active >= MAX_JOBS_PER_USER:
+    _limit = _effective_job_limit(user_id)
+    if active >= _limit:
         return {"ok": False,
-                "error": (f"You already have {active} of {MAX_JOBS_PER_USER} bots "
+                "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
     body = {"language": language, "code": code, "name": f"u{user_id}-{clean}", "env": {}}
