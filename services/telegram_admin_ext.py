@@ -14,8 +14,129 @@ docstring — so behaviour stays consistent between the two surfaces.
 
 from database import get_db_connection
 from services import runner_client
+from services import bot_ops
+from routes.deps import now_utc_str
 
 ADMIN_HEALTH_MAX_AGE_S = 30
+
+
+# ── Telegram-level ban — new, not on the website ────────────────────────
+# is_suspended on the website always needs a users row to attach to; this
+# blocks a raw Telegram id before any account/link exists at all, e.g. for
+# someone spamming /start or /code without ever going through the site.
+
+def is_banned(telegram_id: int) -> bool:
+    if not telegram_id:
+        return False
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT 1 FROM banned_telegram_ids WHERE telegram_id = ?",
+                            (telegram_id,)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def ban_telegram_id(telegram_id: int, banned_by: int, reason: str = "") -> None:
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            "INSERT INTO banned_telegram_ids (telegram_id, banned_by, reason, created_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET reason=excluded.reason",
+            (telegram_id, banned_by, reason, now_utc_str()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unban_telegram_id(telegram_id: int) -> bool:
+    conn = get_db_connection()
+    try:
+        cur = conn.execute("DELETE FROM banned_telegram_ids WHERE telegram_id = ?", (telegram_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_banned(limit: int = 30) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT telegram_id, reason, created_at FROM banned_telegram_ids "
+            "ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Per-user job limit override — new, not on the website ──────────────
+# MAX_JOBS_PER_USER is currently one fixed number for every account. This
+# lets an admin raise (or lower) the ceiling for one specific person
+# without touching the global constant.
+
+def set_job_limit_override(user_id: int, limit) -> None:
+    """limit=None clears the override, back to the global default."""
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE users SET job_limit_override = ?, updated_at = ? WHERE id = ?",
+                     (limit, now_utc_str(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Broadcast — new, not on the website ─────────────────────────────────
+# Sending happens in pingbot.py (it already owns _send/rate limiting to
+# Telegram's API); this just hands back who to send to.
+
+def all_linked_telegram_ids() -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL AND is_suspended = 0"
+        ).fetchall()
+        return [r["telegram_id"] for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Admin-level job control — new, not on the website ───────────────────
+# routes/admin.py's job views are read-only (list + detail). An admin
+# could not restart, stop, or delete someone ELSE's job without going
+# into their own account — bot_ops' restart/stop/delete are deliberately
+# owner-scoped (see bot_ops.find_app's docstring) and stay that way; these
+# are separate, admin-only entry points into the SAME runner calls.
+
+def admin_find_job(job_id: int) -> dict:
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def admin_restart_job(job_id: int) -> dict:
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops._act(row["user_id"], str(row["id"]), "restart")
+
+
+def admin_stop_job(job_id: int) -> dict:
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops._act(row["user_id"], str(row["id"]), "stop")
+
+
+def admin_delete_job(job_id: int) -> dict:
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops.delete(row["user_id"], str(row["id"]))
 
 
 # ── Runners / worker pool — mirrors GET /admin/runners ─────────────────
