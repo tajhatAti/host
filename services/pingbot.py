@@ -84,6 +84,27 @@ def _admin_user_detail_text(target: dict) -> str:
             f"Flags: {tag}")
 
 
+def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
+    """Backs /zip <userid> and /unzip <userid> — short text fallbacks for
+    exactly what the Users → Allow/Deny zip button does, for when an inline
+    button misbehaves (Telegram-side hiccups happen) and retyping /admin
+    to navigate back to the same user isn't worth it for one toggle."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return  # silent, same as /admin for a non-admin
+    ref = (arg or "").strip()
+    if not ref:
+        _send(chat_id, f"Usage: `/{'zip' if sub == 'allowzip' else 'unzip'} <username or telegram_id>`")
+        return
+    target = telegram_link.resolve_user_ref(ref)
+    if not target:
+        _send(chat_id, f"No user found for “{ref}”.")
+        return
+    telegram_link.set_zip_permission(target["id"], sub == "allowzip")
+    verb = "can now upload" if sub == "allowzip" else "can no longer upload"
+    _send(chat_id, f"✅ {target.get('username') or ref} {verb} .zip bundles.")
+
+
 def cmd_admin(chat_id, telegram_user_id, arg):
     """/admin — inline-button panel for most things; a few actions also have
     typed shortcuts:
@@ -97,8 +118,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     callback_data is attacker-suppliable in principle."""
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
-        _send(chat_id, "🔒 Admin only.")
-        return
+        return  # silent — a non-admin gets nothing, not even confirmation the command exists
 
     parts = (arg or "").split(None, 1)
     sub = parts[0].lower() if parts else ""
@@ -1597,6 +1617,8 @@ def handle_update(upd):
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
                 "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
+                "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
+                "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
             }
