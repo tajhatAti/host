@@ -53,6 +53,8 @@ def _admin_menu_kb():
         [{"text": "📝 Audit log", "callback_data": "admin:audit"},
          {"text": "🚩 Abuse reports", "callback_data": "admin:abuse"}],
         [{"text": "🔍 Security", "callback_data": "admin:security"}],
+        [{"text": "⛔ Bans", "callback_data": "admin:bans"},
+         {"text": "📢 Broadcast", "callback_data": "admin:broadcast"}],
     ]}
 
 
@@ -83,13 +85,77 @@ def _admin_user_detail_text(target: dict) -> str:
 
 
 def cmd_admin(chat_id, telegram_user_id, arg):
-    """/admin — inline-button panel. The hardcoded SUPER_ADMIN_TG_ID or any
-    user with is_admin=1 can open it; every button re-checks admin status
-    on press, since callback_data is attacker-suppliable in principle."""
+    """/admin — inline-button panel for most things; a few actions that need
+    free text (a reason, a broadcast message) are typed subcommands:
+      /admin ban <telegram_id> [reason]
+      /admin unban <telegram_id>
+      /admin broadcast <message>
+      /admin limit <username|telegram_id> <number|clear>
+    The hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1 can use all
+    of this; every action re-checks admin status on its own, since
+    callback_data is attacker-suppliable in principle."""
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
         _send(chat_id, "🔒 Admin only.")
         return
+
+    parts = (arg or "").split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "ban":
+        bits = rest.split(None, 1)
+        if not bits or not bits[0].isdigit():
+            _send(chat_id, "Usage: `/admin ban <telegram_id> [reason]`")
+            return
+        reason = bits[1] if len(bits) > 1 else ""
+        telegram_admin_ext.ban_telegram_id(int(bits[0]), telegram_user_id, reason)
+        _send(chat_id, f"⛔ Banned `{bits[0]}`" + (f" — {reason}" if reason else "") + ".")
+        return
+
+    if sub == "unban":
+        if not rest.isdigit():
+            _send(chat_id, "Usage: `/admin unban <telegram_id>`")
+            return
+        ok = telegram_admin_ext.unban_telegram_id(int(rest))
+        _send(chat_id, "✅ Unbanned." if ok else "That id wasn't banned.")
+        return
+
+    if sub == "broadcast":
+        if not rest:
+            _send(chat_id, "Usage: `/admin broadcast <message>`")
+            return
+        ids = telegram_admin_ext.all_linked_telegram_ids()
+        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+        sent = 0
+        for tid in ids:
+            try:
+                _send(tid, rest)
+                sent += 1
+            except Exception:
+                pass
+            time.sleep(0.05)  # stay well under Telegram's flood limits
+        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+        return
+
+    if sub == "limit":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            _send(chat_id, "Usage: `/admin limit <username|telegram_id> <number|clear>`")
+            return
+        target = telegram_link.resolve_user_ref(bits[0])
+        if not target:
+            _send(chat_id, f"No user found for “{bits[0]}”.")
+            return
+        val = None if bits[1].lower() == "clear" else bits[1]
+        if val is not None and not val.isdigit():
+            _send(chat_id, "The limit must be a number, or `clear` to remove the override.")
+            return
+        telegram_admin_ext.set_job_limit_override(target["id"], int(val) if val else None)
+        _send(chat_id, f"✅ Job limit for {target.get('username') or bits[0]} "
+                       + (f"set to {val}." if val else "cleared (back to default)."))
+        return
+
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
 
 
@@ -228,8 +294,48 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 f"Language: {j['language']} · Status: {j.get('live_status') or 'unknown'}\n"
                 f"Uptime: {j.get('uptime_s') or 0}s · Mem: {j.get('mem_mb') or 0}MB · "
                 f"Restarts: {j.get('restarts') or 0}{bot_line}")
-        kb = {"inline_keyboard": [[{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}]]}
+        kb = {"inline_keyboard": [
+            [{"text": "🔄 Restart", "callback_data": f"admin:jobrestart:{j['id']}"},
+             {"text": "⏹ Stop", "callback_data": f"admin:jobstop:{j['id']}"}],
+            [{"text": "🗑 Delete (asks to confirm)", "callback_data": f"admin:jobdelconfirm:{j['id']}"}],
+            [{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}],
+        ]}
         _send(chat_id, text, reply_markup=kb)
+        return
+
+    if action in ("jobrestart", "jobstop"):
+        job_id = int(ref) if ref.isdigit() else None
+        if not job_id:
+            _send(chat_id, "Bad job id.")
+            return
+        res = (telegram_admin_ext.admin_restart_job(job_id) if action == "jobrestart"
+               else telegram_admin_ext.admin_stop_job(job_id))
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res['error']}")
+            return
+        _send(chat_id, f"✅ {'Restarted' if action == 'jobrestart' else 'Stopped'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id))
+        return
+
+    if action == "jobdelconfirm":
+        job_id = int(ref) if ref.isdigit() else None
+        j = telegram_admin_ext.admin_find_job(job_id) if job_id else None
+        if not j:
+            _send(chat_id, "That job no longer exists.")
+            return
+        _send(chat_id, f"Delete *{j['name']}* (owned by user #{j['user_id']})? This cannot be undone.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "🗑 Yes, delete", "callback_data": f"admin:jobdel:{job_id}"},
+                   {"text": "✖️ Cancel", "callback_data": f"admin:job:{job_id}"}]]})
+        return
+
+    if action == "jobdel":
+        job_id = int(ref) if ref.isdigit() else None
+        res = telegram_admin_ext.admin_delete_job(job_id) if job_id else {"ok": False, "error": "Bad job id."}
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res['error']}")
+            return
+        _send(chat_id, "🗑 Deleted.", reply_markup={"inline_keyboard": [[{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}]]})
         return
 
     if action == "audit":
@@ -272,6 +378,33 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 f"This is a count only — open the website's admin panel for the actual "
                 f"IP/fingerprint cluster breakdown, that view needs a wider screen.")
         _send(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "bans":
+        rows = telegram_admin_ext.list_banned()
+        kb = []
+        if not rows:
+            lines = ["⛔ *Bans* — nobody is banned.\n\nTo ban someone: `/admin ban <telegram_id> [reason]`"]
+        else:
+            lines = ["⛔ *Banned Telegram ids:*"]
+            for r in rows:
+                lines.append(f"`{r['telegram_id']}` · {r.get('reason') or 'no reason'} ({r['created_at']})")
+                kb.append([{"text": f"Unban {r['telegram_id']}", "callback_data": f"admin:unban:{r['telegram_id']}"}])
+            lines.append("\nTo ban someone: `/admin ban <telegram_id> [reason]`")
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "unban":
+        ok = telegram_admin_ext.unban_telegram_id(int(ref)) if ref.isdigit() else False
+        _send(chat_id, "✅ Unbanned." if ok else "That id wasn't banned.")
+        handle_admin_callback(chat_id, telegram_user_id, "bans", "")
+        return
+
+    if action == "broadcast":
+        _send(chat_id, "📢 To send a broadcast: `/admin broadcast <your message>`\n"
+                       "It goes to every linked, non-suspended user. Use it sparingly.",
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
 # CODE-VIA-CHAT — READ THIS BEFORE TOUCHING /code, /update, or _pending.
@@ -1346,6 +1479,14 @@ def handle_update(upd):
         if "message" in upd:
             msg = upd["message"]
             chat_id = msg["chat"]["id"]
+            tg_uid_early = (msg.get("from") or {}).get("id")
+            if telegram_admin_ext.is_banned(tg_uid_early):
+                # Silent drop — no reply at all. A banned id gets nothing to
+                # probe with, not even an error message confirming the bot
+                # is listening.
+                event.update(chat_id=chat_id, event_type="banned", outcome="refused",
+                             telegram_user_id=tg_uid_early)
+                return
             text = msg.get("text", "") or ""
             command, arg = _command_parts(text)
             event.update(chat_id=chat_id,
@@ -1420,6 +1561,15 @@ def handle_update(upd):
             cb = upd["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             data = str(cb.get("data") or "")
+            tg_uid_cb = cb.get("from", {}).get("id")
+            if telegram_admin_ext.is_banned(tg_uid_cb):
+                try:
+                    _tg("answerCallbackQuery", callback_query_id=cb["id"])
+                except Exception:
+                    pass
+                event.update(chat_id=chat_id, event_type="banned", outcome="refused",
+                             telegram_user_id=tg_uid_cb)
+                return
             linked = telegram_link.user_for_chat(chat_id)
             event.update(chat_id=chat_id, event_type="callback",
                          command=data.partition(":")[0], payload=data.partition(":")[2],
