@@ -85,12 +85,13 @@ def _admin_user_detail_text(target: dict) -> str:
 
 
 def cmd_admin(chat_id, telegram_user_id, arg):
-    """/admin — inline-button panel for most things; a few actions that need
-    free text (a reason, a broadcast message) are typed subcommands:
+    """/admin — inline-button panel for most things; a few actions also have
+    typed shortcuts:
       /admin ban <telegram_id> [reason]
       /admin unban <telegram_id>
       /admin broadcast <message>
       /admin limit <username|telegram_id> <number|clear>
+      /admin grant|revoke|allowzip|denyzip <username|telegram_id>
     The hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1 can use all
     of this; every action re-checks admin status on its own, since
     callback_data is attacker-suppliable in principle."""
@@ -156,6 +157,38 @@ def cmd_admin(chat_id, telegram_user_id, arg):
                        + (f"set to {val}." if val else "cleared (back to default)."))
         return
 
+    if sub in ("grant", "revoke", "allowzip", "denyzip"):
+        if not rest:
+            _send(chat_id, f"Usage: `/admin {sub} <username or telegram_id>`")
+            return
+        target = telegram_link.resolve_user_ref(rest)
+        if not target:
+            _send(chat_id, f"No user found for “{rest}”.")
+            return
+        if sub == "grant":
+            telegram_link.set_admin(target["id"], True)
+            _send(chat_id, f"✅ {target.get('username') or rest} is now an admin.")
+        elif sub == "revoke":
+            if target.get("telegram_id") == SUPER_ADMIN_TG_ID:
+                _send(chat_id, "Can't revoke the built-in super-admin.")
+                return
+            telegram_link.set_admin(target["id"], False)
+            _send(chat_id, f"✅ {target.get('username') or rest} is no longer an admin.")
+        elif sub == "allowzip":
+            telegram_link.set_zip_permission(target["id"], True)
+            _send(chat_id, f"✅ {target.get('username') or rest} can now upload .zip bundles.")
+        else:
+            telegram_link.set_zip_permission(target["id"], False)
+            _send(chat_id, f"✅ {target.get('username') or rest} can no longer upload .zip bundles.")
+        return
+
+    if sub and sub not in ("help", "menu"):
+        # An unrecognized subcommand used to fall straight through to the
+        # main menu with zero feedback — indistinguishable from success.
+        # Anyone who mistyped, or followed a stale instruction, had no way
+        # to know their command did nothing.
+        _send(chat_id, f"Unknown admin subcommand “{sub}”. Showing the menu instead:")
+
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
 
 
@@ -185,17 +218,17 @@ def _admin_users_kb(page: int):
     return {"inline_keyboard": kb}
 
 
-def handle_admin_callback(chat_id, telegram_user_id, action, ref):
+def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=None):
     """Every admin: callback lands here. Re-checks admin status on every
     single press — a button label is not a permission, whoever crafted the
     tap is."""
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
-        _send(chat_id, "🔒 Admin only.")
+        _edit_or_send(chat_id, message_id, "🔒 Admin only.")
         return
 
     if action == "menu":
-        _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
+        _edit_or_send(chat_id, message_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
         return
 
     if action == "overview":
@@ -204,30 +237,30 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 f"Users: *{s['users']}* ({s['tg_linked']} linked to Telegram)\n"
                 f"Admins: *{s['admins']}* · Zip-allowed: *{s['zip_allowed']}* · Suspended: *{s['suspended']}*\n"
                 f"Jobs: *{s['jobs_total']}* total, *{s['jobs_deployed']}* deployed")
-        _send(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        _edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
     if action == "users":
         page = int(ref) if ref.isdigit() else 0
-        _send(chat_id, "👥 *Users* — tap one to manage:", reply_markup=_admin_users_kb(page))
+        _edit_or_send(chat_id, message_id, "👥 *Users* — tap one to manage:", reply_markup=_admin_users_kb(page))
         return
 
     if action == "user":
         target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
         if not target:
-            _send(chat_id, "That user no longer exists.")
+            _edit_or_send(chat_id, message_id, "That user no longer exists.")
             return
-        _send(chat_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
         return
 
     if action in ("togadmin", "togzip", "togsuspend"):
         target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
         if not target:
-            _send(chat_id, "That user no longer exists.")
+            _edit_or_send(chat_id, message_id, "That user no longer exists.")
             return
         if action == "togadmin":
             if target.get("telegram_id") == SUPER_ADMIN_TG_ID and target.get("is_admin"):
-                _send(chat_id, "Can't revoke the built-in super-admin.")
+                _edit_or_send(chat_id, message_id, "Can't revoke the built-in super-admin.")
             else:
                 telegram_link.set_admin(target["id"], not target.get("is_admin"))
         elif action == "togzip":
@@ -235,7 +268,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
         else:
             telegram_link.set_suspended(target["id"], not target.get("is_suspended"))
         target = telegram_link.get_user_by_id(target["id"])  # fresh flags
-        _send(chat_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
         return
 
     if action == "runners":
@@ -252,16 +285,16 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
             e = data["embedded"]
             lines.append(f"{'🟢' if e['online'] else '⚪'} embedded · {e.get('jobs',0)}/{e.get('capacity',0)} jobs")
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
-        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "togrunner":
         res = telegram_admin_ext.toggle_runner(int(ref)) if ref.isdigit() else None
         if not res:
-            _send(chat_id, "That runner no longer exists.")
+            _edit_or_send(chat_id, message_id, "That runner no longer exists.")
             return
-        _send(chat_id, f"✅ {res['label']} is now {'enabled' if res['enabled'] else 'disabled'}.")
-        handle_admin_callback(chat_id, telegram_user_id, "runners", "")
+        _edit_or_send(chat_id, message_id, f"✅ {res['label']} is now {'enabled' if res['enabled'] else 'disabled'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "runners", "", message_id)
         return
 
     if action == "jobs":
@@ -280,13 +313,13 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
         if nav:
             kb.append(nav)
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
-        _send(chat_id, f"📦 *Jobs* ({total} total) — tap one:", reply_markup={"inline_keyboard": kb})
+        _edit_or_send(chat_id, message_id, f"📦 *Jobs* ({total} total) — tap one:", reply_markup={"inline_keyboard": kb})
         return
 
     if action == "job":
         j = telegram_admin_ext.job_detail(int(ref)) if ref.isdigit() else None
         if not j:
-            _send(chat_id, "That job no longer exists.")
+            _edit_or_send(chat_id, message_id, "That job no longer exists.")
             return
         bot_line = f"\nBot: @{j['telegram_bot_username']}" if j.get("telegram_bot_username") else ""
         text = (f"*{j['name']}* (#{j['id']})\n"
@@ -300,30 +333,30 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
             [{"text": "🗑 Delete (asks to confirm)", "callback_data": f"admin:jobdelconfirm:{j['id']}"}],
             [{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}],
         ]}
-        _send(chat_id, text, reply_markup=kb)
+        _edit_or_send(chat_id, message_id, text, reply_markup=kb)
         return
 
     if action in ("jobrestart", "jobstop"):
         job_id = int(ref) if ref.isdigit() else None
         if not job_id:
-            _send(chat_id, "Bad job id.")
+            _edit_or_send(chat_id, message_id, "Bad job id.")
             return
         res = (telegram_admin_ext.admin_restart_job(job_id) if action == "jobrestart"
                else telegram_admin_ext.admin_stop_job(job_id))
         if not res.get("ok"):
-            _send(chat_id, f"❌ {res['error']}")
+            _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
             return
-        _send(chat_id, f"✅ {'Restarted' if action == 'jobrestart' else 'Stopped'}.")
-        handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id))
+        _edit_or_send(chat_id, message_id, f"✅ {'Restarted' if action == 'jobrestart' else 'Stopped'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id), message_id)
         return
 
     if action == "jobdelconfirm":
         job_id = int(ref) if ref.isdigit() else None
         j = telegram_admin_ext.admin_find_job(job_id) if job_id else None
         if not j:
-            _send(chat_id, "That job no longer exists.")
+            _edit_or_send(chat_id, message_id, "That job no longer exists.")
             return
-        _send(chat_id, f"Delete *{j['name']}* (owned by user #{j['user_id']})? This cannot be undone.",
+        _edit_or_send(chat_id, message_id, f"Delete *{j['name']}* (owned by user #{j['user_id']})? This cannot be undone.",
               reply_markup={"inline_keyboard": [
                   [{"text": "🗑 Yes, delete", "callback_data": f"admin:jobdel:{job_id}"},
                    {"text": "✖️ Cancel", "callback_data": f"admin:job:{job_id}"}]]})
@@ -333,9 +366,9 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
         job_id = int(ref) if ref.isdigit() else None
         res = telegram_admin_ext.admin_delete_job(job_id) if job_id else {"ok": False, "error": "Bad job id."}
         if not res.get("ok"):
-            _send(chat_id, f"❌ {res['error']}")
+            _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
             return
-        _send(chat_id, "🗑 Deleted.", reply_markup={"inline_keyboard": [[{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}]]})
+        _edit_or_send(chat_id, message_id, "🗑 Deleted.", reply_markup={"inline_keyboard": [[{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}]]})
         return
 
     if action == "audit":
@@ -347,7 +380,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
             for r in rows:
                 who = r.get("admin_name") or "system"
                 lines.append(f"· {who} {r['action']} → {r.get('target') or '—'} ({r['created_at']})")
-        _send(chat_id, "\n".join(lines),
+        _edit_or_send(chat_id, message_id, "\n".join(lines),
               reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
@@ -362,13 +395,13 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 lines.append(f"#{r['id']} · {r.get('reason') or 'no reason given'} · {r['url'][:40]}")
                 kb.append([{"text": f"✅ Resolve #{r['id']}", "callback_data": f"admin:resolveabuse:{r['id']}"}])
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
-        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "resolveabuse":
         ok = telegram_admin_ext.resolve_abuse_report(int(ref)) if ref.isdigit() else False
-        _send(chat_id, "✅ Marked resolved." if ok else "Couldn't find that report.")
-        handle_admin_callback(chat_id, telegram_user_id, "abuse", "")
+        _edit_or_send(chat_id, message_id, "✅ Marked resolved." if ok else "Couldn't find that report.")
+        handle_admin_callback(chat_id, telegram_user_id, "abuse", "", message_id)
         return
 
     if action == "security":
@@ -377,7 +410,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 f"Fingerprint clusters (shared device across accounts): *{s['fingerprint_clusters']}*\n\n"
                 f"This is a count only — open the website's admin panel for the actual "
                 f"IP/fingerprint cluster breakdown, that view needs a wider screen.")
-        _send(chat_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        _edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
 
     if action == "bans":
@@ -392,17 +425,17 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref):
                 kb.append([{"text": f"Unban {r['telegram_id']}", "callback_data": f"admin:unban:{r['telegram_id']}"}])
             lines.append("\nTo ban someone: `/admin ban <telegram_id> [reason]`")
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
-        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "unban":
         ok = telegram_admin_ext.unban_telegram_id(int(ref)) if ref.isdigit() else False
-        _send(chat_id, "✅ Unbanned." if ok else "That id wasn't banned.")
-        handle_admin_callback(chat_id, telegram_user_id, "bans", "")
+        _edit_or_send(chat_id, message_id, "✅ Unbanned." if ok else "That id wasn't banned.")
+        handle_admin_callback(chat_id, telegram_user_id, "bans", "", message_id)
         return
 
     if action == "broadcast":
-        _send(chat_id, "📢 To send a broadcast: `/admin broadcast <your message>`\n"
+        _edit_or_send(chat_id, message_id, "📢 To send a broadcast: `/admin broadcast <your message>`\n"
                        "It goes to every linked, non-suspended user. Use it sparingly.",
               reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
@@ -534,6 +567,23 @@ def _send(chat_id, text, reply_markup=None):
         # Telegram expects reply_markup as a JSON-serialised string.
         data["reply_markup"] = json.dumps(reply_markup)
     _tg("sendMessage", **data)
+
+
+def _edit_or_send(chat_id, message_id, text, reply_markup=None):
+    """Update the SAME message a button lives on, instead of sending a new
+    one every press — without this, navigating the admin panel scrolled a
+    new message down for every click, and the only obvious way back to a
+    visible menu was retyping /admin. Falls back to a fresh message if the
+    edit fails (message too old, or Telegram's "not modified" error)."""
+    if not message_id:
+        _send(chat_id, text, reply_markup)
+        return
+    data = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    result = _tg("editMessageText", **data)
+    if not result.get("ok"):
+        _send(chat_id, text, reply_markup)
 
 
 # ==================== IDENTITY ====================
@@ -1360,7 +1410,7 @@ def handle_pending_code(chat_id, msg, pending):
 
 
 # ==================== CALLBACK HANDLER ====================
-def handle_callback(chat_id, data):
+def handle_callback(chat_id, data, message_id=None):
     """Inline buttons. Every action re-resolves the app FOR THIS USER.
 
     callback_data is attacker-supplied — anyone can craft a button press with
@@ -1379,7 +1429,7 @@ def handle_callback(chat_id, data):
             sub_action, sub_ref = ref, ""
         # Private chat: chat_id IS the Telegram user id of whoever pressed
         # the button — same identity handle_admin_callback re-checks itself.
-        handle_admin_callback(chat_id, chat_id, sub_action, sub_ref)
+        handle_admin_callback(chat_id, chat_id, sub_action, sub_ref, message_id)
         return
 
     user = telegram_link.user_for_chat(chat_id)
@@ -1585,8 +1635,15 @@ def handle_update(upd):
             # intermittent because it only happened when the action
             # itself failed. Now it's answered no matter what.
             try:
-                if linked:
-                    handle_callback(chat_id, data)
+                # admin: buttons check _is_admin() themselves and were never
+                # meant to require a linked CodeNest account — but this
+                # `if linked` gate (meant for job-action buttons like
+                # restart/stop, which DO need one) ran first and silently
+                # ate every admin button press for an admin who hadn't run
+                # /link, with no error message at all. That's exactly what
+                # made retyping /admin look like the only thing that worked.
+                if linked or data.startswith("admin:"):
+                    handle_callback(chat_id, data, cb.get("message", {}).get("message_id"))
                 else:
                     event["outcome"] = "refused"
                 _tg("answerCallbackQuery", callback_query_id=cb["id"])
