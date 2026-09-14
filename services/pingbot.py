@@ -251,6 +251,22 @@ def cmd_admin(chat_id, telegram_user_id, arg):
                        + (f"set to {val}." if val else "cleared (back to default)."))
         return
 
+    if sub == "addrunner":
+        bits = rest.split(None, 2)
+        if len(bits) < 3:
+            _send(chat_id, "Usage: `/admin addrunner <label> <url> <RUNNER_SERVICE_SECRET>`\n"
+                           "e.g. `/admin addrunner render-eu https://my-runner.onrender.com abc123...`\n"
+                           "⚠️ Delete this message after sending — the secret sits in chat history otherwise.")
+            return
+        label, url, secret = bits[0], bits[1], bits[2]
+        _send(chat_id, f"Checking {url}…")
+        res = telegram_admin_ext.add_runner(label, url, secret, caller["id"] if caller else None)
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res['error']}")
+            return
+        _send(chat_id, f"✅ Runner “{res['label']}” registered (#{res['id']}) and enabled.")
+        return
+
     if sub in ("grant", "revoke", "allowzip", "denyzip"):
         if not rest:
             _send(chat_id, f"Usage: `/admin {sub} <username or telegram_id>`")
@@ -397,6 +413,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         if data.get("embedded"):
             e = data["embedded"]
             lines.append(f"{'🟢' if e['online'] else '⚪'} embedded · {e.get('jobs',0)}/{e.get('capacity',0)} jobs")
+        lines.append("\nTo add a new Render runner: `/admin addrunner <label> <url> <secret>`")
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
         _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
@@ -1774,7 +1791,7 @@ def handle_update(upd):
                 event["error"] = f"{type(cb_exc).__name__}: {cb_exc}"
                 try:
                     _tg("answerCallbackQuery", callback_query_id=cb["id"],
-                        text="Something went wrong — try again.", show_alert=False)
+                        text="Something went wrong — try again.", show_alert=True)
                 except Exception:
                     logger.exception("Could not even answer the callback query")
                 raise
