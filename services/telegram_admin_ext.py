@@ -210,6 +210,53 @@ def runners_overview() -> dict:
     return {"runners": rows, "embedded": embedded}
 
 
+def add_runner(label: str, url: str, secret: str, created_by: int) -> dict:
+    """Same validation the website's 'Add runner' does, before ever saving:
+    1) GET /health must return 200 — proves the service is even up.
+    2) An authenticated call must succeed with the given secret — proves
+       the secret actually matches RUNNER_SERVICE_SECRET on that Render
+       service, not just that the URL responds to something.
+    Only then is it written to runner_nodes, secret encrypted at rest."""
+    import requests as _requests
+    from services import secrets_store
+    url = url.rstrip("/")
+    try:
+        health = _requests.get(url + "/health", timeout=12)
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": f"Couldn't reach {url}/health: {exc}"}
+    if health.status_code != 200:
+        return {"ok": False, "error": f"{url}/health returned HTTP {health.status_code}, expected 200."}
+    try:
+        auth_check = _requests.get(url + "/internal/jobs",
+                                    headers={"Authorization": "Bearer " + secret}, timeout=12)
+    except _requests.RequestException:
+        return {"ok": False, "error": "Health works, but the authenticated endpoint did not respond."}
+    if auth_check.status_code in (401, 403):
+        return {"ok": False, "error": "Runner is healthy, but that secret doesn't match "
+                                       "RUNNER_SERVICE_SECRET on that Render service."}
+    if auth_check.status_code != 200:
+        return {"ok": False, "error": f"Auth check returned HTTP {auth_check.status_code}, expected 200."}
+
+    conn = get_db_connection()
+    try:
+        existing = conn.execute("SELECT id FROM runner_nodes WHERE url=?", (url,)).fetchone()
+        now = now_utc_str()
+        encrypted = secrets_store.pack_env({"secret": secret})
+        if existing:
+            conn.execute("UPDATE runner_nodes SET label=?,encrypted_secret=?,enabled=1,updated_at=? WHERE id=?",
+                         (label, encrypted, now, existing["id"]))
+            node_id = existing["id"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO runner_nodes (label,url,encrypted_secret,enabled,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,1,?,?,?)", (label, url, encrypted, created_by, now, now))
+            node_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "id": node_id, "label": label}
+
+
 def toggle_runner(runner_id: int) -> dict:
     conn = get_db_connection()
     try:
