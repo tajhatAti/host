@@ -286,6 +286,24 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
 
 
+def _admin_users_text(page: int) -> str:
+    rows = telegram_link.list_admin_overview(limit=200)
+    per_page = 8
+    start = page * per_page
+    page_rows = rows[start:start + per_page]
+    lines = ["👥 *Users* — tap a button below to manage one, or copy an id here:"]
+    for r in page_rows:
+        flags = []
+        if r.get("is_admin"): flags.append("admin")
+        if r.get("can_upload_zip"): flags.append("zip")
+        if r.get("is_suspended"): flags.append("suspended")
+        tag = f" _{', '.join(flags)}_" if flags else ""
+        tid = r.get("telegram_id")
+        lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                     f"tg:`{tid if tid else '—'}`{tag}")
+    return "\n".join(lines)
+
+
 def _admin_users_kb(page: int):
     rows = telegram_link.list_admin_overview(limit=200)
     per_page = 8
@@ -336,7 +354,8 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
 
     if action == "users":
         page = int(ref) if ref.isdigit() else 0
-        _edit_or_send(chat_id, message_id, "👥 *Users* — tap one to manage:", reply_markup=_admin_users_kb(page))
+        text = _admin_users_text(page)
+        _edit_or_send(chat_id, message_id, text, reply_markup=_admin_users_kb(page))
         return
 
     if action == "user":
@@ -396,7 +415,9 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         per_page = 8
         rows, total = telegram_admin_ext.jobs_recent(limit=per_page, offset=page * per_page)
         kb = []
+        lines = [f"📦 *Jobs* ({total} total) — copy an id, or tap a button below:"]
         for j in rows:
+            lines.append(f"`{j['id']}` · {j['name']} · {j['owner']} · {j['live_status']}")
             label = f"{j['name']} · {j['owner']} · {j['live_status']}"
             kb.append([{"text": label[:60], "callback_data": f"admin:job:{j['id']}"}])
         nav = []
@@ -407,7 +428,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         if nav:
             kb.append(nav)
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
-        _edit_or_send(chat_id, message_id, f"📦 *Jobs* ({total} total) — tap one:", reply_markup={"inline_keyboard": kb})
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "job":
@@ -473,7 +494,8 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
             lines = ["📝 *Audit log* (most recent):"]
             for r in rows:
                 who = r.get("admin_name") or "system"
-                lines.append(f"· {who} {r['action']} → {r.get('target') or '—'} ({r['created_at']})")
+                target = f"`{r.get('target')}`" if r.get("target") else "—"
+                lines.append(f"· {who} {r['action']} → {target} ({r['created_at']})")
         _edit_or_send(chat_id, message_id, "\n".join(lines),
               reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
         return
@@ -677,6 +699,9 @@ def _edit_or_send(chat_id, message_id, text, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     result = _tg("editMessageText", **data)
     if not result.get("ok"):
+        desc = str(result.get("description") or "")
+        if "message is not modified" in desc.lower():
+            return  # content is already exactly this — nothing to do, not a failure
         _send(chat_id, text, reply_markup)
 
 
