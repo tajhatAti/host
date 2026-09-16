@@ -91,10 +91,23 @@ def _admin_menu_kb():
          {"text": "📦 Jobs", "callback_data": "admin:jobs:0"}],
         [{"text": "📝 Audit log", "callback_data": "admin:audit"},
          {"text": "🚩 Abuse reports", "callback_data": "admin:abuse"}],
-        [{"text": "🔍 Security", "callback_data": "admin:security"}],
+        [{"text": "🔍 Security", "callback_data": "admin:security"},
+         {"text": "🔗 Clusters", "callback_data": "admin:clusters"}],
         [{"text": "⛔ Bans", "callback_data": "admin:bans"},
          {"text": "📢 Broadcast", "callback_data": "admin:broadcast"}],
+        [{"text": "🔎 Search users", "callback_data": "admin:searchflow"},
+         {"text": "🆕 Signups", "callback_data": "admin:signups"}],
+        [{"text": "📤 Export", "callback_data": "admin:exportmenu"},
+         {"text": "🏪 Store queue", "callback_data": "admin:store"}],
+        [{"text": "📜 Terms status", "callback_data": "admin:terms"},
+         {"text": "🧑‍⚖️ Audit by admin", "callback_data": "admin:auditadmins"}],
+        [{"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
     ]}
+
+
+def _maintenance_label():
+    return ("🔴 Maintenance: ON (tap to turn off)" if telegram_admin_ext.get_maintenance_mode()
+            else "🟢 Maintenance: OFF (tap to turn on)")
 
 
 def _admin_user_row_kb(target: dict):
@@ -118,9 +131,11 @@ def _admin_user_detail_text(target: dict) -> str:
     if target.get("is_suspended"): flags.append("suspended")
     tag = ", ".join(flags) or "no special flags"
     tid = target.get("telegram_id") or "not linked"
+    seen = telegram_admin_ext.last_seen_for_user(target["id"])
+    seen_line = f"\nLast seen: {seen['ls']} from `{seen.get('ip_address') or '—'}`" if seen else "\nLast seen: never"
     return (f"*{target.get('username') or '(no username)'}* (#{target['id']})\n"
             f"Telegram: `{tid}`\n"
-            f"Flags: {tag}")
+            f"Flags: {tag}{seen_line}")
 
 
 def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
@@ -472,6 +487,7 @@ def _admin_users_kb(page: int):
         nav.append({"text": "Next ▶️", "callback_data": f"admin:users:{page+1}"})
     if nav:
         kb.append(nav)
+    kb.append([{"text": "⛔ Bulk suspend", "callback_data": "admin:bulksuspendflow"}])
     kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
     return {"inline_keyboard": kb}
 
@@ -540,6 +556,7 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
                          f"· {r.get('jobs', 0)}/{r.get('capacity', 0)} jobs")
             kb.append([{"text": f"{'Disable' if r['enabled'] else 'Enable'} {r['label']}",
                         "callback_data": f"admin:togrunner:{r['id']}"},
+                       {"text": "🔑", "callback_data": f"admin:rotatesecretflow:{r['id']}"},
                        {"text": "🗑", "callback_data": f"admin:delrunnerconfirm:{r['id']}"}])
         if data.get("embedded"):
             e = data["embedded"]
@@ -606,10 +623,45 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         kb = {"inline_keyboard": [
             [{"text": "🔄 Restart", "callback_data": f"admin:jobrestart:{j['id']}"},
              {"text": "⏹ Stop", "callback_data": f"admin:jobstop:{j['id']}"}],
+            [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{j['id']}"}],
             [{"text": "🗑 Delete (asks to confirm)", "callback_data": f"admin:jobdelconfirm:{j['id']}"}],
             [{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}],
         ]}
         _edit_or_send(chat_id, message_id, text, reply_markup=kb)
+        return
+
+    if action == "revisions":
+        job_id = int(ref) if ref.isdigit() else None
+        revs = telegram_admin_ext.job_revisions(job_id) if job_id else []
+        kb = []
+        if not revs:
+            lines = ["📜 *Revisions* — none recorded for this job."]
+        else:
+            lines = ["📜 *Revision history* (tap to roll back):"]
+            for r in revs:
+                lines.append(f"v{r['version']} · {r['action']} · {r['status']} ({r['created_at']})")
+                kb.append([{"text": f"⏪ Roll back to v{r['version']}",
+                            "callback_data": f"admin:rollbackconfirm:{job_id}:{r['id']}"}])
+        kb.append([{"text": "⬅️ Job", "callback_data": f"admin:job:{job_id}"}])
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "rollbackconfirm":
+        job_id, rev_id = (ref.split(":") + ["", ""])[:2]
+        _edit_or_send(chat_id, message_id, "Roll back to this revision? This redeploys that old code now.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "⏪ Yes, roll back", "callback_data": f"admin:rollback:{job_id}:{rev_id}"},
+                   {"text": "✖️ Cancel", "callback_data": f"admin:revisions:{job_id}"}]]})
+        return
+
+    if action == "rollback":
+        job_id, rev_id = (ref.split(":") + ["", ""])[:2]
+        if not (job_id.isdigit() and rev_id.isdigit()):
+            _edit_or_send(chat_id, message_id, "Bad reference.")
+            return
+        res = telegram_admin_ext.rollback_job(int(job_id), int(rev_id))
+        _edit_or_send(chat_id, message_id, "✅ Rolled back and redeployed." if res.get("ok") else f"❌ {res.get('error')}")
+        handle_admin_callback(chat_id, telegram_user_id, "job", job_id, message_id)
         return
 
     if action in ("jobrestart", "jobstop"):
@@ -684,10 +736,134 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
     if action == "security":
         s = telegram_admin_ext.security_clusters_summary()
         text = (f"🔍 *Security summary*\n"
-                f"Fingerprint clusters (shared device across accounts): *{s['fingerprint_clusters']}*\n\n"
-                f"This is a count only — open the website's admin panel for the actual "
-                f"IP/fingerprint cluster breakdown, that view needs a wider screen.")
-        _edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+                f"Fingerprint clusters (shared device across accounts): *{s['fingerprint_clusters']}*")
+        kb = [[{"text": "🔗 See the clusters", "callback_data": "admin:clusters"}],
+              [{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]
+        _edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "clusters":
+        rows = telegram_admin_ext.fingerprint_clusters()
+        if not rows:
+            lines = ["🔗 *Clusters* — no shared-device accounts found."]
+        else:
+            lines = ["🔗 *Accounts sharing a device:*"]
+            for r in rows:
+                names = ", ".join(r["usernames"]) or "(no usernames)"
+                lines.append(f"`{r['fingerprint']}` ({r['count']}): {names}")
+        _edit_or_send(chat_id, message_id, "\n".join(lines),
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "searchflow":
+        _start_admin_flow(chat_id, "search")
+        return
+
+    if action == "signups":
+        rows = telegram_admin_ext.recent_signups()
+        if not rows:
+            lines = ["🆕 *Signups, last 24h* — none."]
+        else:
+            lines = [f"🆕 *Signups, last 24h ({len(rows)}):*"]
+            for r in rows:
+                lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                             f"tg:`{r.get('telegram_id') or '—'}`")
+        _edit_or_send(chat_id, message_id, "\n".join(lines),
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "exportmenu":
+        _edit_or_send(chat_id, message_id, "📤 *Export* — pick one:", reply_markup={"inline_keyboard": [
+            [{"text": "Users CSV", "callback_data": "admin:exportfile:users"},
+             {"text": "Jobs CSV", "callback_data": "admin:exportfile:jobs"}],
+            [{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "exportfile":
+        which = ref
+        csv_text = (telegram_admin_ext.export_users_csv() if which == "users"
+                    else telegram_admin_ext.export_jobs_csv())
+        with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{which}.csv",
+                                          delete=False, encoding="utf-8") as f:
+            f.write(csv_text)
+            tmp_path = f.name
+        try:
+            _send_document(chat_id, tmp_path, caption=f"{which} export")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+
+    if action == "store":
+        rows = telegram_admin_ext.store_pending()
+        kb = []
+        if not rows:
+            lines = ["🏪 *Store queue* — nothing pending."]
+        else:
+            lines = ["🏪 *Pending listings:*"]
+            for r in rows:
+                lines.append(f"`{r['id']}` · {r['title']} · by {r.get('author_name')}")
+                kb.append([{"text": f"✅ Approve #{r['id']}", "callback_data": f"admin:storeapprove:{r['id']}"},
+                           {"text": f"🚫 Reject #{r['id']}", "callback_data": f"admin:storereject:{r['id']}"}])
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
+        return
+
+    if action in ("storeapprove", "storereject"):
+        ok = telegram_admin_ext.store_set_status(int(ref), "approved" if action == "storeapprove" else "rejected")
+        _edit_or_send(chat_id, message_id, "✅ Updated." if ok else "❌ Couldn't find that listing.")
+        handle_admin_callback(chat_id, telegram_user_id, "store", "", message_id)
+        return
+
+    if action == "terms":
+        s = telegram_admin_ext.terms_status_summary()
+        not_agreed = telegram_admin_ext.users_without_terms()
+        lines = [f"📜 *Terms status*\n{s['agreed']}/{s['total']} agreed, {s['not_agreed']} have not."]
+        if not_agreed:
+            lines.append("\n*Not agreed (recent):*")
+            for r in not_agreed:
+                lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'}")
+        _edit_or_send(chat_id, message_id, "\n".join(lines),
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "auditadmins":
+        admins = telegram_admin_ext.list_admins()
+        kb = [[{"text": a["username"] or f"#{a['id']}", "callback_data": f"admin:auditby:{a['username']}"}]
+              for a in admins if a.get("username")]
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _edit_or_send(chat_id, message_id, "🧑‍⚖️ *Audit by admin* — pick one:", reply_markup={"inline_keyboard": kb})
+        return
+
+    if action == "auditby":
+        rows = telegram_admin_ext.audit_log_by_admin(ref)
+        if not rows:
+            lines = [f"📝 No audit entries for {ref}."]
+        else:
+            lines = [f"📝 *{ref}'s recent actions:*"]
+            for r in rows:
+                target = f"`{r.get('target')}`" if r.get("target") else "—"
+                lines.append(f"· {r['action']} → {target} ({r['created_at']})")
+        _edit_or_send(chat_id, message_id, "\n".join(lines),
+              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        return
+
+    if action == "togmaint":
+        telegram_admin_ext.set_maintenance_mode(not telegram_admin_ext.get_maintenance_mode())
+        _edit_or_send(chat_id, message_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
+        return
+
+    if action == "bulksuspendflow":
+        _start_admin_flow(chat_id, "bulksuspend")
+        return
+
+    if action == "rotatesecretflow":
+        if not ref.isdigit():
+            _edit_or_send(chat_id, message_id, "Bad runner id.")
+            return
+        _start_admin_flow(chat_id, "rotatesecret", extra={"runner_id": ref})
         return
 
     if action == "bans":
@@ -826,12 +1002,21 @@ ADMIN_FLOWS = {
     "broadcast": [
         ("message", "What should I send to every linked user?"),
     ],
+    "search": [
+        ("query", "Search for what? (part of a username or email)"),
+    ],
+    "bulksuspend": [
+        ("ids", "User ids to suspend, comma-separated (e.g. `12,45,90`)"),
+    ],
+    "rotatesecret": [
+        ("secret", "New `RUNNER_SERVICE_SECRET` for this runner?"),
+    ],
 }
 
 
-def _start_admin_flow(chat_id, flow_name):
+def _start_admin_flow(chat_id, flow_name, extra=None):
     steps = ADMIN_FLOWS[flow_name]
-    _admin_flow[chat_id] = {"flow": flow_name, "idx": 0, "data": {},
+    _admin_flow[chat_id] = {"flow": flow_name, "idx": 0, "data": {}, "extra": extra or {},
                             "expires": time.time() + _ADMIN_FLOW_TTL_S}
     _send(chat_id, f"🛠 *{flow_name}* — {steps[0][1]}\n(`/cancel` to stop)")
 
@@ -853,11 +1038,12 @@ def _advance_admin_flow(chat_id, text):
         _send(chat_id, steps[state["idx"]][1])
         return True
     _admin_flow.pop(chat_id, None)
-    _run_admin_flow(chat_id, state["flow"], state["data"])
+    _run_admin_flow(chat_id, state["flow"], state["data"], state.get("extra") or {})
     return True
 
 
-def _run_admin_flow(chat_id, flow_name, data):
+def _run_admin_flow(chat_id, flow_name, data, extra=None):
+    extra = extra or {}
     caller = telegram_link.user_for_chat(chat_id)  # private chat: chat_id == telegram user id
     if flow_name == "addrunner":
         _send(chat_id, f"Checking {data['url']}…")
@@ -898,6 +1084,28 @@ def _run_admin_flow(chat_id, flow_name, data):
                 pass
             time.sleep(0.05)
         _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+    elif flow_name == "search":
+        rows = telegram_admin_ext.search_users(data["query"])
+        if not rows:
+            _send(chat_id, f"No users matching “{data['query']}”.")
+            return
+        lines = [f"🔎 *{len(rows)} match(es):*"]
+        for r in rows:
+            lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                         f"tg:`{r.get('telegram_id') or '—'}`")
+        _send(chat_id, "\n".join(lines))
+    elif flow_name == "bulksuspend":
+        ids = [x.strip() for x in data["ids"].split(",") if x.strip().isdigit()]
+        if not ids:
+            _send(chat_id, "No valid ids found — expected something like `12,45,90`.")
+            return
+        res = telegram_admin_ext.bulk_suspend(ids, True)
+        _send(chat_id, f"✅ Suspended {len(res['ok'])}." +
+              (f" Failed: {', '.join(map(str, res['failed']))}." if res['failed'] else ""))
+    elif flow_name == "rotatesecret":
+        runner_id = extra.get("runner_id")
+        res = telegram_admin_ext.rotate_runner_secret(int(runner_id), data["secret"])
+        _send(chat_id, f"✅ Secret rotated for “{res['label']}”." if res.get("ok") else f"❌ {res['error']}")
 
 
 
