@@ -335,7 +335,208 @@ def check_new_signups_and_reports() -> dict:
 
 # ── Runners / worker pool — mirrors GET /admin/runners ─────────────────
 
-def runners_overview() -> dict:
+
+# ── Maintenance mode — new, not on the website ──────────────────────────
+# A single flag other routes can check (app.py would need one line added
+# to actually refuse traffic on it — this gives admins the on/off switch
+# and the state; wiring every route to respect it is a separate, larger
+# change to app.py itself, flagged rather than done silently here).
+
+def get_maintenance_mode() -> bool:
+    conn = get_db_connection()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tg_notify_state (key TEXT PRIMARY KEY, last_id INTEGER)")
+        row = conn.execute("SELECT last_id FROM tg_notify_state WHERE key='maintenance'").fetchone()
+        return bool(row and row["last_id"])
+    finally:
+        conn.close()
+
+
+def set_maintenance_mode(on: bool) -> None:
+    _notify_state_set("maintenance", 1 if on else 0)
+
+
+# ── Terms-agreement status — new, not on the website ────────────────────
+
+def terms_status_summary() -> dict:
+    conn = get_db_connection()
+    try:
+        total = dict(conn.execute("SELECT COUNT(*) AS c FROM users").fetchone())["c"]
+        agreed = dict(conn.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE agreed_terms_at IS NOT NULL").fetchone())["c"]
+        return {"total": total, "agreed": agreed, "not_agreed": total - agreed}
+    finally:
+        conn.close()
+
+
+def users_without_terms(limit: int = 15) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, telegram_id FROM users WHERE agreed_terms_at IS NULL "
+            "ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Last-seen — new, not on the website ─────────────────────────────────
+
+def last_seen_for_user(user_id: int):
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(last_seen) AS ls, ip_address FROM sessions WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row and row["ls"] else None
+    finally:
+        conn.close()
+
+
+# ── Bulk suspend — new, not on the website ──────────────────────────────
+
+def bulk_suspend(user_ids: list, value: bool) -> dict:
+    from services import telegram_link as _tl
+    ok, failed = [], []
+    for uid in user_ids:
+        try:
+            _tl.set_suspended(int(uid), value)
+            ok.append(uid)
+        except Exception:
+            failed.append(uid)
+    return {"ok": ok, "failed": failed}
+
+
+# ── Store moderation queue — new, not on the website's admin panel ─────
+# (the website has a separate store-review surface; this brings the same
+# pending queue into the chat panel)
+
+def store_pending(limit: int = 10) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, title, author_name, created_at FROM store_items "
+            "WHERE status = 'pending' ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def store_set_status(item_id: int, status: str, note: str = "") -> bool:
+    conn = get_db_connection()
+    try:
+        now = now_utc_str()
+        cur = conn.execute(
+            "UPDATE store_items SET status=?, review_note=?, updated_at=?, "
+            "published_at=CASE WHEN ?='approved' THEN ? ELSE published_at END WHERE id=?",
+            (status, note, now, status, now, item_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ── Bot revision history + rollback — new, not on the website ──────────
+
+def job_revisions(job_id: int, limit: int = 10) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, version, action, status, created_at FROM bot_revisions "
+            "WHERE job_id = ? ORDER BY version DESC LIMIT ?", (job_id, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def rollback_job(job_id: int, revision_id: int) -> dict:
+    """Redeploys the code stored in a past revision — same update_code path
+    everything else uses, so it goes through the runner properly instead of
+    just rewriting the jobs row."""
+    conn = get_db_connection()
+    try:
+        rev = conn.execute("SELECT * FROM bot_revisions WHERE id=? AND job_id=?",
+                            (revision_id, job_id)).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    if not rev or not job:
+        return {"ok": False, "error": "Revision or job not found."}
+    return bot_ops.update_code(job["user_id"], str(job["id"]), rev["code"], rev["language"])
+
+
+# ── IP / fingerprint cluster drill-down — new, not on the website's
+# summary-only view; this lists the actual clustered accounts. ─────────
+
+def fingerprint_clusters(limit: int = 10) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT fingerprint, GROUP_CONCAT(DISTINCT user_id) AS uids, COUNT(DISTINCT user_id) AS n "
+            "FROM sessions WHERE fingerprint IS NOT NULL "
+            "GROUP BY fingerprint HAVING n > 1 ORDER BY n DESC LIMIT ?", (limit,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            uids = [int(x) for x in (r["uids"] or "").split(",") if x]
+            unames = conn.execute(
+                f"SELECT username FROM users WHERE id IN ({','.join('?'*len(uids))})", uids
+            ).fetchall() if uids else []
+            out.append({"fingerprint": r["fingerprint"][:16], "count": r["n"],
+                        "usernames": [u["username"] for u in unames]})
+        return out
+    finally:
+        conn.close()
+
+
+# ── Runner secret rotate — new, not on the website ──────────────────────
+
+def rotate_runner_secret(runner_id: int, new_secret: str) -> dict:
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT label, url FROM runner_nodes WHERE id=?", (runner_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"ok": False, "error": "No such runner."}
+    return add_runner(row["label"], row["url"], new_secret, None)  # re-validates + re-saves
+
+
+# ── Admin-filtered audit log — new, not on the website ──────────────────
+
+def audit_log_by_admin(admin_username: str, limit: int = 10) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT a.id, a.action, a.target, a.created_at FROM admin_audit_log a "
+            "JOIN users u ON u.id = a.admin_id WHERE u.username = ? "
+            "ORDER BY a.id DESC LIMIT ?", (admin_username, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_admins() -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("SELECT id, username FROM users WHERE is_admin=1").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Fresh health check — new, not on the website (which only shows the
+# last cached health poll) ──────────────────────────────────────────────
+
+def runners_health_now() -> dict:
+    return runners_overview(refresh=True)
+
+
+def runners_overview(refresh: bool = False) -> dict:
     conn = get_db_connection()
     try:
         rows = [dict(r) for r in conn.execute(
@@ -343,7 +544,7 @@ def runners_overview() -> dict:
         ).fetchall()]
     finally:
         conn.close()
-    health = runner_client.worker_health(max_age_s=ADMIN_HEALTH_MAX_AGE_S) or {}
+    health = runner_client.worker_health(refresh=refresh, max_age_s=ADMIN_HEALTH_MAX_AGE_S) or {}
     for row in rows:
         h = health.get(row["url"]) or {}
         row.update(online=bool(h.get("online")), jobs=h.get("jobs", 0),
