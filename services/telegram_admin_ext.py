@@ -185,6 +185,154 @@ def job_full_detail_with_code(user_id: int, job_ref: str) -> dict:
     return d
 
 
+# ── Search — new, not on the website (which only paginates, no search box) ──
+
+def search_users(query: str, limit: int = 15) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "FROM users WHERE username LIKE ? OR email LIKE ? ORDER BY id DESC LIMIT ?",
+            (f"%{query}%", f"%{query}%", limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def search_jobs(query: str, limit: int = 15) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT j.id, j.name, j.language, u.username AS owner FROM jobs j "
+            "JOIN users u ON u.id = j.user_id WHERE j.name LIKE ? "
+            "ORDER BY j.id DESC LIMIT ?", (f"%{query}%", limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Recent signups — new, not on the website ────────────────────────────
+
+def recent_signups(hours: int = 24, limit: int = 20) -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, email, telegram_id, created_at FROM users "
+            "WHERE created_at >= datetime('now', ?) ORDER BY id DESC LIMIT ?",
+            (f"-{hours} hours", limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── CSV export — new, not on the website ────────────────────────────────
+
+def export_users_csv() -> str:
+    import csv, io as _io
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, email, telegram_id, is_admin, can_upload_zip, "
+            "is_suspended, job_limit_override, created_at FROM users ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    buf = _io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id", "username", "email", "telegram_id", "is_admin", "can_upload_zip",
+                "is_suspended", "job_limit_override", "created_at"])
+    for r in rows:
+        w.writerow([r[k] for k in ("id", "username", "email", "telegram_id", "is_admin",
+                                    "can_upload_zip", "is_suspended", "job_limit_override", "created_at")])
+    return buf.getvalue()
+
+
+def export_jobs_csv() -> str:
+    import csv, io as _io
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT j.id, j.name, j.language, u.username AS owner, j.runner_job_id, j.created_at "
+            "FROM jobs j JOIN users u ON u.id = j.user_id ORDER BY j.id"
+        ).fetchall()
+    finally:
+        conn.close()
+    buf = _io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id", "name", "language", "owner", "runner_job_id", "created_at"])
+    for r in rows:
+        w.writerow([r[k] for k in ("id", "name", "language", "owner", "runner_job_id", "created_at")])
+    return buf.getvalue()
+
+
+# ── Delete runner — new, not on the website (which only enables/disables) ──
+
+def delete_runner(runner_id: int) -> dict:
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT label FROM runner_nodes WHERE id=?", (runner_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "No such runner."}
+        conn.execute("DELETE FROM runner_nodes WHERE id=?", (runner_id,))
+        conn.commit()
+        return {"ok": True, "label": row["label"]}
+    finally:
+        conn.close()
+
+
+# ── New-signup / abuse-report notifier — new, not on the website ───────────
+# A periodic watcher (same shape as services/bot_notify.py's crash watcher)
+# rather than a hook inside routes/auth.py or the abuse-report endpoint —
+# keeps this feature from ever touching signup/report code paths directly.
+# State (highest id already notified) lives in a tiny one-row table so a
+# restart doesn't re-announce everything.
+
+def _notify_state_get(key: str) -> int:
+    conn = get_db_connection()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tg_notify_state (key TEXT PRIMARY KEY, last_id INTEGER)")
+        row = conn.execute("SELECT last_id FROM tg_notify_state WHERE key=?", (key,)).fetchone()
+        return row["last_id"] if row else 0
+    finally:
+        conn.close()
+
+
+def _notify_state_set(key: str, last_id: int) -> None:
+    conn = get_db_connection()
+    try:
+        conn.execute("INSERT INTO tg_notify_state (key, last_id) VALUES (?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET last_id=excluded.last_id", (key, last_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def check_new_signups_and_reports() -> dict:
+    """Call this every ~60s from a background loop. Returns what's new
+    since the last call (and marks it seen), for the caller to message
+    admins with."""
+    conn = get_db_connection()
+    try:
+        last_user = _notify_state_get("users")
+        new_users = conn.execute(
+            "SELECT id, username, email FROM users WHERE id > ? ORDER BY id", (last_user,)
+        ).fetchall()
+        last_report = _notify_state_get("abuse_reports")
+        new_reports = conn.execute(
+            "SELECT id, url, reason FROM abuse_reports WHERE id > ? ORDER BY id", (last_report,)
+        ).fetchall()
+    finally:
+        conn.close()
+    if new_users:
+        _notify_state_set("users", max(r["id"] for r in new_users))
+    if new_reports:
+        _notify_state_set("abuse_reports", max(r["id"] for r in new_reports))
+    return {"users": [dict(r) for r in new_users], "reports": [dict(r) for r in new_reports]}
+
+
 # ── Runners / worker pool — mirrors GET /admin/runners ─────────────────
 
 def runners_overview() -> dict:
