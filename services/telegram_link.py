@@ -355,3 +355,18 @@ def set_suspended(user_id: int, value: bool) -> None:
         conn.commit()
     finally:
         conn.close()
+    if value:
+        # Suspending an account used to leave every job it owned running —
+        # login was blocked but nothing they'd deployed actually stopped.
+        # If suspension is for abuse, the abuse kept happening.
+        from services import bot_ops
+        conn = get_db_connection()
+        try:
+            rows = conn.execute("SELECT id FROM jobs WHERE user_id = ?", (user_id,)).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            try:
+                bot_ops.stop(user_id, str(r["id"]))
+            except Exception:
+                pass
