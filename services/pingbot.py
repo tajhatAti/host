@@ -45,6 +45,44 @@ def _is_admin(user, telegram_user_id=None) -> bool:
     return bool(user and user.get("is_admin"))
 
 
+def _admin_notify_targets():
+    """Everyone who should hear about new signups/abuse reports: the
+    hardcoded super-admin plus anyone with is_admin=1 who's linked."""
+    ids = set()
+    if SUPER_ADMIN_TG_ID:
+        ids.add(SUPER_ADMIN_TG_ID)
+    for r in telegram_link.list_admin_overview(limit=200):
+        if r.get("is_admin") and r.get("telegram_id"):
+            ids.add(r["telegram_id"])
+    return ids
+
+
+def _admin_notify_loop():
+    while True:
+        try:
+            time.sleep(60)
+            found = telegram_admin_ext.check_new_signups_and_reports()
+            if not found["users"] and not found["reports"]:
+                continue
+            targets = _admin_notify_targets()
+            for u in found["users"]:
+                text = f"🆕 New signup: *{u.get('username') or '(no username)'}* (#{u['id']})"
+                for tid in targets:
+                    try:
+                        _send(tid, text)
+                    except Exception:
+                        pass
+            for r in found["reports"]:
+                text = f"🚩 New abuse report #{r['id']}: {r.get('reason') or 'no reason'}\n{r.get('url','')[:80]}"
+                for tid in targets:
+                    try:
+                        _send(tid, text)
+                    except Exception:
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("admin notify loop error: %s", exc)
+
+
 def _admin_menu_kb():
     return {"inline_keyboard": [
         [{"text": "📊 Overview", "callback_data": "admin:overview"},
@@ -181,12 +219,18 @@ def cmd_see(chat_id, telegram_user_id, arg):
 
 def cmd_admin(chat_id, telegram_user_id, arg):
     """/admin — inline-button panel for most things; a few actions also have
-    typed shortcuts:
+    typed shortcuts (all support a bare, no-args form that starts a
+    step-by-step Q&A instead):
       /admin ban <telegram_id> [reason]
       /admin unban <telegram_id>
       /admin broadcast <message>
       /admin limit <username|telegram_id> <number|clear>
       /admin grant|revoke|allowzip|denyzip <username|telegram_id>
+      /admin addrunner <label> <url> <secret>
+      /admin deleterunner <id>
+      /admin search <query> / /admin searchjobs <query>
+      /admin signups [hours] — default 24h
+      /admin export users|jobs — sends a CSV file
     The hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1 can use all
     of this; every action re-checks admin status on its own, since
     callback_data is attacker-suppliable in principle."""
@@ -199,9 +243,13 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     rest = parts[1].strip() if len(parts) > 1 else ""
 
     if sub == "ban":
+        if not rest:
+            _start_admin_flow(chat_id, "ban")
+            return
         bits = rest.split(None, 1)
         if not bits or not bits[0].isdigit():
-            _send(chat_id, "Usage: `/admin ban <telegram_id> [reason]`")
+            _send(chat_id, "Usage: `/admin ban <telegram_id> [reason]` — or just `/admin ban` "
+                           "and I'll ask for each piece.")
             return
         reason = bits[1] if len(bits) > 1 else ""
         telegram_admin_ext.ban_telegram_id(int(bits[0]), telegram_user_id, reason)
@@ -218,7 +266,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub == "broadcast":
         if not rest:
-            _send(chat_id, "Usage: `/admin broadcast <message>`")
+            _start_admin_flow(chat_id, "broadcast")
             return
         ids = telegram_admin_ext.all_linked_telegram_ids()
         _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
@@ -234,9 +282,13 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         return
 
     if sub == "limit":
+        if not rest:
+            _start_admin_flow(chat_id, "limit")
+            return
         bits = rest.split(None, 1)
         if len(bits) < 2:
-            _send(chat_id, "Usage: `/admin limit <username|telegram_id> <number|clear>`")
+            _send(chat_id, "Usage: `/admin limit <username|telegram_id> <number|clear>` — "
+                           "or just `/admin limit` and I'll ask.")
             return
         target = telegram_link.resolve_user_ref(bits[0])
         if not target:
@@ -252,10 +304,13 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         return
 
     if sub == "addrunner":
+        if not rest:
+            _start_admin_flow(chat_id, "addrunner")
+            return
         bits = rest.split(None, 2)
         if len(bits) < 3:
-            _send(chat_id, "Usage: `/admin addrunner <label> <url> <RUNNER_SERVICE_SECRET>`\n"
-                           "e.g. `/admin addrunner render-eu https://my-runner.onrender.com abc123...`\n"
+            _send(chat_id, "Usage: `/admin addrunner <label> <url> <RUNNER_SERVICE_SECRET>` — "
+                           "or just `/admin addrunner` and I'll ask for each one.\n"
                            "⚠️ Delete this message after sending — the secret sits in chat history otherwise.")
             return
         label, url, secret = bits[0], bits[1], bits[2]
@@ -290,6 +345,81 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         else:
             telegram_link.set_zip_permission(target["id"], False)
             _send(chat_id, f"✅ {target.get('username') or rest} can no longer upload .zip bundles.")
+        return
+
+    if sub == "search":
+        if not rest:
+            _send(chat_id, "Usage: `/admin search <part of a username or email>`")
+            return
+        rows = telegram_admin_ext.search_users(rest)
+        if not rows:
+            _send(chat_id, f"No users matching “{rest}”.")
+            return
+        lines = [f"🔎 *{len(rows)} match(es) for “{rest}”:*"]
+        for r in rows:
+            flags = []
+            if r.get("is_admin"): flags.append("admin")
+            if r.get("can_upload_zip"): flags.append("zip")
+            if r.get("is_suspended"): flags.append("suspended")
+            tag = f" _{', '.join(flags)}_" if flags else ""
+            lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                         f"tg:`{r.get('telegram_id') or '—'}`{tag}")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "searchjobs":
+        if not rest:
+            _send(chat_id, "Usage: `/admin searchjobs <part of a job name>`")
+            return
+        rows = telegram_admin_ext.search_jobs(rest)
+        if not rows:
+            _send(chat_id, f"No jobs matching “{rest}”.")
+            return
+        lines = [f"🔎 *{len(rows)} match(es) for “{rest}”:*"]
+        for r in rows:
+            lines.append(f"`{r['id']}` · {r['name']} · {r['owner']} · {r['language']}")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "signups":
+        hours = int(rest) if rest.isdigit() else 24
+        rows = telegram_admin_ext.recent_signups(hours=hours)
+        if not rows:
+            _send(chat_id, f"No signups in the last {hours}h.")
+            return
+        lines = [f"🆕 *Signups, last {hours}h ({len(rows)}):*"]
+        for r in rows:
+            lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                         f"tg:`{r.get('telegram_id') or '—'}` · {r['created_at']}")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "export":
+        which = rest.strip().lower()
+        if which not in ("users", "jobs"):
+            _send(chat_id, "Usage: `/admin export users` or `/admin export jobs`")
+            return
+        csv_text = (telegram_admin_ext.export_users_csv() if which == "users"
+                    else telegram_admin_ext.export_jobs_csv())
+        with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{which}.csv",
+                                          delete=False, encoding="utf-8") as f:
+            f.write(csv_text)
+            tmp_path = f.name
+        try:
+            _send_document(chat_id, tmp_path, caption=f"{which} export")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+
+    if sub == "deleterunner":
+        if not rest.isdigit():
+            _send(chat_id, "Usage: `/admin deleterunner <id>` — get the id from the Runners view.")
+            return
+        res = telegram_admin_ext.delete_runner(int(rest))
+        _send(chat_id, f"🗑 Deleted runner “{res['label']}”." if res.get("ok") else f"❌ {res['error']}")
         return
 
     if sub and sub not in ("help", "menu"):
@@ -409,11 +539,12 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
             lines.append(f"{dot} {r['label']} — {'enabled' if r['enabled'] else 'disabled'} "
                          f"· {r.get('jobs', 0)}/{r.get('capacity', 0)} jobs")
             kb.append([{"text": f"{'Disable' if r['enabled'] else 'Enable'} {r['label']}",
-                        "callback_data": f"admin:togrunner:{r['id']}"}])
+                        "callback_data": f"admin:togrunner:{r['id']}"},
+                       {"text": "🗑", "callback_data": f"admin:delrunnerconfirm:{r['id']}"}])
         if data.get("embedded"):
             e = data["embedded"]
             lines.append(f"{'🟢' if e['online'] else '⚪'} embedded · {e.get('jobs',0)}/{e.get('capacity',0)} jobs")
-        lines.append("\nTo add a new Render runner: `/admin addrunner <label> <url> <secret>`")
+        kb.append([{"text": "➕ Add runner", "callback_data": "admin:addrunnerflow"}])
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
         _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
@@ -424,6 +555,19 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
             _edit_or_send(chat_id, message_id, "That runner no longer exists.")
             return
         _edit_or_send(chat_id, message_id, f"✅ {res['label']} is now {'enabled' if res['enabled'] else 'disabled'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "runners", "", message_id)
+        return
+
+    if action == "delrunnerconfirm":
+        _edit_or_send(chat_id, message_id, "Delete this runner? Jobs assigned to it will need reassigning.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "🗑 Yes, delete", "callback_data": f"admin:delrunner:{ref}"},
+                   {"text": "✖️ Cancel", "callback_data": "admin:runners"}]]})
+        return
+
+    if action == "delrunner":
+        res = telegram_admin_ext.delete_runner(int(ref)) if ref.isdigit() else {"ok": False, "error": "Bad id."}
+        _edit_or_send(chat_id, message_id, f"🗑 Deleted “{res['label']}”." if res.get("ok") else f"❌ {res['error']}")
         handle_admin_callback(chat_id, telegram_user_id, "runners", "", message_id)
         return
 
@@ -548,15 +692,14 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
 
     if action == "bans":
         rows = telegram_admin_ext.list_banned()
-        kb = []
+        kb = [[{"text": "🚫 Ban someone", "callback_data": "admin:bansflow"}]]
         if not rows:
-            lines = ["⛔ *Bans* — nobody is banned.\n\nTo ban someone: `/admin ban <telegram_id> [reason]`"]
+            lines = ["⛔ *Bans* — nobody is banned."]
         else:
             lines = ["⛔ *Banned Telegram ids:*"]
             for r in rows:
                 lines.append(f"`{r['telegram_id']}` · {r.get('reason') or 'no reason'} ({r['created_at']})")
                 kb.append([{"text": f"Unban {r['telegram_id']}", "callback_data": f"admin:unban:{r['telegram_id']}"}])
-            lines.append("\nTo ban someone: `/admin ban <telegram_id> [reason]`")
         kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
         _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
@@ -568,9 +711,15 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         return
 
     if action == "broadcast":
-        _edit_or_send(chat_id, message_id, "📢 To send a broadcast: `/admin broadcast <your message>`\n"
-                       "It goes to every linked, non-suspended user. Use it sparingly.",
-              reply_markup={"inline_keyboard": [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        _start_admin_flow(chat_id, "broadcast")
+        return
+
+    if action == "bansflow":
+        _start_admin_flow(chat_id, "ban")
+        return
+
+    if action == "addrunnerflow":
+        _start_admin_flow(chat_id, "addrunner")
         return
 
 # CODE-VIA-CHAT — READ THIS BEFORE TOUCHING /code, /update, or _pending.
@@ -651,6 +800,104 @@ _CODE_EXT_LANG = {
 # whatever was waiting, so there is never a stale slot fighting a fresh one.
 _pending = {}
 _PENDING_TTL_S = 300
+
+# Parallel to _pending, but for multi-field ADMIN actions: bot asks one
+# field at a time ("URL?" -> user answers -> "Secret?" -> user answers ->
+# runs) instead of requiring everything on one line. Each flow is a list of
+# (field_name, prompt) steps; _run_admin_flow below executes the matching
+# function once every field is collected.
+_admin_flow = {}
+_ADMIN_FLOW_TTL_S = 300
+
+ADMIN_FLOWS = {
+    "addrunner": [
+        ("label", "Label for this runner? (a short name, e.g. `render-eu`)"),
+        ("url", "Its URL? (e.g. `https://my-runner.onrender.com`)"),
+        ("secret", "Its `RUNNER_SERVICE_SECRET`? ⚠️ delete this message after I confirm."),
+    ],
+    "ban": [
+        ("telegram_id", "Telegram id to ban? (the number, not a username)"),
+        ("reason", "Reason? (or send `-` for none)"),
+    ],
+    "limit": [
+        ("ref", "Which user? (username or telegram id)"),
+        ("value", "New job limit? (a number, or `clear` to remove the override)"),
+    ],
+    "broadcast": [
+        ("message", "What should I send to every linked user?"),
+    ],
+}
+
+
+def _start_admin_flow(chat_id, flow_name):
+    steps = ADMIN_FLOWS[flow_name]
+    _admin_flow[chat_id] = {"flow": flow_name, "idx": 0, "data": {},
+                            "expires": time.time() + _ADMIN_FLOW_TTL_S}
+    _send(chat_id, f"🛠 *{flow_name}* — {steps[0][1]}\n(`/cancel` to stop)")
+
+
+def _advance_admin_flow(chat_id, text):
+    """Called for a plain-text message while a flow is active. Stores the
+    answer, asks the next question, or runs the flow once every field is
+    in. Returns True if it consumed the message (caller should stop)."""
+    state = _admin_flow.get(chat_id)
+    if not state or state["expires"] < time.time():
+        _admin_flow.pop(chat_id, None)
+        return False
+    steps = ADMIN_FLOWS[state["flow"]]
+    field, _ = steps[state["idx"]]
+    state["data"][field] = text.strip()
+    state["idx"] += 1
+    if state["idx"] < len(steps):
+        state["expires"] = time.time() + _ADMIN_FLOW_TTL_S
+        _send(chat_id, steps[state["idx"]][1])
+        return True
+    _admin_flow.pop(chat_id, None)
+    _run_admin_flow(chat_id, state["flow"], state["data"])
+    return True
+
+
+def _run_admin_flow(chat_id, flow_name, data):
+    caller = telegram_link.user_for_chat(chat_id)  # private chat: chat_id == telegram user id
+    if flow_name == "addrunner":
+        _send(chat_id, f"Checking {data['url']}…")
+        res = telegram_admin_ext.add_runner(data["label"], data["url"], data["secret"],
+                                            caller["id"] if caller else None)
+        _send(chat_id, f"✅ Runner “{res['label']}” registered (#{res['id']}) and enabled."
+              if res.get("ok") else f"❌ {res['error']}")
+    elif flow_name == "ban":
+        if not data["telegram_id"].isdigit():
+            _send(chat_id, "That wasn't a number — nothing banned. Try `/admin ban` again.")
+            return
+        reason = "" if data["reason"] == "-" else data["reason"]
+        telegram_admin_ext.ban_telegram_id(int(data["telegram_id"]), chat_id, reason)
+        _send(chat_id, f"⛔ Banned `{data['telegram_id']}`" + (f" — {reason}" if reason else "") + ".")
+    elif flow_name == "limit":
+        target = telegram_link.resolve_user_ref(data["ref"])
+        if not target:
+            _send(chat_id, f"No user found for “{data['ref']}”.")
+            return
+        val = data["value"]
+        if val.lower() == "clear":
+            telegram_admin_ext.set_job_limit_override(target["id"], None)
+            _send(chat_id, f"✅ Job limit for {target.get('username') or data['ref']} cleared.")
+        elif val.isdigit():
+            telegram_admin_ext.set_job_limit_override(target["id"], int(val))
+            _send(chat_id, f"✅ Job limit for {target.get('username') or data['ref']} set to {val}.")
+        else:
+            _send(chat_id, "That wasn't a number or `clear` — nothing changed.")
+    elif flow_name == "broadcast":
+        ids = telegram_admin_ext.all_linked_telegram_ids()
+        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+        sent = 0
+        for tid in ids:
+            try:
+                _send(tid, data["message"])
+                sent += 1
+            except Exception:
+                pass
+            time.sleep(0.05)
+        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
 
 
 
@@ -1684,6 +1931,14 @@ def handle_update(upd):
             linked = telegram_link.user_for_chat(chat_id)
             event["user_id"] = _row_id(linked)
 
+            if command == "/cancel" and chat_id in _admin_flow:
+                _admin_flow.pop(chat_id, None)
+                _send(chat_id, "Cancelled.")
+                return
+            if not command and chat_id in _admin_flow:
+                if _advance_admin_flow(chat_id, text):
+                    return
+
             # A pending upload/text is claimed before normal non-command input.
             # "/skip" is the one command-shaped exception: it's only ever
             # meaningful as the answer to the requirements step below, so it
@@ -2052,3 +2307,4 @@ def start_bot():
                        "the webhook instead.")
         t.start()
         print("✅ Advanced Bot started (polling mode, fallback)")
+    threading.Thread(target=_admin_notify_loop, daemon=True).start()
