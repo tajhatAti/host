@@ -1,3 +1,6 @@
+# Full pingbot.py (from your project)
+
+``` python
 """
 Telegram Bot - Advanced RunSpace Controller (Pure requests)
 Features:
@@ -2516,3 +2519,4 @@ def start_bot():
         t.start()
         print("✅ Advanced Bot started (polling mode, fallback)")
     threading.Thread(target=_admin_notify_loop, daemon=True).start()
+```
