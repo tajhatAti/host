@@ -5457,18 +5457,19 @@ body {
   background-attachment: fixed;
 }
 
-/* top bar */
+/* top bar — sticky, sits over scrolling content, so it must stay
+   mostly opaque or whatever scrolls underneath ghosts through it. */
 .dash-bar {
-  background: var(--gl-fill);
+  background: color-mix(in srgb, var(--bar) 90%, transparent);
   border-bottom: 1px solid var(--gl-border);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
 
 /* tab nav pills */
 .dash-tabs { background: transparent; }
 .dash-tab, .tab-secondary, .cs-tab {
-  background: var(--gl-fill);
+  background: var(--gl-fill-2);
   border: 1px solid var(--gl-border);
 }
 .dash-tab:hover, .tab-secondary:hover, .cs-tab:hover { background: var(--gl-fill-2); }
@@ -5477,6 +5478,7 @@ body {
   border-color: transparent; color: #fff;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.3), 0 4px 14px rgba(10,132,255,.32);
 }
+
 
 /* cards, panels, modals, auth cards */
 .jd-panel, .snippet-item, .adm-panel, .fatal-card, .ah-modal-card, .auth-card {
@@ -5505,8 +5507,10 @@ body {
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
 
-/* inputs */
-.input-text, input, textarea, select {
+/* inputs — scoped to the app's own input class only. A bare
+   input/textarea/select tag selector is too broad: it also touches
+   hidden inputs some menus/toggles rely on. */
+.input-text {
   background: var(--gl-fill);
   border: 1px solid var(--gl-border);
 }
