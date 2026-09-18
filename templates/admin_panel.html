@@ -62,6 +62,19 @@
     }
     #tab-admin .adm-risk-account { background: var(--gl-fill-2); border-color: var(--gl-border); }
 
+    /* stat cards: JS renders <div class="adm-stat"><b>14</b><span>users</span></div>
+       inline, which crams the number and label together. Stack them like
+       the demo instead. */
+    #tab-admin .adm-stat {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    #tab-admin .adm-stat b {
+      order: 1; font-size: 24px; font-weight: 700; letter-spacing: -0.02em;
+    }
+    #tab-admin .adm-stat span {
+      order: 2; font-size: 12px; color: var(--fg-3); font-weight: 400;
+    }
+
     /* status-colour left borders stay legible on glass */
     #tab-admin .adm-runner-card.is-online { border-left: 3px solid var(--ok); }
     #tab-admin .adm-runner-card.is-offline { border-left: 3px solid var(--danger); }
@@ -69,13 +82,16 @@
     #tab-admin .adm-risk-card.danger { border-color: var(--warn); }
 
     /* ---- section nav → glass segmented pill bar ------------------------ */
+    /* sticky (position:sticky; top:0) — other admin panels scroll under
+       it, so like the site's top header it must stay mostly opaque or
+       that scrolled content ghosts through the blur. */
     #tab-admin .adm-section-nav {
-      background: var(--gl-fill);
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
       border: 1px solid var(--gl-border);
       border-radius: 20px;
       padding: 5px;
-      backdrop-filter: blur(22px) saturate(170%);
-      -webkit-backdrop-filter: blur(22px) saturate(170%);
+      backdrop-filter: blur(20px) saturate(160%);
+      -webkit-backdrop-filter: blur(20px) saturate(160%);
       box-shadow: inset 0 1px 0 var(--gl-hi), 0 8px 24px rgba(0,0,0,.28);
     }
     #tab-admin .adm-section-nav a {
