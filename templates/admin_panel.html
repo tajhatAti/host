@@ -1,3 +1,161 @@
+
+  <!-- ============================================================
+       Liquid Glass admin theme (iOS 18 "liquid glass" look), scoped
+       to the admin console only. RunSpace/Code Studio stay on the
+       existing hardcoded dark palette per app.css's "one product,
+       one theme" rule above — this file does not add a light mode,
+       it only restyles the admin surfaces that already exist.
+       ============================================================ -->
+  <style id="admGlassTheme">
+    #tab-admin, #admUserModal, #admBlockModal, #admJobModal {
+      --gl-fill:   rgba(255,255,255,.08);
+      --gl-fill-2: rgba(255,255,255,.14);
+      --gl-border: rgba(255,255,255,.16);
+      --gl-hi:     rgba(255,255,255,.24);
+      --gl-blue:   #0a84ff;
+      --gl-purple: #bf5af2;
+      --gl-teal:   #64d2ff;
+    }
+
+    /* Ambient light the glass panels refract. Only painted while the
+       admin tab is open, so every other screen is untouched. */
+    body:has(#tab-admin.active) {
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(600px 600px at 8% -8%,  rgba(10,132,255,.20), transparent 60%),
+        radial-gradient(560px 560px at 108% 26%, rgba(191,90,242,.16), transparent 60%),
+        radial-gradient(520px 520px at 46% 118%, rgba(100,210,255,.12), transparent 60%);
+      background-attachment: fixed;
+    }
+
+    /* ---- panels & cards ------------------------------------------------ */
+    #tab-admin .adm-panel {
+      background: linear-gradient(160deg, var(--gl-fill-2), var(--gl-fill));
+      border: 1px solid var(--gl-border);
+      border-radius: 22px;
+      backdrop-filter: blur(26px) saturate(180%);
+      -webkit-backdrop-filter: blur(26px) saturate(180%);
+      box-shadow: inset 0 1px 0 var(--gl-hi), 0 10px 30px rgba(0,0,0,.35);
+      position: relative;
+      overflow: hidden;
+    }
+    #tab-admin .adm-panel::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: linear-gradient(115deg, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 30%);
+    }
+
+    #tab-admin .adm-stat,
+    #tab-admin .adm-runner-card,
+    #tab-admin .adm-tg-job,
+    #tab-admin .adm-risk-grid > section,
+    #tab-admin .adm-risk-card,
+    #tab-admin .adm-version-row,
+    #tab-admin .adm-block-row,
+    #tab-admin .adm-bot-grid > div,
+    #tab-admin .adm-runner-setup,
+    #tab-admin .adm-risk-help {
+      background: var(--gl-fill);
+      border: 1px solid var(--gl-border);
+      border-radius: var(--r-row);
+      backdrop-filter: blur(18px) saturate(160%);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+    }
+    #tab-admin .adm-risk-account { background: var(--gl-fill-2); border-color: var(--gl-border); }
+
+    /* status-colour left borders stay legible on glass */
+    #tab-admin .adm-runner-card.is-online { border-left: 3px solid var(--ok); }
+    #tab-admin .adm-runner-card.is-offline { border-left: 3px solid var(--danger); }
+    #tab-admin .adm-tg-job.is-live { border-left: 3px solid var(--ok); }
+    #tab-admin .adm-risk-card.danger { border-color: var(--warn); }
+
+    /* ---- section nav → glass segmented pill bar ------------------------ */
+    #tab-admin .adm-section-nav {
+      background: var(--gl-fill);
+      border: 1px solid var(--gl-border);
+      border-radius: 20px;
+      padding: 5px;
+      backdrop-filter: blur(22px) saturate(170%);
+      -webkit-backdrop-filter: blur(22px) saturate(170%);
+      box-shadow: inset 0 1px 0 var(--gl-hi), 0 8px 24px rgba(0,0,0,.28);
+    }
+    #tab-admin .adm-section-nav a {
+      background: transparent; border-color: transparent; color: var(--fg-3);
+      border-radius: 16px;
+    }
+    #tab-admin .adm-section-nav a:hover,
+    #tab-admin .adm-section-nav a:focus-visible { background: var(--gl-fill-2); color: var(--fg); }
+    #tab-admin .adm-section-nav a.active {
+      background: linear-gradient(160deg, var(--gl-blue), #0060df);
+      border-color: transparent; color: #fff;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 4px 14px rgba(10,132,255,.35);
+    }
+
+    /* ---- buttons, pills, inputs ----------------------------------------- */
+    #tab-admin .btn-primary,
+    #admBlockModal .btn-primary,
+    #admUserModal .btn-primary,
+    #admJobModal .btn-primary {
+      background: linear-gradient(160deg, var(--gl-blue), #0060df);
+      border: 1px solid rgba(255,255,255,.25); color: #fff;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.3);
+    }
+    #tab-admin .btn-ghost,
+    #admBlockModal .btn-ghost,
+    #admUserModal .btn-ghost,
+    #admJobModal .btn-ghost {
+      background: var(--gl-fill-2); border: 1px solid var(--gl-border); color: var(--fg);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    #tab-admin .adm-pill, #tab-admin .chip {
+      background: var(--gl-fill-2); border-color: var(--gl-border);
+    }
+    #tab-admin .input-text,
+    #tab-admin .adm-range,
+    #admBlockModal .input-text,
+    #admBlockModal select.input-text {
+      background: var(--gl-fill); border: 1px solid var(--gl-border); color: var(--fg);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+
+    /* ---- tables ----------------------------------------------------------- */
+    #tab-admin .adm-table-wrap {
+      background: var(--gl-fill); border: 1px solid var(--gl-border); border-radius: var(--r-row);
+      backdrop-filter: blur(18px) saturate(160%); -webkit-backdrop-filter: blur(18px) saturate(160%);
+      padding: 4px;
+    }
+    #tab-admin .adm-table { background: transparent; }
+    #tab-admin .adm-table th { background: transparent; color: var(--fg-3); }
+    #tab-admin .adm-table td { border-color: var(--gl-border); }
+    #tab-admin .adm-table tr:hover td { background: var(--gl-fill-2); }
+    #tab-admin .adm-table th:first-child,
+    #tab-admin .adm-table td:first-child { background: transparent; box-shadow: none; }
+
+    /* ---- spark bars, libs chips ------------------------------------------- */
+    #tab-admin .adm-spark > i, #tab-admin .adm-spark > .adm-bar {
+      background: linear-gradient(180deg, var(--gl-teal), var(--gl-blue));
+      opacity: .85;
+    }
+    #tab-admin .adm-libs .chip, #tab-admin .adm-libs span {
+      background: var(--gl-fill-2); border: 1px solid var(--gl-border);
+    }
+
+    /* ---- modals: iOS-style glass sheet ------------------------------------ */
+    #admUserModal .ah-modal-card,
+    #admBlockModal .ah-modal-card,
+    #admJobModal .ah-modal-card {
+      background: linear-gradient(180deg, var(--gl-fill-2), var(--card) 55%);
+      border: 1px solid var(--gl-border);
+      backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%);
+      box-shadow: inset 0 1px 0 var(--gl-hi), 0 -10px 40px rgba(0,0,0,.4);
+    }
+    @media (max-width: 760px) {
+      #admUserModal .ah-modal-card,
+      #admBlockModal .ah-modal-card,
+      #admJobModal .ah-modal-card { border-radius: 22px 22px 0 0; }
+    }
+
+    #tab-admin .adm-risk-warning { background: color-mix(in srgb, var(--warn) 14%, var(--gl-fill)); border: 1px solid var(--gl-border); }
+  </style>
 <div class="dash-tab-content" id="tab-admin">
       <div class="tab-head">
         <div><div class="eyebrow">OWNER CONSOLE</div><h2>Admin</h2></div>
