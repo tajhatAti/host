@@ -367,6 +367,38 @@ def rename(user_id: int, ref: str, new_name: str) -> dict:
     return {"ok": True, "old": row["name"], "name": clean}
 
 
+def set_env(user_id: int, ref: str, key: str, value) -> dict:
+    """Set one env var on a job (value=None deletes it). Same rails as the
+    website's Env tab — same jobs.env column, same secrets_store packing.
+    Restarts the job if it's currently running so the change actually
+    takes effect; otherwise it applies on the next start."""
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. /apps lists yours."}
+    key = (key or "").strip()
+    if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return {"ok": False, "error": "Env var names must look like BOT_TOKEN — "
+                                       "letters, numbers, underscore, not starting with a digit."}
+    env = _row_env(row)
+    deleted = value is None
+    if deleted:
+        env.pop(key, None)
+    else:
+        env[key] = value
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET env = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                     (secrets_store.pack_env(env), now_utc_str(), row["id"], user_id))
+        conn.commit()
+    finally:
+        conn.close()
+    restarted = False
+    if row.get("runner_job_id"):
+        _act(user_id, ref, "restart")
+        restarted = True
+    return {"ok": True, "job": row, "key": key, "deleted": deleted, "restarted": restarted}
+
+
 def logs(user_id: int, ref: str, lines: int = 40) -> dict:
     row = find_app(user_id, ref)
     if not row:
