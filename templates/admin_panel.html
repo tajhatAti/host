@@ -146,10 +146,9 @@
     #tab-admin .adm-table th:first-child,
     #tab-admin .adm-table td:first-child { background: transparent; box-shadow: none; }
 
-    /* ---- spark bars, libs chips ------------------------------------------- */
-    #tab-admin .adm-spark > i, #tab-admin .adm-spark > .adm-bar {
-      background: linear-gradient(180deg, var(--gl-teal), var(--gl-blue));
-      opacity: .85;
+    #tab-admin .adm-spark {
+      display: block;
+      height: 64px;
     }
     #tab-admin .adm-libs .chip, #tab-admin .adm-libs span {
       background: var(--gl-fill-2); border: 1px solid var(--gl-border);
@@ -171,6 +170,7 @@
     }
 
     #tab-admin .adm-risk-warning { background: color-mix(in srgb, var(--warn) 14%, var(--gl-fill)); border: 1px solid var(--gl-border); }
+    #tab-admin .adm-pane-hidden { display: none !important; }
   </style>
 <div class="dash-tab-content" id="tab-admin">
       <div class="tab-head">
