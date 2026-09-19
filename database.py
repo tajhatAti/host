@@ -968,6 +968,11 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(conn, "users", "agreed_terms_at"):
             conn.execute("ALTER TABLE users ADD COLUMN agreed_terms_at TEXT")
+        # /queen — per-job RLIMIT skipped entirely for this user (see
+        # runner/app.py's mem_limit_mb). Separate from job_limit_override,
+        # which already existed and covers job COUNT, not RAM per job.
+        if not _column_exists(conn, "users", "mem_unlimited"):
+            conn.execute("ALTER TABLE users ADD COLUMN mem_unlimited INTEGER NOT NULL DEFAULT 0")
         # .zip bundles are extracted for real onto the runner's filesystem
         # (services/pingbot.py + runner/app.py:_extract_zip_bundle) — more
         # surface than a single pasted file, so it's admin-granted rather
