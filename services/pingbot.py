@@ -1618,6 +1618,32 @@ def _cmd_delete_confirmed(chat_id, user, ref):
           else f"❌ {res['error']}")
 
 
+def cmd_env(chat_id, user, args):
+    """/env <app> <KEY> <value...>  — set one env var (restarts if running)
+       /env <app> <KEY> clear       — remove it"""
+    parts = (args or "").split(None, 2)
+    if len(parts) < 2:
+        _send(chat_id, "Usage: `/env <app> <KEY> <value>` to set, or "
+                        "`/env <app> <KEY> clear` to remove.\nExample: `/env mybot BOT_TOKEN 123:abc`")
+        return
+    ref, key = parts[0], parts[1]
+    raw_value = parts[2] if len(parts) > 2 else ""
+    value = None if raw_value.strip().lower() == "clear" else raw_value
+    res = bot_ops.set_env(user["id"], ref, key, value)
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    if res["deleted"]:
+        note = f"🗑️ Removed `{res['key']}` from *{res['job']['name']}*."
+    else:
+        note = f"✅ Set `{res['key']}` on *{res['job']['name']}*."
+    if res["restarted"]:
+        note += "\nRestarted the app so it's live now."
+    else:
+        note += "\nIt'll apply next time the app starts."
+    _send(chat_id, note)
+
+
 def cmd_rename(chat_id, user, args):
     parts = (args or "").split()
     if len(parts) < 2:
@@ -2192,6 +2218,7 @@ def handle_update(upd):
                 "/stop": lambda: gated(lambda u: cmd_stop(chat_id, u, arg)),
                 "/delete": lambda: gated(lambda u: cmd_delete(chat_id, u, arg)),
                 "/rename": lambda: gated(lambda u: cmd_rename(chat_id, u, arg)),
+                "/env": lambda: gated(lambda u: cmd_env(chat_id, u, arg)),
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
                 "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
