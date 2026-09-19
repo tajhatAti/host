@@ -5465,6 +5465,13 @@ body {
   backdrop-filter: blur(20px) saturate(160%);
   -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
+/* the app deliberately raises .dash-bar's z-index above the drawer while
+   it's open (body.nav-drawer-open), so the hamburger stays clickable to
+   close it. That means the drawer's top edge sits directly behind the
+   header — 90% opacity isn't quite enough to fully hide it there. */
+body.nav-drawer-open .dash-bar {
+  background: color-mix(in srgb, var(--bar) 97%, transparent);
+}
 
 /* tab nav pills (desktop inline row + bottom bar) */
 .dash-tab, .tab-secondary, .cs-tab {
