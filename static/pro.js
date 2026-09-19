@@ -6737,27 +6737,42 @@ function _admWireSectionNav() {
   const nav = document.querySelector("#tab-admin .adm-section-nav");
   if (!nav || nav.dataset.wired) return;
   nav.dataset.wired = "1";
-  nav.addEventListener("click", e => {
-    const a = e.target.closest("a"); if (!a) return;
-    nav.querySelectorAll("a").forEach(x => x.classList.toggle("active", x === a));
-  });
-  const links = [...nav.querySelectorAll("a[href^='#']")];
-  const ids = links.map(a => a.getAttribute("href").slice(1));
-  if (!ids.some(id => document.getElementById(id))) return;
-  let busy = false;
-  const setActive = () => {
-    if (busy) return;
-    const y = window.scrollY + 92;                 // below the sticky header
-    let best = 0;
-    links.forEach((a, i) => {
-      const el = document.getElementById(ids[i]);
-      if (!el) return;
-      if (el.getBoundingClientRect().top + window.scrollY <= y) best = i;
-    });
-    links.forEach((a, i) => a.classList.toggle("active", i === best));
+
+  // Each nav pill's href maps to the panel ids it should reveal — the
+  // "Overview" pill also brings the stat grid with it since that isn't
+  // its own titled section.
+  const paneMap = {
+    admOverviewSection: ["admStats", "admOverviewSection"],
+    admRunnerSection:   ["admRunnerSection"],
+    admSecuritySection: ["admSecuritySection"],
+    admTelegramSection: ["admTelegramSection"],
+    admBotUsageSection: ["admBotUsageSection"],
+    admAppsSection:     ["admAppsSection", "admPackagesSection"],
+    admUsersSection:    ["admUsersSection"],
+    admReportsSection:  ["admReportsSection"],
+    admAuditSection:    ["admAuditSection"],
   };
-  window.addEventListener("scroll", setActive, { passive: true });
-  setActive();
+  const allIds = Object.values(paneMap).flat();
+
+  function showPane(targetId) {
+    const keep = paneMap[targetId] || [targetId];
+    allIds.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle("adm-pane-hidden", !keep.includes(id));
+    });
+  }
+
+  nav.addEventListener("click", e => {
+    const a = e.target.closest("a");
+    if (!a) return;
+    e.preventDefault();                      // no more anchor-jump scrolling
+    nav.querySelectorAll("a").forEach(x => x.classList.toggle("active", x === a));
+    showPane(a.getAttribute("href").slice(1));
+    document.querySelector("#tab-admin .adm-panel")?.scrollIntoView({ block: "start" });
+  });
+
+  const first = nav.querySelector("a.active") || nav.querySelector("a");
+  if (first) showPane(first.getAttribute("href").slice(1));
 }
 
 let _adminFetching = false;  // guard: one in-flight markup fetch at a time
@@ -7383,10 +7398,27 @@ function renderAdminSpark(ov) {
     days.push({ label: key.slice(5), count: byDay[key] || 0 });
   }
   const max = Math.max(1, ...days.map(d => d.count));
-  el.innerHTML = days.map(d => {
-    const h = Math.max(6, Math.round((d.count / max) * 56));
-    return `<span class="adm-bar${d.count ? "" : " zero"}" style="height:${h}px" title="${d.label}: ${d.count} signup${d.count === 1 ? "" : "s"}"></span>`;
-  }).join("");
+  const w = 300, h = 64, pad = 4;
+  const step = (w - pad * 2) / (days.length - 1);
+  const pts = days.map((d, i) => {
+    const x = pad + i * step;
+    const y = h - pad - (d.count / max) * (h - pad * 2);
+    return [x, y];
+  });
+  const line = pts.map(p => p.join(",")).join(" ");
+  const area = `${pad},${h} ` + line + ` ${w - pad},${h}`;
+  const tip = days.map(d => `${d.label}: ${d.count} signup${d.count === 1 ? "" : "s"}`).join(" · ");
+  el.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label="${tip}">
+      <defs>
+        <linearGradient id="admSparkFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--gl-blue, #0a84ff)" stop-opacity="0.5"/>
+          <stop offset="100%" stop-color="var(--gl-blue, #0a84ff)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points="${area}" fill="url(#admSparkFill)"/>
+      <polyline points="${line}" fill="none" stroke="var(--gl-blue, #0a84ff)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
 }
 
 /* The list answers "what exists". Memory and restarts are here because they
