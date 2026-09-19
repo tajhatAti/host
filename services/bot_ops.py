@@ -72,6 +72,19 @@ def _effective_job_limit(user_id: int) -> int:
     return override if override is not None else MAX_JOBS_PER_USER
 
 
+def _mem_limit_for(user_id: int):
+    """None (runner's global MAX_MEM_MB default) unless /queen granted this
+    user mem_unlimited=1, in which case 0 tells the runner to skip the
+    per-job RLIMIT entirely (see runner/app.py's mem_limit_mb)."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT mem_unlimited FROM users WHERE id = ?",
+                            (user_id,)).fetchone()
+    finally:
+        conn.close()
+    return 0 if (row and row["mem_unlimited"]) else None
+
+
 def slugify_name(raw: str) -> str:
     """A job name the site would also accept. Used by /rename."""
     s = re.sub(r"[^A-Za-z0-9 _-]+", "", (raw or "")).strip()
@@ -214,6 +227,7 @@ def _cold_start(row, code=None, language=None) -> dict:
         "code": code if code is not None else (row.get("code") or ""),
         "name": f"u{row['user_id']}-{row['name']}",
         "env": env,
+        "mem_limit_mb": _mem_limit_for(row["user_id"]),
     }
     try:
         response = runner_client._runner_http("POST", "/internal/jobs", body)
@@ -451,7 +465,8 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
                           f"running — stop one before making another.")}
 
     body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
-            "env": {}, "zip_b64": base64.b64encode(zip_bytes).decode("ascii")}
+            "env": {}, "zip_b64": base64.b64encode(zip_bytes).decode("ascii"),
+            "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -519,7 +534,7 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
                           f"running — stop one before making another.")}
 
     body = {"language": language or "", "code": "", "name": f"u{user_id}-{clean}",
-            "env": {}, "repo_url": repo_url}
+            "env": {}, "repo_url": repo_url, "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -580,7 +595,8 @@ def create_app(user_id: int, name: str, language: str, code: str) -> dict:
                 "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
-    body = {"language": language, "code": code, "name": f"u{user_id}-{clean}", "env": {}}
+    body = {"language": language, "code": code, "name": f"u{user_id}-{clean}", "env": {},
+            "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -643,7 +659,7 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if not rid:
         body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                "env": env, "zip_b64": zip_b64}
+                "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
         resp = runner_client._runner_http("POST", "/internal/jobs", body)
         if resp.status_code != 201:
             try:
@@ -676,7 +692,7 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if resp.status_code == 404:
         create_body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                       "env": env, "zip_b64": zip_b64}
+                       "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
         resp2 = runner_client._runner_http("POST", "/internal/jobs", create_body)
         if resp2.status_code != 201:
             try:
@@ -738,7 +754,8 @@ def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict
     if not rid:
         # Never actually deployed (e.g. imported but never started) — bring
         # it up fresh instead of PATCHing a job the runner has never heard of.
-        body = {"language": lang, "code": code, "name": f"u{user_id}-{row['name']}", "env": env}
+        body = {"language": lang, "code": code, "name": f"u{user_id}-{row['name']}", "env": env,
+                "mem_limit_mb": _mem_limit_for(user_id)}
         resp = runner_client._runner_http("POST", "/internal/jobs", body)
         if resp.status_code != 201:
             try:
@@ -775,7 +792,8 @@ def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict
     if resp.status_code == 404:
         # Runner restarted since — fall back to a cold create, same as
         # routes/runspace.py's update_job().
-        create_body = {"language": lang, "code": code, "name": f"u{user_id}-{row['name']}", "env": env}
+        create_body = {"language": lang, "code": code, "name": f"u{user_id}-{row['name']}", "env": env,
+                       "mem_limit_mb": _mem_limit_for(user_id)}
         resp2 = runner_client._runner_http("POST", "/internal/jobs", create_body)
         if resp2.status_code != 201:
             try:
