@@ -258,7 +258,7 @@ def unlink(user_id: int) -> None:
 # deployment — the same separation the rest of this module already draws.
 
 def resolve_user_ref(ref: str) -> dict:
-    """Find a user by CodeNest username or by their linked Telegram id.
+    """Find a user by CodeNest username, email, or linked Telegram id.
     Accepts whichever the admin has on hand — they usually know one or
     the other, rarely the internal numeric user id."""
     ref = (ref or "").strip().lstrip("@")
@@ -269,13 +269,18 @@ def resolve_user_ref(ref: str) -> dict:
         row = None
         if ref.isdigit():
             row = conn.execute(
-                "SELECT id, username, telegram_id, is_admin, can_upload_zip "
+                "SELECT id, username, email, telegram_id, is_admin, can_upload_zip, mem_unlimited "
                 "FROM users WHERE telegram_id = ?", (int(ref),)
             ).fetchone()
         if not row:
             row = conn.execute(
-                "SELECT id, username, telegram_id, is_admin, can_upload_zip "
+                "SELECT id, username, email, telegram_id, is_admin, can_upload_zip, mem_unlimited "
                 "FROM users WHERE LOWER(username) = LOWER(?)", (ref,)
+            ).fetchone()
+        if not row and "@" in ref:
+            row = conn.execute(
+                "SELECT id, username, email, telegram_id, is_admin, can_upload_zip, mem_unlimited "
+                "FROM users WHERE LOWER(email) = LOWER(?)", (ref,)
             ).fetchone()
     finally:
         conn.close()
@@ -302,6 +307,19 @@ def set_zip_permission(user_id: int, value: bool) -> None:
         conn.close()
 
 
+def set_unlimited_permission(user_id: int, value: bool) -> None:
+    """The /queen flag — no per-job RAM ceiling (runner/app.py's
+    mem_limit_mb=0). Job-count is handled separately, by the existing
+    job_limit_override (telegram_admin_ext.set_job_limit_override)."""
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE users SET mem_unlimited = ?, updated_at = ? WHERE id = ?",
+                     (1 if value else 0, now_utc_str(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_admin_overview(limit: int = 30) -> list:
     """Recent users with their admin/zip flags, newest first — for /admin users."""
     conn = get_db_connection()
@@ -309,6 +327,19 @@ def list_admin_overview(limit: int = 30) -> list:
         rows = conn.execute(
             "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
             "FROM users ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_queens(limit: int = 50) -> list:
+    """Everyone currently granted /queen (mem_unlimited=1) — for /admin queens."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, email, telegram_id, job_limit_override "
+            "FROM users WHERE mem_unlimited = 1 ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     finally:
         conn.close()
