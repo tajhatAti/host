@@ -246,7 +246,6 @@ def cmd_admin(chat_id, telegram_user_id, arg):
       /admin search <query> / /admin searchjobs <query>
       /admin signups [hours] — default 24h
       /admin export users|jobs — sends a CSV file
-      /admin queens — list everyone with /queen unlimited status
     The hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1 can use all
     of this; every action re-checks admin status on its own, since
     callback_data is attacker-suppliable in principle."""
@@ -363,20 +362,6 @@ def cmd_admin(chat_id, telegram_user_id, arg):
             _send(chat_id, f"✅ {target.get('username') or rest} can no longer upload .zip bundles.")
         return
 
-    if sub == "queens":
-        rows = telegram_link.list_queens()
-        if not rows:
-            _send(chat_id, "👑 Nobody has /queen right now.")
-            return
-        lines = [f"👑 *{len(rows)} queen(s):*"]
-        for r in rows:
-            cap = r.get("job_limit_override")
-            cap_txt = "unlimited jobs" if (cap or 0) >= 999999 else (f"{cap} jobs" if cap is not None else "default job cap")
-            lines.append(f"`{r['id']}` · {r.get('username') or r.get('email') or '(no username)'} · "
-                         f"unlimited RAM · {cap_txt}")
-        _send(chat_id, "\n".join(lines))
-        return
-
     if sub == "search":
         if not rest:
             _send(chat_id, "Usage: `/admin search <part of a username or email>`")
@@ -460,53 +445,6 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         _send(chat_id, f"Unknown admin subcommand “{sub}”. Showing the menu instead:")
 
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
-
-
-def cmd_queen(chat_id, telegram_user_id, arg):
-    """/queen <username|telegram_id|email> — full admin-only grant:
-    unlimited per-job RAM (mem_unlimited) + unlimited job count
-    (job_limit_override raised) + zip upload (multi-file projects, the
-    same permission /admin allowzip gives). This is the "no limits at
-    all" role, not a job-count-only bump — for that, /admin limit alone
-    is enough."""
-    caller = telegram_link.user_for_chat(telegram_user_id)
-    if not _is_admin(caller, telegram_user_id):
-        return  # silent, same posture as /admin for a non-admin
-    if not arg:
-        _send(chat_id, "Usage: `/queen <username, telegram_id, or email>`")
-        return
-    target = telegram_link.resolve_user_ref(arg.strip())
-    if not target:
-        _send(chat_id, f"No user found for “{arg.strip()}”.")
-        return
-    telegram_link.set_unlimited_permission(target["id"], True)
-    telegram_admin_ext.set_job_limit_override(target["id"], 999999)
-    telegram_link.set_zip_permission(target["id"], True)
-    who = target.get("username") or target.get("email") or arg.strip()
-    _send(chat_id, f"👑 *{who}* is now a queen — unlimited RAM, unlimited jobs, "
-                   f"and can upload multi-file .zip projects.\n"
-                   f"`/dequeen {arg.strip()}` reverses this.")
-
-
-def cmd_dequeen(chat_id, telegram_user_id, arg):
-    """/dequeen <username|telegram_id|email> — undo /queen: back to the
-    default RAM cap and job cap. Zip permission is left alone on purpose
-    (that's a separate, smaller grant — revoke it with /admin denyzip if
-    you also want it gone)."""
-    caller = telegram_link.user_for_chat(telegram_user_id)
-    if not _is_admin(caller, telegram_user_id):
-        return
-    if not arg:
-        _send(chat_id, "Usage: `/dequeen <username, telegram_id, or email>`")
-        return
-    target = telegram_link.resolve_user_ref(arg.strip())
-    if not target:
-        _send(chat_id, f"No user found for “{arg.strip()}”.")
-        return
-    telegram_link.set_unlimited_permission(target["id"], False)
-    telegram_admin_ext.set_job_limit_override(target["id"], None)
-    who = target.get("username") or target.get("email") or arg.strip()
-    _send(chat_id, f"*{who}* is no longer a queen — back to the default RAM and job cap.")
 
 
 def _admin_users_text(page: int) -> str:
@@ -1409,6 +1347,7 @@ def _help_text(user):
         "`/update <name>` — push new code to an existing app, then send it "
         "(auto-saves & restarts)\n"
         "`/import <github url> [name]` — clone a public repo and deploy it\n"
+        "`/source <name>` — download your app's current code as a file\n"
         "`/apps` — everything you have, with live status\n"
         "`/status [name]` — account summary, or one app in full\n"
         "`/logs <name>` — the last lines it printed\n"
@@ -1659,6 +1598,39 @@ def cmd_stop(chat_id, user, ref):
           else f"❌ {res['error']}")
 
 
+def cmd_source(chat_id, user, ref):
+    """/source <name> — sends the bot's current code back as a file, so
+    it can be edited locally and pushed back with /update. Owner-scoped
+    like every other user command (find_app checks user_id) — this is NOT
+    the admin /see tool, it only ever returns the caller's own code."""
+    if not ref:
+        _send(chat_id, "Usage: `/source <name>`")
+        return
+    app = bot_ops.find_app(user["id"], ref)
+    if not app:
+        _send(chat_id, f"No app called “{ref}”. /apps lists yours.")
+        return
+    code = app.get("code") or ""
+    if not code.strip():
+        _send(chat_id, f"*{app['name']}* has no inline source stored — it was likely "
+                       f"deployed via GitHub import or a .zip bundle, so there's no "
+                       f"single file to send. Check the repo/zip you uploaded it from.")
+        return
+    ext = {"python": "py", "node": "js", "bash": "sh", "ruby": "rb", "php": "php"}.get(app["language"], "txt")
+    with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{app['name']}.{ext}",
+                                      delete=False, encoding="utf-8") as f:
+        f.write(code)
+        tmp_path = f.name
+    try:
+        _send_document(chat_id, tmp_path,
+                       caption=f"{app['name']} — edit this, then /update {app['name']} to push it back.")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def cmd_delete(chat_id, user, ref):
     if not ref:
         _send(chat_id, "Which app? `/delete <name>` — this cannot be undone.")
@@ -1678,32 +1650,6 @@ def _cmd_delete_confirmed(chat_id, user, ref):
     res = bot_ops.delete(user["id"], ref)
     _send(chat_id, f"🗑 Deleted *{res['job']['name']}*." if res.get("ok")
           else f"❌ {res['error']}")
-
-
-def cmd_env(chat_id, user, args):
-    """/env <app> <KEY> <value...>  — set one env var (restarts if running)
-       /env <app> <KEY> clear       — remove it"""
-    parts = (args or "").split(None, 2)
-    if len(parts) < 2:
-        _send(chat_id, "Usage: `/env <app> <KEY> <value>` to set, or "
-                        "`/env <app> <KEY> clear` to remove.\nExample: `/env mybot BOT_TOKEN 123:abc`")
-        return
-    ref, key = parts[0], parts[1]
-    raw_value = parts[2] if len(parts) > 2 else ""
-    value = None if raw_value.strip().lower() == "clear" else raw_value
-    res = bot_ops.set_env(user["id"], ref, key, value)
-    if not res.get("ok"):
-        _send(chat_id, f"❌ {res['error']}")
-        return
-    if res["deleted"]:
-        note = f"🗑️ Removed `{res['key']}` from *{res['job']['name']}*."
-    else:
-        note = f"✅ Set `{res['key']}` on *{res['job']['name']}*."
-    if res["restarted"]:
-        note += "\nRestarted the app so it's live now."
-    else:
-        note += "\nIt'll apply next time the app starts."
-    _send(chat_id, note)
 
 
 def cmd_rename(chat_id, user, args):
@@ -2280,13 +2226,11 @@ def handle_update(upd):
                 "/stop": lambda: gated(lambda u: cmd_stop(chat_id, u, arg)),
                 "/delete": lambda: gated(lambda u: cmd_delete(chat_id, u, arg)),
                 "/rename": lambda: gated(lambda u: cmd_rename(chat_id, u, arg)),
-                "/env": lambda: gated(lambda u: cmd_env(chat_id, u, arg)),
+                "/source": lambda: gated(lambda u: cmd_source(chat_id, u, arg)),
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
                 "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
-                "/queen": lambda: cmd_queen(chat_id, msg.get("from", {}).get("id"), arg),
-                "/dequeen": lambda: cmd_dequeen(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
                 "/see": lambda: cmd_see(chat_id, msg.get("from", {}).get("id"), arg),
