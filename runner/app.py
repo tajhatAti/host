@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 import uuid
+import functools
 import asyncio
 import logging
 from collections import deque
@@ -112,11 +113,18 @@ def _check_secret(authorization: Optional[str]):
         raise HTTPException(status_code=403, detail="Invalid runner secret.")
 
 
-def _set_limits():
-    """preexec_fn: set memory limit for the child process (Linux only)."""
+def _set_limits(mem_limit_mb: Optional[int] = None):
+    """preexec_fn: set memory limit for the child process (Linux only).
+    mem_limit_mb: None -> use the runner-wide MAX_MEM_MB default.
+                  0    -> no RLIMIT at all (queen/unlimited users — the
+                          shared-runner admission check in job_start still
+                          applies, this only removes the PER-JOB ceiling)."""
     try:
+        if mem_limit_mb == 0:
+            return  # explicitly unlimited — skip RLIMIT entirely
         import resource
-        mem_bytes = MAX_MEM_MB * 1024 * 1024
+        mb = mem_limit_mb if mem_limit_mb else MAX_MEM_MB
+        mem_bytes = mb * 1024 * 1024
         # Soft + hard limit on virtual memory (address space).
         resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
     except Exception:
@@ -721,6 +729,10 @@ class JobStartRequest(BaseModel):
     # User-supplied environment variables (API keys, bot tokens, ...). These
     # are injected into the job process at spawn time.
     env: Optional[dict] = None
+    # Per-job RLIMIT override in MB. None = runner-wide MAX_MEM_MB default.
+    # 0 = no cap at all — reserved for admin-granted "unlimited" users; the
+    # shared-runner admission check below still protects the box overall.
+    mem_limit_mb: Optional[int] = None
 
 
 class JobAccessRequest(BaseModel):
@@ -1764,7 +1776,8 @@ def _spawn(j: dict) -> None:
         cmd, cwd=j["dir"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,  # merged, VPS-style
         text=True, bufsize=1,
-        preexec_fn=_set_limits if os.name != "nt" else None,
+        preexec_fn=(functools.partial(_set_limits, j.get("mem_limit_mb"))
+                    if os.name != "nt" else None),
         start_new_session=True,
         env=env,
     )
@@ -2003,6 +2016,7 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
         "access_key": secrets.token_urlsafe(12),
         "repo_url": repo_url or None,
         "env": _clean_env(req.env),
+        "mem_limit_mb": req.mem_limit_mb,
     }
     with _jobs_lock:
         _jobs[job_id] = job
