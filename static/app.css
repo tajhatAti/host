@@ -1426,6 +1426,11 @@ body.signed-out-in .hero {
 .rs-side-new   { width: var(--ctl-h-sm); height: var(--ctl-h-sm); padding: 0; border-radius: var(--r-ctl);
                  background: var(--card-2); border: 1px solid var(--line); color: var(--fg); }
 .rs-count { font-family: var(--mono); font-size: var(--t-xs); color: var(--fg-3); }
+/* 👑 account badge in the Bots sidebar head. Shown only when /api/jobs reports
+   queen access for this account; the title attribute says what that gets you,
+   so the privilege is visible where the owner actually looks. */
+.rs-crown { font-size: var(--t-xs); line-height: 1; cursor: help; }
+.rs-crown[hidden] { display: none; }
 .rs-meta  { font-size: var(--t-xs); color: var(--fg-3); font-family: var(--mono); }
 .rs-ic, .rs-gh-ic { width: 18px; height: 18px; flex: 0 0 auto; }
 .rs-ic-sm { width: 14px; height: 14px; flex: 0 0 auto; }

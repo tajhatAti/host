@@ -627,13 +627,31 @@ class TerminalManager:
             logger.warning("autostart bootstrap failed: %s", e)
 
     # ---------- HOME SNAPSHOT ↔ DB (persistence across deploys) ----------
+    # Set once, so a standalone runner logs the (normal) absence of the site's
+    # database a single time instead of on every snapshot attempt.
+    _db_missing_logged = False
+
     def _db(self):
+        """The site's `database` module, or None when this runner has no site.
+
+        Home snapshots are a SITE feature: they store the tarball in the main
+        app's database, which only exists in the embedded layout (/app). A runner
+        deployed as its own service has no such module and no way to reach that
+        database, so snapshots simply stay off there. That is expected, not a
+        fault — which is why it is a one-line debug note now. It used to be a
+        WARNING on every call, and a log full of "cannot import database" reads
+        like a broken runner even when every terminal works fine.
+        """
         try:
-            sys.path.insert(0, "/app")
+            if "/app" not in sys.path:
+                sys.path.insert(0, "/app")
             import database as db  # type: ignore
             return db
-        except Exception as e:
-            logger.warning("terminal: cannot import database for snapshots: %s", e)
+        except Exception:
+            if not TerminalManager._db_missing_logged:
+                TerminalManager._db_missing_logged = True
+                logger.debug("terminal: no site database here — home snapshots are "
+                             "off (normal for a standalone runner)")
             return None
 
     def _snapshot_home(self, user_id: int, home: str) -> bool:

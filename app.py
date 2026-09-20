@@ -8,6 +8,7 @@ import hashlib
 import os
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from services import secrets_store, runner_client
+from services import secrets_store, runner_client, env_rescue
 from database import DIALECT, init_db  # noqa: F401  (init_db already ran via routes.deps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -63,6 +64,26 @@ async def _self_ping_loop():
         delay = random.uniform(420, 480)
         await asyncio.sleep(delay)
 
+def _env_rescue_boot(env_rescue):
+    """Restore bot variables this site cannot read, from the runner's own copy.
+
+    Runs off the startup path because it is one HTTP call per broken row. A bot
+    whose row is unreadable cannot be started at all, so this has to happen
+    before the recovery pass gets to it — and it is the difference between
+    "those bots came back by themselves" and "those bots stayed dark until
+    someone re-typed their tokens".
+    """
+    try:
+        report = env_rescue.rescue_unreadable_rows()
+        if report.get("unreadable"):
+            logger.error("Env rescue at boot: %d row(s) unreadable, %d restored "
+                         "from the runner, %d still missing (%s)",
+                         report["unreadable"], report["rescued"],
+                         report["unavailable"], ", ".join(report["names"][:10]) or "-")
+    except Exception as exc:
+        logger.error("Env rescue sweep failed: %s", exc)
+
+
 @app.on_event("startup")
 async def startup_event():
     # Rewrite any pre-change `enc:v1:` env blobs as plain JSON BEFORE serving
@@ -77,6 +98,16 @@ async def startup_event():
                          "their secrets re-entered", result["unreadable"])
     except Exception as exc:
         logger.error("Secret storage migration failed: %s", exc)
+    # Rows the migration could not read are not necessarily lost: the runner
+    # keeps its own copy of each job's env in the job's manifest, so read those
+    # back and repair the database. Runs in a thread because it is one HTTP call
+    # per broken row and startup must not wait on the runner being awake.
+    try:
+        from services import env_rescue
+        threading.Thread(target=_env_rescue_boot, args=(env_rescue,),
+                         name="env-rescue", daemon=True).start()
+    except Exception as exc:
+        logger.error("Env rescue sweep failed to start: %s", exc)
     try:
         from services import retention
         retention.cleanup()
@@ -501,11 +532,14 @@ def health():
         "database": DIALECT,
         "runner": "embedded" if runner_client.embedded_mode() else "remote",
         # Bot env vars live as plain JSON in your own database (see
-        # services/secrets_store.py for why). `legacy_rows` is the only number
-        # worth watching: it is how many rows are STILL in the old encrypted
-        # form, and it should be 0 after the first boot.
+        # services/secrets_store.py for why). `legacy_rows` is how many rows are
+        # still in the old wrapped form and should be 0 after the first boot;
+        # `unreadable_rows` is how many this site cannot read at all, and those
+        # are rescued from the runner's own copy at startup (services/env_rescue).
         "bot_secrets_storage": "plain-text",
         "bot_secrets_legacy_rows": secrets_store.legacy_rows(),
+        "bot_secrets_unreadable_rows": env_rescue.unreadable_count(),
+        "bot_secrets_rescued_at_boot": env_rescue.LAST_SWEEP.get("rescued", 0),
         "production_isolation": "unsafe-embedded" if runner_client.embedded_mode() else "remote-runner",
         "ping_bot": "running" if bool(os.getenv("BOT_TOKEN", "").strip()
                                        or os.getenv("TELEGRAM_PING_BOT_TOKEN", "").strip()) else "not configured",

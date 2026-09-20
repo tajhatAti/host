@@ -565,7 +565,8 @@ def add_runner(label: str, url: str, secret: str, created_by: int) -> dict:
     2) An authenticated call must succeed with the given secret — proves
        the secret actually matches RUNNER_SERVICE_SECRET on that Render
        service, not just that the URL responds to something.
-    Only then is it written to runner_nodes, secret encrypted at rest."""
+    Only then is it written to runner_nodes (the column keeps its old name;
+    what is stored in it is plain JSON — see services/secrets_store.py)."""
     import requests as _requests
     from services import secrets_store
     url = url.rstrip("/")
@@ -590,15 +591,15 @@ def add_runner(label: str, url: str, secret: str, created_by: int) -> dict:
     try:
         existing = conn.execute("SELECT id FROM runner_nodes WHERE url=?", (url,)).fetchone()
         now = now_utc_str()
-        encrypted = secrets_store.pack_env({"secret": secret})
+        stored_secret = secrets_store.pack_env({"secret": secret})
         if existing:
             conn.execute("UPDATE runner_nodes SET label=?,encrypted_secret=?,enabled=1,updated_at=? WHERE id=?",
-                         (label, encrypted, now, existing["id"]))
+                         (label, stored_secret, now, existing["id"]))
             node_id = existing["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO runner_nodes (label,url,encrypted_secret,enabled,created_by,created_at,updated_at) "
-                "VALUES (?,?,?,1,?,?,?)", (label, url, encrypted, created_by, now, now))
+                "VALUES (?,?,?,1,?,?,?)", (label, url, stored_secret, created_by, now, now))
             node_id = cur.lastrowid
         conn.commit()
     finally:

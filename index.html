@@ -1062,6 +1062,10 @@
           <div class="rs-side-head">
             <span class="rs-side-title">Bots</span>
             <span class="rs-count" id="txJobCount">0</span>
+            <!-- 👑 shown only for an account the owner granted queen access to
+                 (users.mem_unlimited). Hidden by default: a crown that is not
+                 yours should never flash on screen. -->
+            <span class="rs-crown" id="txQueenBadge" hidden aria-label="Queen access">👑</span>
             <button type="button" class="rs-ghost-btn rs-sq rs-side-new" id="btnNew" title="Add Bot (Ctrl+N)" aria-label="Add Bot">
               <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M7.25 2.75a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5Z"/></svg>
             </button>

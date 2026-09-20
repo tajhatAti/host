@@ -3911,6 +3911,7 @@ async function loadJobs() {
 
   try {
     const data = await api("/api/jobs", "GET", null, true);
+    _reflectAccountFlags(data);
     const jobs = (data && data.jobs) || [];
     _saveBotCache(jobs);
     const sig = jobs.map(j => [j.id, j.status, j.restarts, j.web ? 1 : 0, j.web_public === false ? 0 : 1,
@@ -5070,6 +5071,38 @@ function _langIcon(lang) {
 /** Refresh ONLY the sidebar list + count. Never touches the editor panes.
  *  Used while the user is composing a new job or has unsaved edits, so the
  *  job list stays live without their typing being wiped. */
+// ─── Account flags (👑) ────────────────────────────────────────────────
+// The jobs response already carries what this account is allowed, so the
+// sidebar can show it without a second request. A queen grant used to be
+// invisible here: the chat bot knew, the runner knew, and the page the owner
+// actually looks at showed nothing — so "no memory ceiling" and "bigger
+// uploads" were things you had to be told about instead of seeing.
+function _reflectAccountFlags(data) {
+  if (!data) return;
+  window._rsIsQueen = !!data.is_queen;
+  window._rsJobLimit = data.max_per_user || null;
+  window._rsZipMaxMb = data.zip_max_mb || null;
+  const badge = document.getElementById("txQueenBadge");
+  if (badge) {
+    badge.hidden = !data.is_queen;
+    if (data.is_queen) {
+      const bits = ["Queen access:", "no memory ceiling on your apps"];
+      if (data.zip_max_mb) bits.push(data.zip_max_mb + "MB zip uploads");
+      bits.push("/projects in the Telegram bot for one-tap deploys");
+      badge.title = bits.join(" · ");
+    }
+  }
+  const countEl = document.getElementById("txJobCount");
+  if (countEl && data.max_per_user) {
+    // The number itself stays a plain count (other code reads it); the slots
+    // rule goes in the tooltip, where "why can't I add another?" is answered.
+    const running = (data.jobs || []).filter(j =>
+      String(j.desired_state || j.status || "").toLowerCase() !== "stopped").length;
+    countEl.title = running + " running of " + data.max_per_user +
+      " allowed — a stopped app keeps its place but frees its slot";
+  }
+}
+
 function _renderJobList(jobs) {
   window._lastJobs = jobs || [];
   const countEl = document.getElementById("txJobCount");
@@ -7361,12 +7394,17 @@ function renderAdminStats(ov) {
     chip("suspended", ov.suspended ?? 0, ov.suspended ? "warn" : "") +
     chip("apps live", ov.jobs_deployed ?? 0) +
     chip("on telegram", ov.telegram_linked ?? 0) +
-    // Secrets are stored as plain JSON in the owner's own database, so this is
-    // a fact, not a warning: the only thing worth flagging is rows still in the
-    // old encrypted form, which a startup migration rewrites to 0.
-    chip("bot secrets", ov.bot_secrets_legacy_rows
-        ? `${ov.bot_secrets_legacy_rows} old row(s) still encrypted`
-        : "plain text", ov.bot_secrets_legacy_rows ? "warn" : "") +
+    // Bot variables are stored as plain JSON in the owner's own database, so
+    // this is a fact, not a warning. Two numbers are worth flagging: rows still
+    // in the old wrapped form (a startup migration rewrites them to 0), and rows
+    // this site could not read at all — those are restored from the runner's own
+    // copy at boot, so "being restored" is a state, not an error.
+    chip("bot secrets", ov.bot_secrets_unreadable_rows
+        ? `${ov.bot_secrets_unreadable_rows} row(s) being restored`
+        : (ov.bot_secrets_legacy_rows
+            ? `${ov.bot_secrets_legacy_rows} old row(s) to refresh`
+            : "plain text"),
+      (ov.bot_secrets_unreadable_rows || ov.bot_secrets_legacy_rows) ? "warn" : "") +
     chip("runner", ov.runner_isolation === "remote" ? "isolated service" : "embedded", ov.runner_isolation === "remote" ? "" : "warn") +
     chip("runner memory used", ov.mem_safe_mb != null
         ? `${Math.round(ov.mem_used_mb ?? 0)}MB used`

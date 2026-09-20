@@ -138,6 +138,19 @@ def unpack_env(value):
     return values
 
 
+def read_env(value):
+    """`(values, readable)` — unpack_env plus the one thing it cannot say.
+
+    `readable=False` means the row holds something this site cannot decode. That
+    is NOT the same as `{}`: an empty env is a bot with no variables, an
+    unreadable one is a bot whose variables are somewhere else (the runner still
+    has its own copy — see services/env_rescue.py). Callers that are about to
+    start or edit a job need the difference, and `unpack_env` alone hides it.
+    """
+    values, used = _unpack_with_key_index(value)
+    return values, used is not None
+
+
 def _is_legacy(value) -> bool:
     return str(value or "").startswith(LEGACY_PREFIX)
 

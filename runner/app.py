@@ -95,6 +95,30 @@ LANGS = {
 }
 
 
+# What callers actually send for a language, folded onto LANGS keys. The chat
+# bot, the web editor and older scripts spell the same runtime differently
+# ("py", "node", "golang", "shell"), and rejecting a spelling the runner plainly
+# understands turns a working deploy into an error about a list of languages.
+# "auto"/"detect"/"" all mean "work it out from the bundle" and come back empty.
+_LANG_ALIASES = {
+    "py": "python",
+    "node": "javascript", "nodejs": "javascript", "node.js": "javascript",
+    "ts": "typescript", "tsx": "typescript",
+    "shell": "bash", "zsh": "bash",
+    "golang": "go", "rs": "rust", "rb": "ruby", "cc": "cpp", "cxx": "cpp",
+    "txt": "text", "plain": "text", "plaintext": "text",
+    "auto": "", "detect": "", "none": "",
+}
+
+
+def _normalize_lang(value) -> str:
+    """Lower-case a language name and fold the common aliases onto LANGS keys."""
+    lang = (value or "").strip().lower()
+    if not lang:
+        return ""
+    return _LANG_ALIASES.get(lang, lang)
+
+
 class ExecuteRequest(BaseModel):
     language: str
     code: str
@@ -244,7 +268,7 @@ def execute(req: ExecuteRequest, authorization: Optional[str] = Header(None)):
     """
     _check_secret(authorization)
 
-    lang = (req.language or "").lower().strip()
+    lang = _normalize_lang(req.language)
     code = req.code or ""
     stdin_data = req.stdin or ""
 
@@ -733,6 +757,10 @@ class JobStartRequest(BaseModel):
     # 0 = no cap at all — reserved for admin-granted "unlimited" users; the
     # shared-runner admission check below still protects the box overall.
     mem_limit_mb: Optional[int] = None
+    # Bigger zip bundles, for accounts the site has granted them (👑). 0/absent
+    # = the runner default; never honoured above ZIP_BUNDLE_CEILING_*.
+    zip_max_mb: Optional[int] = 0
+    zip_max_files: Optional[int] = 0
 
 
 class JobAccessRequest(BaseModel):
@@ -845,11 +873,41 @@ def _detect_imports(code: str) -> list:
     return sorted(pkgs)[:20]  # sanity cap
 
 
-ZIP_BUNDLE_MAX_BYTES = 5 * 1024 * 1024   # 5MB uncompressed
-ZIP_BUNDLE_MAX_ENTRIES = 500
+ZIP_BUNDLE_MAX_BYTES = int(os.getenv("ZIP_BUNDLE_MAX_BYTES", str(5 * 1024 * 1024)))
+ZIP_BUNDLE_MAX_ENTRIES = int(os.getenv("ZIP_BUNDLE_MAX_ENTRIES", "500"))
+# A request may ask for more than the default — a 👑 account uploading a whole
+# project (assets, data files, a vendored folder) rather than one script. These
+# are the ceilings the runner honours no matter what a request claims: the box,
+# its RAM and its disk are shared by every job on it.
+ZIP_BUNDLE_CEILING_BYTES = int(os.getenv("ZIP_BUNDLE_CEILING_BYTES", str(200 * 1024 * 1024)))
+ZIP_BUNDLE_CEILING_ENTRIES = int(os.getenv("ZIP_BUNDLE_CEILING_ENTRIES", "20000"))
 
 
-def _extract_zip_bundle(zip_b64: str, target_dir: str, log: deque) -> bool:
+def _zip_limits(req) -> tuple:
+    """(max_bytes, max_entries) for one create/update request.
+
+    0 or absent means "the default", which keeps every existing caller and
+    every test behaving exactly as before; a positive value raises the limit up
+    to the hard ceiling. The site decides who qualifies (see bot_ops'
+    zip_limits_for: 👑 accounts get the bigger numbers).
+    """
+    try:
+        mb = int(getattr(req, "zip_max_mb", 0) or 0)
+    except (TypeError, ValueError):
+        mb = 0
+    try:
+        files = int(getattr(req, "zip_max_files", 0) or 0)
+    except (TypeError, ValueError):
+        files = 0
+    max_bytes = (ZIP_BUNDLE_MAX_BYTES if mb <= 0
+                 else min(mb * 1024 * 1024, ZIP_BUNDLE_CEILING_BYTES))
+    max_entries = (ZIP_BUNDLE_MAX_ENTRIES if files <= 0
+                   else min(files, ZIP_BUNDLE_CEILING_ENTRIES))
+    return max_bytes, max_entries
+
+
+def _extract_zip_bundle(zip_b64: str, target_dir: str, log: deque,
+                        max_bytes: int = None, max_entries: int = None) -> bool:
     """Extract a base64-encoded .zip into target_dir. Returns True on success.
 
     Sibling to _clone_repo: same role (get a whole multi-file app onto disk
@@ -869,13 +927,15 @@ def _extract_zip_bundle(zip_b64: str, target_dir: str, log: deque) -> bool:
         log.append("[system] ✗ zip bundle is corrupted")
         return False
 
+    max_bytes = ZIP_BUNDLE_MAX_BYTES if not max_bytes else max_bytes
+    max_entries = ZIP_BUNDLE_MAX_ENTRIES if not max_entries else max_entries
     infos = [i for i in zf.infolist() if not i.is_dir()]
-    if len(infos) > ZIP_BUNDLE_MAX_ENTRIES:
-        log.append(f"[system] ✗ zip has {len(infos)} files, over the {ZIP_BUNDLE_MAX_ENTRIES} limit")
+    if len(infos) > max_entries:
+        log.append(f"[system] ✗ zip has {len(infos)} files, over the {max_entries} limit")
         return False
     total = sum(i.file_size for i in infos)
-    if total > ZIP_BUNDLE_MAX_BYTES:
-        mb = ZIP_BUNDLE_MAX_BYTES // (1024 * 1024)
+    if total > max_bytes:
+        mb = max_bytes // (1024 * 1024)
         log.append(f"[system] ✗ zip unpacks to over {mb}MB")
         return False
 
@@ -905,15 +965,73 @@ def _extract_zip_bundle(zip_b64: str, target_dir: str, log: deque) -> bool:
     return True
 
 
+def _repo_clone_target(repo_url: str) -> tuple:
+    """(clone URL, branch) for a GitHub link — branch "" means the default.
+
+    The branch is not a nicety. A 👑 user's projects can live on a branch that
+    is not `main`, and the old normalisation THREW THE BRANCH AWAY (it matched
+    `/tree/<branch>` only to drop it), so the deploy quietly checked out
+    different code than the one the user was looking at. Every form the browser
+    can produce is accepted:
+
+        https://github.com/o/r
+        https://github.com/o/r.git
+        https://github.com/o/r/tree/<branch>
+        https://github.com/o/r/tree/<branch>/some/folder
+        https://github.com/o/r/blob/<branch>/file.py
+        https://github.com/o/r#<branch>
+    """
+    url = (repo_url or "").strip()
+    ref = ""
+    if "#" in url:
+        url, _, frag = url.partition("#")
+        ref = frag.strip()
+    # Greedy on purpose: a branch name may contain slashes, so /tree/<x> keeps
+    # the whole remainder and _branch_candidates() works out what is a branch
+    # and what is a folder below it.
+    m = re.match(
+        r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?"
+        r"(?:/(?:tree|blob|commits?)/([^?\s]+))?(?:/.*)?/?$", url)
+    if m:
+        owner, repo, branch = m.group(1), m.group(2), (m.group(3) or "").strip()
+        url = f"https://github.com/{owner}/{repo}.git"
+        ref = ref or branch
+    return url, ref.strip("/")
+
+
+def _branch_candidates(ref: str) -> list:
+    """Branch names to try, longest first ([""] when no branch was asked for).
+
+    A GitHub `/tree/<x>` URL is genuinely ambiguous: branch names may contain
+    slashes, so `arena/01a0ba14-b` (one branch) and `dev/app/sub` (branch `dev`
+    plus a folder view) look identical in the URL. GitHub resolves that against
+    its own ref list; we resolve it by trying the longest reading first and
+    shortening it only when git says there is no such branch. A failed shallow
+    clone of a missing branch costs one round trip and downloads nothing.
+
+    The alternative — taking the first path segment — is what silently deploys
+    the wrong code for every branch whose name contains a slash, and "the bot
+    runs but it is not my bot" is a much worse failure than a retry.
+    """
+    ref = (ref or "").strip().strip("/")
+    if not ref:
+        return [""]
+    parts = ref.split("/")
+    out = []
+    for count in range(len(parts), 0, -1):
+        candidate = "/".join(parts[:count])
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
 def _clone_repo(repo_url: str, target_dir: str, log: deque) -> bool:
     """git clone --depth 1 a public repo into target_dir. Returns True on success."""
     url = (repo_url or "").strip()
     if not url:
         return False
-    # Normalize github web URLs to .git for clone
-    m = re.match(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?(?:tree/[^/]+)?/?$", url)
-    if m:
-        url = f"https://github.com/{m.group(1)}/{m.group(2)}.git"
+    # Normalize github web URLs to .git for clone, keeping any branch.
+    url, ref = _repo_clone_target(url)
     # Block anything obviously non-http(s) (prevent ssh/file)
     if not re.match(r"^https?://", url):
         log.append(f"[system] ✗ repo URL must start with https://")
@@ -940,15 +1058,40 @@ def _clone_repo(repo_url: str, target_dir: str, log: deque) -> bool:
                 except OSError:
                     pass
             shutil.rmtree(target_dir, ignore_errors=True)
-        os.makedirs(target_dir, exist_ok=True)
-        log.append(f"[system] Cloning {url} …")
-        out, err, rc, timed = _run_subprocess(
-            ["git", "clone", "--depth", "1", "--quiet", url, target_dir],
-            os.path.dirname(target_dir), None, 120,
-        )
+        rc, text, used_ref = 1, "", ""
+        candidates = _branch_candidates(ref)
+        for index, candidate in enumerate(candidates):
+            shutil.rmtree(target_dir, ignore_errors=True)
+            os.makedirs(target_dir, exist_ok=True)
+            cmd = ["git", "clone", "--depth", "1", "--quiet"]
+            if candidate:
+                # --single-branch keeps a shallow clone to the branch asked for.
+                cmd += ["--branch", candidate, "--single-branch"]
+            cmd += [url, target_dir]
+            log.append(f"[system] Cloning {url}"
+                       + (f" (branch {candidate})" if candidate else "") + " …")
+            out, err, rc, timed = _run_subprocess(
+                cmd, os.path.dirname(target_dir), None, 120,
+            )
+            text = (err or out or "").strip()
+            if rc == 0:
+                used_ref = candidate
+                break
+            missing_branch = ("not found in upstream" in text or "Remote branch" in text)
+            if not (candidate and missing_branch and index + 1 < len(candidates)):
+                break
+            shorter = "/".join(candidate.split("/")[:-1])
+            log.append(f"[system] …no branch “{candidate}” — trying “{shorter}”")
         if rc != 0:
-            reason = (err or out or "").strip().splitlines()
-            log.append(f"[system] ✗ git clone failed: {(reason[-1] if reason else 'unknown error')[:200]}")
+            reason = text.splitlines()
+            last = (reason[-1] if reason else "unknown error")[:200]
+            # git's own wording here is a mouthful ("fatal: Remote branch x not
+            # found in upstream origin"); say the thing the user can act on.
+            if ref and ("not found in upstream" in text or "Remote branch" in text):
+                last = f"branch “{ref}” does not exist in that repo"
+            elif "Authentication failed" in text or "Repository not found" in text:
+                last = "that repo is private or does not exist — only public repos can be cloned"
+            log.append(f"[system] ✗ git clone failed: {last}")
             return False
         # Put the preserved data back. The clone wins for files it also
         # ships (that is the point of importing), except that a data file
@@ -966,7 +1109,8 @@ def _clone_repo(repo_url: str, target_dir: str, log: deque) -> bool:
                 pass
         if restored:
             log.append(f"[system] ✓ kept {restored} existing data file(s)")
-        log.append("[system] ✓ repo cloned")
+        log.append("[system] ✓ repo cloned"
+                   + (f" (branch {used_ref})" if used_ref else ""))
         return True
     except Exception as e:
         log.append(f"[system] ✗ git clone error: {str(e)[:200]}")
@@ -1865,14 +2009,28 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
     """Create & start a persistent job. Auth: same Bearer secret."""
     _check_secret(authorization)
 
-    lang = (req.language or "").lower().strip()
+    lang = _normalize_lang(req.language)
     code = req.code or ""
-    if lang not in LANGS:
+    has_bundle = bool((req.repo_url or "").strip() or (req.zip_b64 or "").strip())
+    # A repo or a zip carries its own language: a few lines below the runner
+    # clones/unpacks it and _detect_entry() reads the entry file. Validating
+    # "language" BEFORE that killed every GitHub import started from chat --
+    # the site sends no language, because it cannot know what a repo is written
+    # in until the clone lands -- with the message a user actually reported:
+    # "Unsupported language: . Available: bash, c, c++, ..." (empty name).
+    # An unknown NON-EMPTY language is still rejected: a typo should say so.
+    if lang and lang not in LANGS:
         raise HTTPException(400, detail=f"Unsupported language: {lang}. Available: {', '.join(sorted(LANGS))}")
+    if not lang and not has_bundle:
+        # Nothing to detect from, so guessing would mean running arbitrary
+        # inline code as whatever we felt like. Say what is missing instead.
+        raise HTTPException(400, detail=(
+            "No language given, and there is no repo or zip to detect one from. "
+            f"Available: {', '.join(sorted(LANGS))}"))
     # A repo job legitimately has NO inline code: the source arrives with the
     # clone. This check ran before the clone and rejected every repo import
     # outright -- reported as "code empty" on a repo that plainly has files.
-    if not code.strip() and not (req.repo_url or "").strip() and not (req.zip_b64 or "").strip():
+    if not code.strip() and not has_bundle:
         raise HTTPException(400, detail="Code is empty.")
 
     # Admission by MEASURED memory, not by job count. Counting assumed every
@@ -1910,7 +2068,7 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
 
     zip_b64 = (req.zip_b64 or "").strip()
     if zip_b64:
-        if not _extract_zip_bundle(zip_b64, jdir, repo_log):
+        if not _extract_zip_bundle(zip_b64, jdir, repo_log, *_zip_limits(req)):
             shutil.rmtree(jdir, ignore_errors=True)
             raise HTTPException(400, detail="Zip extraction failed:\n" + "\n".join(repo_log)[-2000:])
 
@@ -2269,6 +2427,9 @@ class JobUpdateRequest(BaseModel):
     # running — before this, the runner stored the limit once at creation and
     # a later grant only took effect on the next cold start.
     mem_limit_mb: Optional[int] = None
+    # Same meaning as on create: a 👑 account may re-upload a bigger bundle.
+    zip_max_mb: Optional[int] = 0
+    zip_max_files: Optional[int] = 0
 
 
 @app.patch("/internal/jobs/{job_id}")
@@ -2316,7 +2477,7 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
         update_log = deque(maxlen=JOB_LOG_LINES)
         jdir = j["dir"]
         ok = (_clone_repo(repo_url, jdir, update_log) if repo_url
-              else _extract_zip_bundle(zip_b64, jdir, update_log))
+              else _extract_zip_bundle(zip_b64, jdir, update_log, *_zip_limits(req)))
         if not ok:
             kind = "Repo clone" if repo_url else "Zip extraction"
             raise HTTPException(400, detail=f"{kind} failed:\n" + "\n".join(update_log)[-2000:])

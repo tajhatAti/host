@@ -225,13 +225,64 @@ def _remember_worker(job_db_id: int, resp) -> None:
         conn.close()
 
 
-def _row_env(row) -> dict:
-    """Env vars saved for a job row (empty when unset / unparsable)."""
+def _row_env(row, rescue: bool = True) -> dict:
+    """Env vars saved for a job row (empty when unset / unparsable).
+
+    Mirrors bot_ops._row_env, including the rescue: a row this site cannot
+    decode is repaired from the runner's own copy instead of being read as
+    empty. Empty is what the Env tab would then show — and what a Save would
+    then write, silently deleting every other variable the app had.
+
+    Pass rescue=False where this runs in a loop over many jobs (a list
+    endpoint): the rescue is one HTTP call per broken row, and a list must not
+    stall on a runner that is asleep.
+    """
     try:
         raw = dict(row).get("env")
-        return secrets_store.unpack_env(raw)
     except Exception:
         return {}
+    values, readable = secrets_store.read_env(raw)
+    if readable or not rescue:
+        return values
+    try:
+        from services import env_rescue
+        got, _outcome = env_rescue.rescue_job_env(row)
+        return got or values
+    except Exception:
+        return values
+
+
+def _account_flags(user_id: int) -> dict:
+    """What this account is allowed, for the dashboard to show.
+
+    The 👑 flag travels with the one call the page already makes (/api/jobs), so
+    no extra request and no second source of truth. Before this a queen grant
+    was invisible on the website: the chat bot knew, the runner knew, and the
+    page the owner actually looks at did not — which is how "no memory ceiling"
+    stays an abstraction instead of something you can see.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.account_privileges(user_id)
+    except Exception:
+        return {"is_queen": False, "job_limit": MAX_JOBS_PER_USER,
+                "mem_limit_mb": None, "zip_max_mb": None, "zip_max_files": None}
+
+
+def _job_limit_for(user_id: int) -> int:
+    """How many apps this account may have RUNNING.
+
+    bot_ops owns the rule (global default + the per-user override an admin sets
+    with /admin limit). This endpoint used to check the global constant, so an
+    override granted in chat applied to bots created from chat and quietly NOT
+    to the same person's bots created from the browser — the website told them
+    they were full at 3 while the bot happily made a 4th.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.effective_job_limit(user_id)
+    except Exception:
+        return MAX_JOBS_PER_USER
 
 
 def _mem_limit_for(user_id: int):
@@ -458,12 +509,14 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
             active = sum(1 for r in rows if dict(r).get("runner_job_id") in live_ids)
         else:
             active = sum(1 for r in rows if dict(r).get("desired_state") != "stopped")
-        if active >= MAX_JOBS_PER_USER:
+        limit = _job_limit_for(user["id"])
+        if active >= limit:
             conn.close()
             raise HTTPException(
                 status_code=429,
-                detail=(f"You already have {active} of {MAX_JOBS_PER_USER} Telegram bots "
-                        f"running — stop one before adding another bot."),
+                detail=(f"You already have {active} of {limit} apps running — "
+                        f"stop one before adding another. A stopped app stays "
+                        f"yours and frees its slot."),
             )
     except HTTPException:
         raise
@@ -566,11 +619,18 @@ def list_jobs(authorization: Optional[str] = Header(None)):
         row = dict(stored)
         row["status"] = "stopped" if row.get("desired_state") == "stopped" else "running"
         row["status_stale"] = True
-        row["env"] = _public_env(_row_env(row))
+        row["env"] = _public_env(_row_env(row, rescue=False))
         _attach_telegram_public(row)
         row.pop("code", None)
         jobs.append(row)
-    return {"jobs": jobs, "runner": "background", "max_per_user": MAX_JOBS_PER_USER}
+    flags = _account_flags(user["id"])
+    out = {"jobs": jobs, "runner": "background",
+           # The limit this ACCOUNT has (an admin can raise it per user), not the
+           # global default — the dashboard and the cap check now quote the same
+           # number, which is what "5/3 running slots" was really about.
+           "max_per_user": flags.get("job_limit") or MAX_JOBS_PER_USER}
+    out.update(flags)
+    return out
 
 
 @router.get("/api/jobs/{job_id}")

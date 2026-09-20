@@ -27,7 +27,7 @@ python ping_bot.py
 |----------------------|--------------------------------------------------------|
 | `/start`             | Welcome + usage hint                                   |
 | `/help`              | Shows this command list                                |
-| `/ping`              | Pings the default target (set via `PING_DEFAULT_TARGET`, default `https://ahadorg.onrender.com`) |
+| `/ping`              | Pings the default target (`PING_DEFAULT_TARGET`, else `SITE_BASE_URL`, else `api.telegram.org`) |
 | `/ping <url>`        | Pings `<url>`; auto-adds `https://` if missing         |
 
 The timer starts *right before* the HTTP request is sent and stops *immediately
@@ -49,7 +49,7 @@ you want).
 | Name                   | Default                         | Description                        |
 |------------------------|---------------------------------|------------------------------------|
 | `BOT_TOKEN`            | *(none — required)*             | Telegram bot token from BotFather  |
-| `PING_DEFAULT_TARGET`  | `https://ahadorg.onrender.com`  | URL hit when `/ping` has no arg    |
+| `PING_DEFAULT_TARGET`  | *(none — falls back to `SITE_BASE_URL`, then `api.telegram.org`)* | URL hit when `/ping` has no arg |
 | `PING_TIMEOUT_S`       | `5`                             | Per-request timeout in seconds     |
 
 ## ⚠️ Token security

@@ -45,6 +45,7 @@ to return:
 """
 import json
 import logging
+import os
 import re
 
 from database import get_db_connection
@@ -72,6 +73,31 @@ def _effective_job_limit(user_id: int) -> int:
     return override if override is not None else MAX_JOBS_PER_USER
 
 
+# Public aliases. The chat bot shows "x of y slots" and routes/runspace.py
+# enforces the cap on the website; both must ask THIS function, because a second
+# copy of the rule is how the two surfaces drift apart — the website used to
+# check the global default and quietly ignored an admin's per-user override.
+effective_job_limit = _effective_job_limit
+
+
+def is_queen(user_id: int) -> bool:
+    """Is this account granted 👑 (users.mem_unlimited)?
+
+    One place to ask, so "queen" means the same thing in the chat bot, on the
+    website and in recovery: no memory ceiling on its jobs, zip upload allowed,
+    and the 👑 interface in the bot.
+    """
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT mem_unlimited FROM users WHERE id = ?",
+                           (user_id,)).fetchone()
+    except Exception:
+        return False
+    finally:
+        conn.close()
+    return bool(row and row["mem_unlimited"])
+
+
 def _mem_limit_for(user_id: int):
     """None (runner's global MAX_MEM_MB default) unless /queen granted this
     user mem_unlimited=1, in which case 0 tells the runner to skip the
@@ -90,6 +116,43 @@ def _mem_limit_for(user_id: int):
 
 
 mem_limit_for = _mem_limit_for
+
+# Zip bundles. The default is a source-sized upload; a 👑 account may send a
+# whole project — assets, a vendored folder, a starter database. The runner
+# still enforces its own hard ceiling (ZIP_BUNDLE_CEILING_*), so these numbers
+# only decide what the site ASKS for on this account's behalf.
+ZIP_MAX_MB = int(os.getenv("ZIP_MAX_MB", "5"))
+ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
+QUEEN_ZIP_MAX_MB = int(os.getenv("QUEEN_ZIP_MAX_MB", "60"))
+QUEEN_ZIP_MAX_FILES = int(os.getenv("QUEEN_ZIP_MAX_FILES", "5000"))
+
+
+def account_privileges(user_id: int) -> dict:
+    """Everything a UI needs about what this account is allowed, in one call.
+
+    The dashboard's bots list and the chat bot's /apps both show the 👑 flag,
+    the running-app limit and the upload size at once; asking three separate
+    functions for those is how a surface ends up disagreeing with itself (one
+    reads the flag, another reads the override, a third guesses).
+    """
+    queen = is_queen(user_id)
+    return {"is_queen": queen,
+            "job_limit": _effective_job_limit(user_id),
+            "mem_limit_mb": _mem_limit_for(user_id),
+            "zip_max_mb": QUEEN_ZIP_MAX_MB if queen else ZIP_MAX_MB,
+            "zip_max_files": QUEEN_ZIP_MAX_FILES if queen else ZIP_MAX_FILES}
+
+
+def zip_limits_for(user_id: int) -> dict:
+    """The zip fields to send to the runner for this account.
+
+    One function so a 👑 grant means the same thing on every upload path
+    (create, update, and the re-create after a 404) instead of three places
+    that can drift.
+    """
+    if is_queen(user_id):
+        return {"zip_max_mb": QUEEN_ZIP_MAX_MB, "zip_max_files": QUEEN_ZIP_MAX_FILES}
+    return {"zip_max_mb": ZIP_MAX_MB, "zip_max_files": ZIP_MAX_FILES}
 
 
 def reapply_mem_limit(user_id: int) -> int:
@@ -199,16 +262,78 @@ def _worker_of(row) -> str:
         return None
 
 
-def _row_env(row) -> dict:
+def _row_env(row, rescue: bool = True) -> dict:
     """Env vars saved for a job row (empty when unset / unparsable). Same
     logic as routes/runspace.py's private copy — duplicated rather than
     imported because routes/ should not become an import target for
-    services/, but kept in sync deliberately."""
+    services/, but kept in sync deliberately.
+
+    When the stored row cannot be decoded at all and `rescue` is on, the
+    runner's own copy of the env is read back and repaired into the database
+    (services/env_rescue.py). Every caller here is about to START or EDIT the
+    job, and both would otherwise act on an empty env: a start with no
+    BOT_TOKEN, or a set_env that silently deletes every other variable the bot
+    had. Pass rescue=False only for a read that must not touch the network.
+    """
     try:
         raw = dict(row).get("env")
-        return secrets_store.unpack_env(raw)
     except Exception:
         return {}
+    values, readable = secrets_store.read_env(raw)
+    if readable or not rescue:
+        return values
+    from services import env_rescue
+    got, outcome = env_rescue.rescue_job_env(row)
+    if got:
+        try:
+            # Keep the caller's row in sync with what was just written to the
+            # database — several callers read row["env"] again afterwards.
+            row["env"] = secrets_store.pack_env(got)
+        except Exception:
+            pass
+        return got
+    logger.error("job %s: stored variables could not be read and the runner had "
+                 "no copy to restore (outcome=%s)", dict(row).get("name"), outcome)
+    return {}
+
+
+def _url_slug(name) -> str:
+    """Mirror of static/pro.js `_slugify`, so a link built here opens the app
+    the dashboard will actually select."""
+    s = re.sub(r"['’]", "", str(name or "").lower().strip())
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:80]
+    return s or "untitled"
+
+
+def dashboard_link(row) -> str:
+    """Public link to one app's page, or '' when this site's URL is unknown."""
+    item = dict(row) if not isinstance(row, dict) else row
+    if not item.get("name"):
+        return ""
+    try:
+        from services.pingbot import SITE_BASE
+    except Exception:
+        return ""
+    return f"{SITE_BASE}/bots/{_url_slug(item['name'])}" if SITE_BASE else ""
+
+
+def env_missing_message(row) -> str:
+    """What the owner sees when a bot cannot start for want of its token.
+
+    It says nothing about keys or storage formats: from the owner's side the
+    only fact that matters is "my token isn't on the server", and the only
+    useful response is where to put it back. Everything else about the app is
+    still there, so the message says that too — a bot that will not start reads
+    like a lost bot otherwise.
+    """
+    item = dict(row) if not isinstance(row, dict) else row
+    name = item.get("name") or "your app"
+    link = dashboard_link(item)
+    where = f"{link} → *Env*" if link else "the dashboard → your app → *Env*"
+    return (f"❌ *{name}* can't start — its `BOT_TOKEN` isn't saved on the server.\n"
+            f"Fix it in a minute: open {where}, paste the token from @BotFather "
+            f"again, then *Save & restart*.\n"
+            f"Your code, files and database are untouched — only the token is missing.")
 
 
 def _set_assignment(row, runner_id, worker, desired="running"):
@@ -235,7 +360,14 @@ def _cold_start(row, code=None, language=None) -> dict:
     """
     env = _row_env(row)
     if row.get("telegram_bot_detected") and not env.get("BOT_TOKEN"):
-        return {"ok": False, "error": "The saved bot token is unavailable. Ask the owner to restore the previous encryption key."}
+        # _row_env already tried to read the variables back off the runner, so
+        # getting here means nobody has the token: not the database, not the
+        # runner's own copy. Starting anyway would only produce an auth-error
+        # loop in the logs and a green "running" badge on a bot that answers
+        # nobody, so the owner is told what is missing and where to put it.
+        logger.error("cannot start %s: it is a Telegram bot and no BOT_TOKEN is "
+                     "available in its stored env or on the runner", row["name"])
+        return {"ok": False, "error": env_missing_message(row)}
     # Older Telegram-created rows did not persist worker_url. Before creating
     # anything, find the process by its stable internal name across the whole
     # fleet. This adopts the real assignment and prevents a second poller from
@@ -511,7 +643,7 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
 
     body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
             "env": {}, "zip_b64": base64.b64encode(zip_bytes).decode("ascii"),
-            "mem_limit_mb": _mem_limit_for(user_id)}
+            "mem_limit_mb": _mem_limit_for(user_id), **zip_limits_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -578,7 +710,13 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
                 "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
-    body = {"language": language or "", "code": "", "name": f"u{user_id}-{clean}",
+    # "python" is a placeholder the runner replaces: with a repo_url present it
+    # clones first and _detect_entry() picks the real language from the entry
+    # file it finds. Sending an empty string used to be rejected outright by an
+    # older runner ("Unsupported language: ."), so a GitHub import from chat
+    # failed before the clone -- naming python keeps it working against a runner
+    # that has not been redeployed yet, and costs nothing on one that has.
+    body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
             "env": {}, "repo_url": repo_url, "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
@@ -704,7 +842,8 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if not rid:
         body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
+                "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id),
+                **zip_limits_for(user_id)}
         resp = runner_client._runner_http("POST", "/internal/jobs", body)
         if resp.status_code != 201:
             try:
@@ -729,6 +868,7 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
         logger.warning("bot update_from_zip: pre-update snapshot failed for job %s: %s", row["id"], exc)
 
     patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64,
+                  **zip_limits_for(user_id),
                   # Re-sync the /queen flag on every redeploy: the runner only
                   # ever stored it at creation time, so a 👑 granted after the
                   # first deploy never reached a job updated in place.
@@ -741,7 +881,8 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if resp.status_code == 404:
         create_body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                       "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
+                       "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id),
+                       **zip_limits_for(user_id)}
         resp2 = runner_client._runner_http("POST", "/internal/jobs", create_body)
         if resp2.status_code != 201:
             try:

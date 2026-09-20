@@ -22,6 +22,8 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   tests/test_bot_list_fast.py \
   tests/test_secrets_plain.py \
   tests/test_job_recovery.py \
+  tests/test_env_rescue.py \
+  tests/test_ping_and_queen.py \
   tests/test_bot_ops_multirunner.py \
   tests/test_store.py \
   tests/test_overview_analytics.py

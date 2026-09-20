@@ -26,7 +26,13 @@ def test_bot_list_never_waits_for_runner_network(monkeypatch):
     started = time.perf_counter()
     result = runspace.list_jobs("Bearer test")
     assert time.perf_counter() - started < 0.05
-    assert result == {"jobs": [], "runner": "background", "max_per_user": runspace.MAX_JOBS_PER_USER}
+    # The point of this test: no runner network, and fast. The exact keys are
+    # asserted loosely because the account's own privileges (👑 flag, limit,
+    # upload size) ride along with this one call, so the dashboard does not have
+    # to make a second request to know what the user is allowed to do.
+    assert result["jobs"] == [] and result["runner"] == "background"
+    assert result["max_per_user"] == runspace.MAX_JOBS_PER_USER
+    assert result["is_queen"] is False and result["zip_max_mb"]
 
 
 def test_open_bot_editor_never_waits_for_runner_network(monkeypatch):

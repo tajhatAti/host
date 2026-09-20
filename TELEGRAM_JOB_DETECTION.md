@@ -19,7 +19,7 @@ After analysis, the owner pastes a BotFather token. The server asks Telegram `ge
 
 The browser submits the token as `BOT_TOKEN` together with the proof. The server checks that the authenticated user, proof, token digest, and expiry all match. The proof is consumed only after successful bot creation. The environment is stored in the site's own database as plain JSON, and owner APIs return secret-looking values as write-only masks.
 
-A keyed token fingerprint is retained separately from the encrypted value. CodeNest rejects a second deployed bot using the same BotFather token, preventing the common Telegram `409 terminated by other getUpdates request` conflict inside the platform.
+A keyed token fingerprint is retained separately from the stored value. CodeNest rejects a second deployed bot using the same BotFather token, preventing the common Telegram `409 terminated by other getUpdates request` conflict inside the platform.
 
 ## Automatic secret repair
 
@@ -33,7 +33,7 @@ Raw tokens do not belong in source code. Before code reaches the runner, CodeNes
 
 Old real Telegram token literals are removed from source. The verified token exists only in the job environment. A browser cannot bypass this repair because the token hash must match the server-side verification proof.
 
-Each account can run at most three bots; the fourth is rejected server-side.
+Each account can run up to `MAX_JOBS_PER_USER` apps at once (default 3; an admin can raise it per account with `/admin limit`). The next one is rejected server-side, and the website and the chat bot now ask the same function for that number, so they cannot disagree.
 
 ## Status and administration
 

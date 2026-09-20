@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from services import runner_client
 from services import limits
-from services import secrets_store
+from services import secrets_store, env_rescue
 from services.runner_client import MAX_JOBS_PER_USER
 
 # "Active now" window. Long enough that someone reading logs still counts,
@@ -247,15 +247,17 @@ def admin_add_runner(payload: AdminRunnerIn,
     try:
         existing = conn.execute("SELECT id FROM runner_nodes WHERE url=?", (url,)).fetchone()
         now = now_utc_str()
-        encrypted = secrets_store.pack_env({"secret": secret})
+        # The column keeps its old name (renaming it would be a schema
+        # migration for nothing), but what goes in it is plain JSON now.
+        stored_secret = secrets_store.pack_env({"secret": secret})
         if existing:
             conn.execute("UPDATE runner_nodes SET label=?,encrypted_secret=?,enabled=1,updated_at=? WHERE id=?",
-                         (label, encrypted, now, existing["id"]))
+                         (label, stored_secret, now, existing["id"]))
             node_id = existing["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO runner_nodes (label,url,encrypted_secret,enabled,created_by,created_at,updated_at) "
-                "VALUES (?,?,?,1,?,?,?)", (label, url, encrypted, admin["id"], now, now))
+                "VALUES (?,?,?,1,?,?,?)", (label, url, stored_secret, admin["id"], now, now))
             node_id = cur.lastrowid
         if not had_remote_pool:
             # Preserve jobs already running in the in-process engine. New jobs
@@ -432,10 +434,13 @@ def admin_overview_route(authorization: Optional[str] = Header(None)):
             "active_window_min": ACTIVE_WINDOW_MIN,
             "telegram_linked": tg_linked,
             # Plain JSON in your own database — see services/secrets_store.py.
-            # The count is what matters: rows still in the old `enc:v1:` form,
-            # which should reach 0 after the first boot and stay there.
+            # Two numbers matter: rows still in the old wrapped form (0 after the
+            # first boot) and rows this site cannot read at all, which are
+            # restored from the runner's own copy at startup (env_rescue).
             "bot_secrets_storage": "plain-text",
             "bot_secrets_legacy_rows": secrets_store.legacy_rows(),
+            "bot_secrets_unreadable_rows": env_rescue.unreadable_count(),
+            "bot_secrets_rescued_at_boot": env_rescue.LAST_SWEEP.get("rescued", 0),
             "runner_isolation": "embedded" if runner_client.embedded_mode() else "remote",
         }
     finally:

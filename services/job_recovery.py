@@ -128,11 +128,22 @@ def recover_once():
             # on the box. Wait for the next pass.
             skipped_unreachable += 1
             continue
-        env = secrets_store.unpack_env(row.get("env"))
+        env, readable = secrets_store.read_env(row.get("env"))
+        if not readable:
+            # This site cannot decode its own row, but the runner keeps a copy of
+            # the env in the job's manifest — read that back and repair the row
+            # before concluding the bot is beyond help. Without this, a bot whose
+            # row went unreadable stayed down until a human re-typed the token.
+            from services import env_rescue
+            env, outcome = env_rescue.rescue_job_env(row)
+            if not env:
+                logger.error("Recovery cannot read bot %s's stored variables and "
+                             "the runner had no copy to restore (outcome=%s)",
+                             row["id"], outcome)
         # Never start a Telegram bot without its token: it would crash-loop and
         # make the UI say “processing” while doing no useful work. With secrets
         # stored as plain text this now only happens when the row genuinely has
-        # no token (or is undecryptable legacy ciphertext, which is logged).
+        # no token (or is unreadable everywhere, which is logged above).
         if row.get("telegram_bot_detected") and not env.get("BOT_TOKEN"):
             logger.error("Recovery skipped bot %s: no BOT_TOKEN in its stored env", row["id"])
             unresolved += 1
@@ -199,6 +210,17 @@ def _reconcile_loop():
     # re-adoption finish first, so the first sweep is not racing them.
     time.sleep(90)
     while True:
+        try:
+            # Repair any row this site cannot decode BEFORE trying to recover
+            # bots from it. A bot that is still running on the runner is never
+            # "missing", so the recovery pass below would not look at its env at
+            # all — and its next restart would fail on an unreadable row. This
+            # is a cheap database scan when nothing is wrong (the usual case).
+            from services import env_rescue
+            if env_rescue.unreadable_count():
+                env_rescue.rescue_unreadable_rows()
+        except Exception as exc:
+            logger.warning("Env rescue sweep crashed: %s", exc)
         try:
             recover_once()
         except Exception as exc:  # a sweep must never kill its own thread

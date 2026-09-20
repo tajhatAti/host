@@ -123,17 +123,42 @@ Telegram widget লোড হবে না। username না দিলে ব�
 
 ## 🟠 HIGH — সিকিউরিটি
 
-### 6. `services/pingbot.py`-এর `/ping`-এ SSRF গার্ড নেই
-`bot/app.py`-তে সুন্দর `_ip_blocked` / `_dns_safe` / redirect re-validation আছে।
-কিন্তু production-এ চলা `pingbot.py:44-51` একদম কাঁচা:
+### 6. ✅ FIXED — `services/pingbot.py`-এর `/ping`-এ SSRF গার্ড নেই
+`bot/app.py`-তে সুন্দর `_ip_blocked` / `_dns_safe` / redirect re-validation ছিল,
+কিন্তু production-এ চলা `pingbot.py` একদম কাঁচা ছিল:
 
 ```python
 r = requests.head(target, timeout=8, allow_redirects=True)
 ```
 
 যে কেউ `/ping http://169.254.169.254/latest/meta-data/` বা `/ping http://127.0.0.1:8000/internal/jobs`
-দিতে পারে → **ইন্টারনাল নেটওয়ার্ক স্ক্যান / cloud metadata প্রোব**। অন্তত status
-code আর latency লিক হয়। `bot/app.py`-এর `_ping_target()` রিইউজ করাই সবচেয়ে সহজ ফিক্স।
+দিতে পারত → **ইন্টারনাল নেটওয়ার্ক স্ক্যান / cloud metadata প্রোব**। অন্তত status
+code আর latency লিক হতো।
+
+এখন যা আছে (`services/pingbot.py`):
+
+- `_ping_host_allowed()` — `localhost`/`metadata*` ব্লক, private · loopback ·
+  link-local · reserved IP ব্লক, এবং রিকোয়েস্ট পাঠানোর **আগে** DNS রেজলভ করে
+  রেজাল্টের IP চেক। অর্থাৎ internal address-এ কোনো রিকোয়েস্টই যায় না।
+- রিডাইরেক্ট এখন হাতে ফলো হয় (`allow_redirects=False`), তাই পাবলিক URL থেকে
+  internal address-এ রিডাইরেক্ট করলেও সেই hop-টা আটকে যায়।
+- ডিফল্ট টার্গেট আর হার্ডকোড করা অন্য কারো হোস্ট না — এখন `SITE_BASE`
+  (মানে নিজের সাইট), তারপর `PING_DEFAULT_TARGET`, শেষে `api.telegram.org`।
+- এরর মেসেজ আর কাঁচা exception না: টাইমআউট / DNS / connection refused / TLS —
+  প্রতিটার জন্য এক লাইনের মানুষের ভাষা। আগে ইউজার দেখত
+  `❌ HTTPSConnectionPool(host='...', port=443): Read timed out.`
+- HEAD-কে 403/405/501 দিলে একবার GET চেষ্টা হয়, নাহলে যে সাইট ঠিকই চলছে তাকে
+  "ভাঙা" দেখাত।
+- গার্ডের DNS কলটাও ঠিক করা হয়েছে: `getaddrinfo(host, None, SOCK_STREAM)` কিছু
+  সিস্টেমে `ai_family not supported` ছোড়ে, অর্থাৎ গার্ড **প্রতিটা ডোমেইন** refuse
+  করত — যে গার্ড সব পিং আটকায় সেটা গার্ড না, বাগ। এখন family/type ছাড়াই কল হয়,
+  আর রেজলভার উত্তর না দিলে সিদ্ধান্তটা রিকোয়েস্টের উপর ছেড়ে দেওয়া হয়; শুধু সত্যিই
+  রেকর্ড না থাকলে (NXDOMAIN) "doesn't resolve" বলা হয়। একই কল `bot/app.py`-এর
+  `_dns_safe`-এও ছিল — সেখানেও ঠিক (ওটার আচরণ আগের মতোই কড়া)।
+- মেসেজের ভেতরের আবর্জনাও ছাঁটা হয়: `HTTPSConnectionPool(host=..., port=443): Max
+  retries exceeded with url: / (Caused by SSLError(SSLZeroReturnError(6, ...)))`
+  থেকে শুধু আসল কারণটুকু থাকে, বাকি তিন স্তর library plumbing বাদ।
+- টেস্ট: `tests/test_ping_and_queen.py`।
 
 ### 7. `/code` — যে কেউ, কোনো auth ছাড়া, আপনার সার্ভারে কোড চালাতে পারে
 `deploy_code()` সরাসরি `_runner_http("POST", "/internal/jobs", ...)` কল করে।
@@ -220,6 +245,47 @@ runner job id দিয়ে callback ফোরজ করে **অন্য ই
 `bot/README.md` এখনো পুরোনো রেপো নাম `tajhatAti/AhadOrg` বলে।
 
 ---
+
+### 21. ✅ FIXED — 👑 GitHub import-এ `❌ Unsupported language: . Available: bash, c, …`
+
+প্রোডাকশনে রিপোর্ট করা মেসেজ। খালি ভাষার নামটাই (`language: .`) আসল ইঙ্গিত:
+`runner/app.py`-র `/internal/jobs` ভ্যালিডেশন করত **ক্লোন করার আগে**, অথচ ভাষা
+শনাক্ত হয় ক্লোনের **পরে** (`_detect_entry()` এন্ট্রি ফাইলের এক্সটেনশন দেখে)।
+সাইট রেপো ইমপোর্টে ভাষা পাঠায় না — পাঠাতে পারে না, কারণ ক্লোন না নামা পর্যন্ত
+রেপো কোন ভাষায় লেখা সেটা জানার উপায় নেই। ফলে চ্যাট থেকে every `/import`,
+`/projects`-এর ▶️ Run, আর 👑 ডিপ্লয় — সব ৪০০-তে মরত।
+
+এখন:
+
+- খালি ভাষা + `repo_url`/`zip_b64` থাকলে ভ্যালিডেশন পার হয়, ক্লোনের পরে শনাক্তকরণ
+  আসল ভাষা বসিয়ে দেয় (আর শনাক্ত না হলে `python`, যেটা আগে থেকেই ফলব্যাক ছিল)।
+- ভুল বানান (`pyton`) আগের মতোই ৪০০ — নামসহ, যাতে টাইপো ধরা পড়ে।
+- ভাষা নেই **এবং** শনাক্ত করার মতো কিছুও নেই → মেসেজটা বলে কী নেই, শুধু একটা
+  লিস্ট ছুড়ে দেয় না।
+- `_normalize_lang()` প্রচলিত বানানগুলো LANGS-এর কী-তে মেলে: `py`, `node`/`nodejs`,
+  `ts`, `shell`, `golang`, `rs`, `rb`, `cc`, `txt`, আর `auto`/`detect` = খালি।
+  `/execute`-ও একই ফাংশন ব্যবহার করে।
+- সাইটের দিক থেকেও বাড়তি সুরক্ষা: `bot_ops.create_app_from_repo` এখন
+  `language: "python"` পাঠায় (প্লেসহোল্ডার, রানার ক্লোনের পরে বদলে দেয়) — তাই
+  **পুরনো রানার** ডিপ্লয়েড থাকা অবস্থাতেও ইমপোর্ট কাজ করে, দুটো সার্ভিস একসাথে
+  আপডেট করতে হয় না।
+
+### 22. ✅ FIXED — 👑-দের টেলিগ্রাম ইন্টারফেস আলাদা ছিল না
+
+আগে 👑 অ্যাকাউন্ট সবাই যে `/help` পায় ঠিক সেটাই পেত, শেষে এক প্যারাগ্রাফ যোগ
+হতো — অর্থাৎ "আলাদা ইন্টারফেস" নামে কিছু ছিল না। এখন:
+
+- `/start` ও `/help` 👑-দের জন্য **আলাদা স্ক্রিন**: শুরুতেই *Run a project in one
+  tap* (স্টেপ, ব্রাঞ্চ, টোকেন কোথায় বসবে), তারপর সুবিধাগুলো, শেষে সবার কমান্ড।
+- কিবোর্ডও আলাদা: `👑 Queen panel` · `📦 Projects` · `🚀 Open CodeNest`। সাধারণ
+  অ্যাকাউন্ট আগের মতো শুধু ওপেন বাটন পায়।
+- `/limits` — নতুন কমান্ড। 👑 হলে প্যানেল, না হলে নিজের লিমিট + কীভাবে বাড়ানো যায়।
+- প্যানেলে সংখ্যাগুলো আসে `bot_ops.account_privileges()` থেকে — ওয়েব ড্যাশবোর্ড যে
+  একই কল ব্যবহার করে, তাই চ্যাটের লিমিট আর সাইটের নিয়ম কখনো আলাদা হতে পারে না।
+- `/queen` টাইপ করলে যে অ্যাকাউন্টের আগে থেকেই 👑 আছে সে তার প্যানেল পায়; বাকি
+  সবার জন্য আগের মতোই নীরব (`/admin`-এর মতো একই আচরণ)।
+- বাটনগুলো চাপলে ফ্ল্যাগটা আবার যাচাই হয় — `callback_data` হামলাকারীর হাতে, তাই
+  "বাটনটা ছিল" কিছু প্রমাণ করে না।
 
 ## ✅ যেগুলো ভালো আছে
 

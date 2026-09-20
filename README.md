@@ -47,13 +47,16 @@ Full details in `STORE.md`.
 - Telegram Mini App sign-in verification
 - Code-first bot hosting wizard with Python/Node starter templates
 - Bot Store: curated + community listings, each one raw Python file
-- Encrypted bot environment secrets at rest
+- Bot environment variables stored in your own database, masked in every API response and log line
 - Duplicate-token deployment prevention
 - Polling/webhook diagnostics and duplicate-poller detection
 - Run/stop/restart, live logs, CPU/memory and uptime
 - Immutable deployment versions, failed-candidate isolation, and one-click rollback
 - Per-job URLs and direct `t.me` links
 - Bot workspace snapshots and restore
+- 👑 Queen accounts: no memory ceiling, larger zip bundles, and `/projects` one-tap deploys
+- GitHub import with branch support — `/import owner/repo/tree/<branch>` clones that branch
+- Bot variables this site cannot read are restored from the runner's own copy at startup
 - Admin bot inventory, usage history, abuse controls, and audit log
 - SQLite locally; PostgreSQL/Supabase in production
 - Embedded runner for development and remote runner pool support
@@ -150,6 +153,10 @@ Required/important environment variables:
 | `BREVO_API_KEY` | Email OTP delivery |
 | `SENDER_EMAIL` | Verified email sender |
 | `CORS_ALLOWED_ORIGINS` | Optional comma-separated trusted external origins |
+| `QUEEN_PROJECTS_REPO` / `QUEEN_PROJECTS_BRANCH` | Repo and branch `/projects` offers 👑 accounts |
+| `QUEEN_PROJECTS_NAME` | App name a `/projects` deploy uses (default: the repo name) |
+| `ZIP_MAX_MB` / `QUEEN_ZIP_MAX_MB` | Unzipped bundle ceiling, normal and 👑 accounts |
+| `PING_DEFAULT_TARGET` | What a bare `/ping` measures (default: this site's own URL) |
 
 `render.yaml` needs no encryption key; configure the remaining secret values in Render.
 
@@ -169,9 +176,79 @@ The owner bot card separates:
 
 “Process running” is not presented as proof that every command handler works.
 
+## 👑 Queen accounts
+
+`/queen <username>` (admin-only, in the control bot) sets `users.mem_unlimited`.
+What that flag actually changes:
+
+| | normal account | 👑 account |
+|---|---|---|
+| Per-job memory ceiling | runner's `MAX_MEM_MB` | none (`mem_limit_mb=0`, the runner skips the RLIMIT) |
+| Zip bundle | `ZIP_MAX_MB` (default 5 MB unzipped, `ZIP_MAX_FILES` files) | `QUEEN_ZIP_MAX_MB` / `QUEEN_ZIP_MAX_FILES` (default 60 MB, 5000 files) |
+| `.zip` upload in chat | needs `/admin allowzip` | allowed |
+| `/projects` | explains what it is | lists the project repo and deploys it on one tap |
+| `/start` and `/help` in chat | the standard screen | their own screen, leading with the one-tap deploy |
+| Keyboard under `/start` | `🚀 Open CodeNest` | `👑 Queen panel` · `📦 Projects` · `🚀 Open CodeNest` |
+| `/limits` | what the account may do, and how to ask for more | the 👑 Queen panel: live slots, allowances, and the buttons |
+| Running-app limit | `MAX_JOBS_PER_USER` | the same, unless `/admin limit` raises it |
+
+The runner still enforces its own hard ceiling (`ZIP_BUNDLE_CEILING_BYTES`,
+default 200 MB) no matter what a request asks for, and the shared-box admission
+check still applies to memory: 👑 lifts the *per-job* cap, not the machine's
+limits.
+
+### The 👑 interface in Telegram
+
+A queen account does not get everybody else's help with a paragraph appended —
+it gets a different screen. `/start` and `/help` open with *Run a project in one
+tap* (the steps, the branch, where the token goes), then the privileges, then
+the commands everybody shares. Under it sit two buttons a normal account never
+sees: **👑 Queen panel** and **📦 Projects**.
+
+The panel repeats the account's *actual* allowances — running slots, memory,
+zip size, GitHub access — read from `bot_ops.account_privileges()`, the same
+single call the website dashboard uses, so chat cannot quote a limit the site
+does not enforce. `/limits` shows it, and so does `/queen` typed by an account
+that already holds the flag (for everyone else `/queen` stays silent, exactly
+like `/admin`). Every one of those buttons re-checks the flag when pressed:
+`callback_data` is attacker-supplied, so a button existing proves nothing.
+
+`/projects` points at `QUEEN_PROJECTS_REPO` / `QUEEN_PROJECTS_BRANCH`
+(default `https://github.com/tajhatAti/b`, branch `arena/01a0ba14-b`). It lists
+the repo's real contents from the GitHub API (cached 15 minutes, and a rate
+limit degrades to "here is how to run it" rather than an empty list), names the
+file the runner will start, and deploys through the same `/import` path as
+everything else — so a queen deploy obeys the same caps and slug rules.
+
+Telegram can only hand a bot a 20 MB file, so a heavier bundle goes through the
+website; the dashboard shows the 👑 badge and the limit that applies.
+
+A repo import names no language: the runner clones first and takes the language
+from the entry file it finds (`main.py`, `index.js`, `bot.lua`, a static
+`index.html` served over HTTP, and the rest of `_ENTRY_CANDIDATES`), installing
+whatever manifest the checkout declares. That is why `/import` works for a
+project in any supported language without the sender having to know what it is
+written in — an empty language on a repo job is expected, not an error.
+
+## Bot variables that go missing
+
+If the site ever cannot read a bot's stored variables, the bot is **not** lost:
+the runner keeps its own copy in the job's `job.json` manifest, and
+`services/env_rescue.py` reads it back and repairs the database row. That runs
+
+- at startup, for every unreadable row (`bot_secrets_rescued_at_boot` in `/health`);
+- on the recovery interval, before bots are recreated from the database;
+- on any start, restart, or Env edit — an edit on an unreadable row used to read
+  it as empty and then save that, silently deleting every other variable.
+
+`/health` and the admin overview report `bot_secrets_unreadable_rows`: after a
+boot with the runner reachable it should be 0. When a variable is genuinely gone
+from both sides, the owner is told where to put it back (the app's Env tab)
+instead of being shown a storage error.
+
 ## Persistence
 
-Bot source and encrypted environment configuration live in the main database. Runtime workspaces live on the runner. A snapshot service stores bot-generated SQLite/JSON/data files for cold-start recovery. For larger production workloads, move snapshot payloads from PostgreSQL to object storage.
+Bot source and bot environment variables live in the main database (plain JSON, masked on the wire). Runtime workspaces live on the runner. A snapshot service stores bot-generated SQLite/JSON/data files for cold-start recovery. For larger production workloads, move snapshot payloads from PostgreSQL to object storage.
 
 ## Tests
 

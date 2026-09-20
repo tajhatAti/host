@@ -7,6 +7,8 @@ Features:
 - Real logs, Uptime, Download DB
 """
 import io
+import ipaddress
+import socket
 import tempfile
 import json
 import os
@@ -16,6 +18,7 @@ import time
 import zipfile
 import requests
 from collections import defaultdict
+from urllib.parse import quote, urljoin, urlparse
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN", "").strip()
              or os.getenv("TELEGRAM_PING_BOT_TOKEN", "").strip())
@@ -215,7 +218,13 @@ def cmd_queen(chat_id, telegram_user_id, arg):
     """
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
-        return  # silent — same as /admin
+        # Silent for everyone else — same posture as /admin and /see. The one
+        # exception is an account that ALREADY holds 👑: showing them their own
+        # panel reveals nothing they don't have, and "I typed /queen and nothing
+        # happened" is indistinguishable from a broken bot.
+        if _user_is_queen(caller):
+            _send(chat_id, _queen_panel_text(caller), reply_markup=_queen_panel_kb())
+        return
 
     parts = (arg or "").split(None, 1)
     if not parts:
@@ -1305,12 +1314,33 @@ def _send_document(chat_id, filepath, caption=""):
         return {}
 
 
+def _is_parse_error(result) -> bool:
+    """True when Telegram rejected the message's MARKUP, not its content."""
+    desc = str((result or {}).get("description") or "").lower()
+    return ("can't parse" in desc or "parse entities" in desc
+            or "unsupported parse_mode" in desc or "bold entities" in desc)
+
+
 def _send(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         # Telegram expects reply_markup as a JSON-serialised string.
         data["reply_markup"] = json.dumps(reply_markup)
-    _tg("sendMessage", **data)
+    result = _tg("sendMessage", **data)
+    if not (result or {}).get("ok") and _is_parse_error(result):
+        # Legacy Markdown breaks on a stray * _ ` [ in anything we do not
+        # control — an app called my_bot, a log line, a traceback, a README. The
+        # message was then dropped entirely, and "the bot didn't answer" is the
+        # one failure a user cannot diagnose. Losing the bold costs nothing.
+        data.pop("parse_mode", None)
+        result = _tg("sendMessage", **data)
+    return result
+
+
+def _send_plain(chat_id, text):
+    """Send text we did not write (a README, a log) with no markup at all."""
+    return _tg("sendMessage", chat_id=chat_id, text=text[:4096],
+               disable_web_page_preview=True)
 
 
 def _edit_or_send(chat_id, message_id, text, reply_markup=None):
@@ -1385,11 +1415,20 @@ def handle_link(chat_id, text, display_name=""):
         # A button back, because the user arrived here FROM the dashboard and
         # the dashboard is where the connection now shows up. Telling them to
         # "go back" without a link is how a two-tap flow becomes a hunt again.
+        #
+        # The linked row is RE-READ instead of trusted from the redeem result:
+        # it is the one that carries the 👑 flag, and this is the first screen a
+        # newly connected queen ever sees. Showing everybody else's help here
+        # was the same "the privileges are invisible" complaint /start had.
+        linked = telegram_link.user_for_chat(chat_id) or {"username": res["username"]}
         rows = [[{"text": "📦 Open dashboard", "url": f"{SITE_BASE}/bots"}]] \
             if SITE_BASE else []
+        if _user_is_queen(linked):
+            rows.insert(0, [{"text": "👑 Queen panel", "callback_data": "queen:menu"},
+                            {"text": "📦 Projects", "callback_data": "qproj:list"}])
         _send(chat_id,
               f"✅ Connected to *{res['username']}*.\n\n" +
-              _help_text({"username": res["username"]}).split("\n\n", 1)[1],
+              _help_text(linked).split("\n\n", 1)[-1],
               reply_markup={"inline_keyboard": rows} if rows else None)
         return
 
@@ -1489,10 +1528,192 @@ def set_menu_button():
     return ok
 
 
-def _help_text(user):
-    """What the bot can do, including /code and /update — see the
-    "CODE-VIA-CHAT" comment near the top of this file for how those two are
-    kept safe (account-gated, same rails as the website's editor)."""
+def _queen_help_block() -> str:
+    """The 👑 half of /help: what queen access gets you, and how to use it.
+
+    A 👑 account used to be shown exactly the same help as everybody else, so
+    the privileges an admin had granted were invisible — nobody knew the memory
+    ceiling was off, that a whole project could arrive as a zip, or that
+    /projects existed at all. This is the separate interface for queens: the
+    same commands, plus the ones only they have, spelled out with the steps.
+    """
+    owner_repo = QUEEN_PROJECTS_REPO.split("github.com/")[-1].rstrip("/")
+    branch = f" (branch `{QUEEN_PROJECTS_BRANCH}`)" if QUEEN_PROJECTS_BRANCH else ""
+    return (
+        "\n\n👑 *Your queen access*\n"
+        "• *No memory ceiling* — your apps run at full size and won't be killed "
+        "for using what they need.\n"
+        "• *Whole projects* — send a `.zip` right after `/code <name>` or "
+        "`/update <name>`: folders, `requirements.txt`, data files, all of it.\n"
+        "• *Any public repo, any branch* — `/import <github url> [name]`, and add "
+        "a branch with `/import owner/repo/tree/<branch>`.\n"
+        f"• *`/projects`* — ready-made projects from `{owner_repo}`{branch}, "
+        "listed with instructions and a ▶️ Run button.\n"
+        "• *Your own project* — upload your zip or point me at your repo, tell me "
+        "what it needs (entry file, env vars) and I'll set it up with you."
+    )
+
+
+def _main_kb(user=None):
+    """The keyboard under /start and /help — a 👑 account gets its own.
+
+    Same bot, two front doors. Until now a queen saw exactly the single launch
+    button everybody else sees, so the privileges an admin had granted (no
+    memory ceiling, whole-project zips, the /projects catalogue) were things
+    they had to be told about instead of things they could press.
+    """
+    btn = _open_button()
+    if not _user_is_queen(user):
+        return {"inline_keyboard": [[btn]]} if btn else None
+    rows = [[{"text": "👑 Queen panel", "callback_data": "queen:menu"},
+             {"text": "📦 Projects", "callback_data": "qproj:list"}]]
+    if btn:
+        rows.append([btn])
+    return {"inline_keyboard": rows}
+
+
+def _queen_panel_kb():
+    """Buttons for the 👑 panel: what a queen can actually do, one tap each."""
+    rows = [[{"text": "📦 Projects", "callback_data": "qproj:list"},
+             {"text": "▶️ Run one now", "callback_data": "qproj:run"}],
+            [{"text": "📖 README", "callback_data": "qproj:readme"},
+             {"text": "📊 My apps", "callback_data": "queen:apps"}]]
+    btn = _open_button("🚀 Open CodeNest")
+    if btn:
+        rows.append([btn])
+    return {"inline_keyboard": rows}
+
+
+def _queen_panel_text(user) -> str:
+    """👑 Queen panel — this account's real limits, and how to use them.
+
+    The numbers come from bot_ops.account_privileges(), the same single call the
+    website dashboard uses, so chat cannot quote a limit the site does not
+    enforce (that disagreement is what made "5/3 running slots" nonsense).
+    """
+    uid = _row_id(user)
+    name = (user or {}).get("username") or (user or {}).get("name") or "there"
+    try:
+        priv = bot_ops.account_privileges(uid)
+    except Exception:  # the panel is still useful if the privilege read fails
+        priv = {}
+    limit = priv.get("job_limit")
+    try:
+        running = bot_ops.active_count(uid)
+    except Exception:
+        running = None
+    slots = f"{running}/{limit}" if running is not None and limit else (limit or "—")
+    mem = priv.get("mem_limit_mb")
+    mem_line = ("no ceiling — your apps are never killed for the memory they use"
+                if not mem else f"{mem}MB per app")
+    zip_mb = priv.get("zip_max_mb") or bot_ops.ZIP_MAX_MB
+    zip_files = priv.get("zip_max_files") or bot_ops.ZIP_MAX_FILES
+    owner_repo = QUEEN_PROJECTS_REPO.split("github.com/")[-1].rstrip("/")
+    branch = QUEEN_PROJECTS_BRANCH or "the default branch"
+    lines = [
+        f"👑 *Queen panel* — {name}",
+        "",
+        "*Your limits*",
+        f"🟢 Running apps — {slots}",
+        f"🧠 Memory — {mem_line}",
+        f"🗜 Zip upload — up to {zip_mb}MB / {zip_files} files unzipped",
+        "🌿 GitHub — any public repo, any branch",
+        "",
+        "*Run something*",
+        f"📦 `/projects` — ready-made projects from `{owner_repo}` "
+        f"(branch `{branch}`), each with a ▶️ Run button",
+        "🌿 `/import owner/repo [name]` — your own repo, and a branch with "
+        "`/import owner/repo/tree/<branch> myapp`",
+        "🗜 `/code <name>`, then send a `.zip` — a whole project, folders and "
+        "`requirements.txt` included. `/update <name>` plus a zip replaces one.",
+    ]
+    if SITE_BASE:
+        lines.append(
+            f"⚠️ Telegram only lets a bot download 20MB. For a bigger zip use "
+            f"{SITE_BASE}/bots — that upload doesn't go through Telegram, and "
+            f"your {zip_mb}MB allowance applies there.")
+    lines += [
+        "",
+        "*After it starts*",
+        "`/apps` everything · `/status <name>` memory and live URL · "
+        "`/logs <name>` output · `/restart <name>`",
+        "A Telegram-bot project needs its own token: open the app → *Env* tab → "
+        "paste `BOT_TOKEN` from @BotFather → *Save & restart*.",
+        "Nothing is lost on a restart — your files and variables come back with it.",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_limits(chat_id, user):
+    """`/limits` — what this account is allowed. A 👑 gets the queen panel."""
+    if _user_is_queen(user):
+        _send(chat_id, _queen_panel_text(user), reply_markup=_queen_panel_kb())
+        return
+    uid = _row_id(user)
+    priv = bot_ops.account_privileges(uid)
+    running = bot_ops.active_count(uid)
+    lines = [
+        "*Your limits*",
+        f"🟢 Running apps — {running}/{priv.get('job_limit')}",
+        f"🧠 Memory — {priv.get('mem_limit_mb')}MB per app",
+        f"🗜 Zip upload — {priv.get('zip_max_mb')}MB / {priv.get('zip_max_files')} files",
+        "🌿 GitHub — `/import <public repo url>` works for everyone",
+        "",
+        "👑 An admin can lift all of these with `/queen <your username>`: no "
+        "memory ceiling, big zip uploads, and the `/projects` catalogue.",
+    ]
+    _send(chat_id, "\n".join(lines), reply_markup=_open_kb())
+
+
+def _queen_help_text(user) -> str:
+    """The 👑 /help screen — a different layout, not the same one with a footer.
+
+    A queen used to get everybody else's help with a paragraph appended, which
+    is not a separate interface: the thing only they can do was the last item on
+    a long list. This leads with it, keeps the privileges in one block, and puts
+    the commands everybody shares underneath, shortened.
+    """
+    name = (user or {}).get("username") or (user or {}).get("name") or "there"
+    owner_repo = QUEEN_PROJECTS_REPO.split("github.com/")[-1].rstrip("/")
+    branch = f" (branch `{QUEEN_PROJECTS_BRANCH}`)" if QUEEN_PROJECTS_BRANCH else ""
+    lines = [
+        f"👑 *CodeNest — queen access*",
+        f"Hi *{name}*. This is your interface: everything below is yours, and "
+        f"the 👑 Queen panel button repeats it whenever you need it.",
+        "",
+        "*Run a project in one tap*",
+        f"1️⃣ `/projects` — what's in `{owner_repo}`{branch}, with the file that "
+        f"will run and the steps.",
+        "2️⃣ Tap ▶️ *Run it now*. I clone that branch, install its requirements "
+        "and start it — a repo takes a little longer than `/code`.",
+        "3️⃣ `/logs <name>` while it boots, `/status <name>` for memory and the "
+        "live URL.",
+        "4️⃣ If it's a Telegram bot, open the app → *Env* → paste its own "
+        "`BOT_TOKEN` from @BotFather → *Save & restart*.",
+    ]
+    lines.append(_queen_help_block())
+    lines += [
+        "",
+        "*Everything else*",
+        "`/limits` your allowances · `/apps` your apps · `/projects` the catalogue",
+        "`/code <name>` then send source or a `.zip` · `/update <name>` to replace it",
+        "`/import <github url> [name]` any public repo · `/source <name>` download it back",
+        "`/logs <name>` · `/status [name]` · `/restart <name>` · `/stop <name>` · "
+        "`/delete <name>` · `/rename <name> <new>`",
+        "`/ping [url]` check a URL · `/cancel` abandon a pending upload · "
+        "`/unlink` disconnect this chat",
+        "",
+        "I message you if an app stops on its own.",
+    ]
+    return "\n".join(lines)
+
+
+def _plain_help_text(user) -> str:
+    """The standard /help screen: what the bot can do for everybody.
+
+    See the "CODE-VIA-CHAT" comment near the top of this file for how /code and
+    /update are kept safe (account-gated, same rails as the website's editor).
+    """
     return (
         f"👋 Hi *{user['username']}*!\n\n"
         "Tap *Open CodeNest* to write, edit and deploy — it opens right here "
@@ -1505,15 +1726,23 @@ def _help_text(user):
         "`/import <github url> [name]` — clone a public repo and deploy it\n"
         "`/source <name>` — download your app's current code as a file\n"
         "`/apps` — everything you have, with live status\n"
+        "`/limits` — what your account is allowed\n"
         "`/status [name]` — account summary, or one app in full\n"
         "`/logs <name>` — the last lines it printed\n"
         "`/restart <name>`  `/stop <name>`  `/delete <name>`\n"
         "`/rename <name> <new>`\n"
         "`/cancel` — stop a pending /code or /update\n"
-        "`/ping [url]` — check a URL\n"
+        "`/ping [url]` — check a URL (no URL = this site)\n"
         "`/unlink` — disconnect this chat\n\n"
         "I message you if an app stops on its own."
     )
+
+
+def _help_text(user):
+    """Which /help screen this account gets: 👑 has its own, see above."""
+    if _user_is_queen(user):
+        return _queen_help_text(user)
+    return _plain_help_text(user)
 
 
 def handle_start(chat_id, first_name, payload=""):
@@ -1539,7 +1768,7 @@ def handle_start(chat_id, first_name, payload=""):
 
     user = telegram_link.user_for_chat(chat_id)
     if user:
-        _send(chat_id, _help_text(user), reply_markup=_open_kb())
+        _send(chat_id, _help_text(user), reply_markup=_main_kb(user))
         return
 
     # UNLINKED: one button, and no instructions at all.
@@ -1596,15 +1825,196 @@ def _link_rate_ok(chat_id):
 
 
 # ==================== /ping ====================
-def handle_ping(chat_id, text):
-    target = text.split()[1] if len(text.split()) > 1 else "https://ahadorg.onrender.com"
+PING_TIMEOUT_S = float(os.getenv("PING_TIMEOUT_S", "8"))
+PING_MAX_REDIRECTS = int(os.getenv("PING_MAX_REDIRECTS", "3"))
+PING_UA = "CodeNest-PingBot/1.0"
+
+# Hosts that must never be fetched from a user-supplied /ping: this command is a
+# server-side request, so without this list it doubles as a probe of the machine
+# it runs on (and of a cloud provider's metadata endpoint). Same rule the
+# standalone bot service applies — see bot/app.py's _PING_BLOCKED_HOSTS.
+_PING_BLOCKED_HOSTS = ("localhost", "metadata", "metadata.google.internal",
+                       "0.0.0.0", "ip6-localhost", "ip6-loopback")
+
+
+def ping_default_target() -> str:
+    """What a bare `/ping` measures: THIS site.
+
+    It used to be a hardcoded foreign host. On any install that was not that
+    one, `/ping` measured somebody else's server — and when it timed out the
+    reply was a raw requests exception naming that server
+    ("HTTPSConnectionPool(host='…', port=443): Read timed out."), which reads
+    like the bot crashed. PING_DEFAULT_TARGET still overrides this for anyone
+    who wants a fixed target; api.telegram.org is the last resort because it is
+    the one service every install here actually depends on.
+    """
+    return (os.getenv("PING_DEFAULT_TARGET", "").strip() or SITE_BASE
+            or "https://api.telegram.org")
+
+
+def _ping_ip_blocked(value: str) -> bool:
+    """True for an ADDRESS that must not be fetched.
+
+    A hostname is not an address: it is judged by what it resolves to a few
+    lines below, so "not an IP" means "not blocked here", not "blocked". (The
+    opposite reading refused every /ping of a normal domain name.)
+    """
     try:
-        t0 = time.time()
-        r = requests.head(target, timeout=8, allow_redirects=True)
-        ms = round((time.time() - t0) * 1000, 1)
-        _send(chat_id, f"🟢 {ms}ms | HTTP {r.status_code}")
-    except Exception as e:
-        _send(chat_id, f"❌ {str(e)}")
+        ip = ipaddress.ip_address(str(value).split("%")[0])
+    except ValueError:
+        return False
+    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified or str(ip).startswith("169.254."))
+
+
+def _ping_host_allowed(host: str) -> tuple:
+    """(ok, reason). Refuses internal names and addresses before any request."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return False, "there's no hostname in that URL"
+    for blocked in _PING_BLOCKED_HOSTS:
+        if host == blocked or host.endswith("." + blocked):
+            return False, f"`{host}` is an internal address I'm not allowed to fetch"
+    try:
+        if _ping_ip_blocked(host):
+            return False, f"`{host}` is in a private/internal IP range"
+    except Exception:
+        pass
+    try:
+        # No family/type here on purpose: getaddrinfo(host, None, SOCK_STREAM)
+        # raises "ai_family not supported" on some resolvers, which would refuse
+        # every domain name — a guard that blocks all pings is worse than none.
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        # A name with no record is a real answer. Anything else is the resolver
+        # itself failing, and that is the request's problem to report (it does,
+        # in words — see _ping_error_text), not a reason to refuse up front.
+        nodata = getattr(socket, "EAI_NODATA", -5)
+        if exc.errno in (socket.EAI_NONAME, nodata):
+            return False, f"`{host}` doesn't resolve — no DNS record for that name"
+        return True, ""
+    except Exception:
+        return True, ""            # resolver hiccup: let the request decide
+    for info in infos:
+        addr = info[4][0]
+        if isinstance(addr, tuple):
+            addr = addr[0]
+        if _ping_ip_blocked(addr):
+            return False, f"`{host}` resolves to an internal address ({addr})"
+    return True, ""
+
+
+def _ping_error_detail(exc: Exception) -> str:
+    """The useful fragment of a requests exception, wrappers peeled off.
+
+    "HTTPSConnectionPool(host='x', port=443): Max retries exceeded with url: /
+    (Caused by SSLError(SSLZeroReturnError(6, '…')))" is four layers of library
+    plumbing around one fact. This keeps the fact and drops the plumbing — that
+    string is what made a two-second network hiccup look like a crash report.
+    """
+    text = str(exc).strip()
+    caused = re.search(r"\(Caused by ([A-Za-z_.]+)\((.*)\)\)\s*$", text, re.S)
+    if caused:
+        text = f"{caused.group(1)}: {caused.group(2)}"
+    text = re.sub(r"^(?:New ?|HTTPS?|HTTP)ConnectionPool\([^)]*\):\s*", "", text)
+    text = re.sub(r"^Max retries exceeded with url:\s*\S+\s*", "", text)
+    text = re.sub(r"^[A-Za-z_.]*(?:Error|Exception)\(\d+,\s*", "", text)
+    text = re.sub(r"\(_ssl\.c:\d+\)", "", text)
+    return (text.strip(" '\"") or type(exc).__name__)[:140]
+
+
+def _ping_error_text(host: str, exc: Exception) -> str:
+    """One short line a person can act on, instead of a requests traceback."""
+    low = str(exc).lower()
+    detail = _ping_error_detail(exc)
+    if isinstance(exc, requests.Timeout) or "timed out" in low or "timeout" in low:
+        return (f"🔴 *{host}* didn't answer within {int(PING_TIMEOUT_S)}s.\n"
+                f"It's down, still waking up, or too slow to reply.")
+    if "name or service not known" in low or "failed to resolve" in low \
+            or "nodename nor servname" in low or "getaddrinfo" in low:
+        return f"🔴 *{host}* doesn't resolve — check the spelling of the address."
+    if "connection refused" in low:
+        return f"🔴 *{host}* refused the connection — nothing is listening there."
+    if "certificate verify failed" in low or "self signed" in low or "self-signed" in low:
+        return f"🔴 *{host}*'s TLS certificate isn't trusted from here: `{detail}`"
+    if "ssl" in low or "certificate" in low or "tls" in low:
+        return (f"🔴 *{host}* closed the secure connection before answering.\n"
+                f"`{detail}`")
+    if isinstance(exc, requests.TooManyRedirects) or "too many redirects" in low:
+        return f"🔴 *{host}* keeps redirecting in a loop."
+    if "connection aborted" in low or "connection reset" in low:
+        return f"🔴 *{host}* dropped the connection part-way: `{detail}`"
+    return f"🔴 Couldn't reach *{host}*: `{detail}`"
+
+
+def handle_ping(chat_id, text):
+    """`/ping [url]` — how long a URL takes to answer, in plain words."""
+    parts = text.split()
+    target = parts[1].strip() if len(parts) > 1 else ping_default_target()
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", target):
+        target = "https://" + target          # "/ping example.com" should work
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        _send(chat_id, "🔴 I can only ping `http://` and `https://` addresses.")
+        return
+    if parsed.username or parsed.password:
+        _send(chat_id, "🔴 Please don't put a username or password in a pinged URL.")
+        return
+    host = parsed.hostname or target
+    ok, why = _ping_host_allowed(host)
+    if not ok:
+        _send(chat_id, f"🔴 I can't ping that: {why}")
+        return
+
+    started = time.time()
+    current, method, hops = target, "HEAD", 0
+    try:
+        while True:
+            # Redirects are followed by hand so every hop is re-checked: a public
+            # URL that 302s to an internal address would otherwise smuggle the
+            # request past the guard above.
+            resp = requests.request(method, current, timeout=PING_TIMEOUT_S,
+                                    allow_redirects=False,
+                                    headers={"User-Agent": PING_UA})
+            if resp.status_code in (301, 302, 303, 307, 308) and hops < PING_MAX_REDIRECTS:
+                location = resp.headers.get("Location") or ""
+                if not location:
+                    break
+                nxt = urljoin(current, location)
+                next_host = urlparse(nxt).hostname or ""
+                ok, why = _ping_host_allowed(next_host)
+                if not ok:
+                    _send(chat_id, f"🔴 *{host}* redirected somewhere I can't follow: {why}")
+                    return
+                current, hops = nxt, hops + 1
+                if urlparse(nxt).scheme not in ("http", "https"):
+                    break
+                continue
+            # Some hosts answer HEAD with 403/405 but serve GET fine — measuring
+            # that as "the site is broken" would be wrong, so try GET once.
+            if method == "HEAD" and resp.status_code in (403, 405, 501):
+                method = "GET"
+                continue
+            break
+    except Exception as exc:                                   # noqa: BLE001
+        _send(chat_id, _ping_error_text(host, exc))
+        return
+
+    ms = round((time.time() - started) * 1000, 1)
+    code = resp.status_code
+    final_host = urlparse(current).hostname or host
+    icon = "🟢" if code < 400 else ("🟡" if code < 500 else "🔴")
+    lines = [f"{icon} *{host}* — {ms}ms · HTTP {code}"]
+    if final_host != host:
+        lines.append(f"↳ landed on `{final_host}` after {hops} redirect(s)")
+    if code in (401, 403):
+        lines.append("It answered, but refused the request — normal for a page "
+                     "behind a login.")
+    elif code == 404:
+        lines.append("It answered, but that path doesn't exist.")
+    elif code >= 500:
+        lines.append("It answered with a server error — the site itself is unhappy.")
+    _send(chat_id, "\n".join(lines))
 
 
 # ==================== APP BUTTONS ====================
@@ -1660,12 +2070,41 @@ _ICON = {"running": "🟢", "crashed": "🔴", "installing": "🟡",
          "starting": "🟡", "restarting": "🟡", "recovering": "🟡", "stopped": "⚪", "offline": "⚪"}
 
 
+def _user_is_queen(user) -> bool:
+    """👑 flag for a linked account.
+
+    telegram_link.user_for_chat already selects it (mem_unlimited AS is_queen),
+    so this is normally free; the database fallback covers callers that built
+    the user dict somewhere else (the admin panel, tests).
+    """
+    if not user:
+        return False
+    if "is_queen" in user:
+        return bool(user.get("is_queen"))
+    try:
+        return bot_ops.is_queen(user.get("id"))
+    except Exception:
+        return False
+
+
 def cmd_apps(chat_id, user):
     apps = bot_ops.list_apps(user["id"])
+    queen = _user_is_queen(user)
     if not apps:
-        _send(chat_id, "You have no apps yet. `/code <name>` to create one.")
+        _send(chat_id, "You have no apps yet. `/code <name>` to create one."
+              + ("\n\n👑 You have queen access — `/projects` lists what you can "
+                 "deploy in one tap." if queen else ""))
         return
-    lines = [f"*Your apps* ({len(apps)}/{bot_ops.MAX_JOBS_PER_USER} running slots)\n"]
+    # This header used to read "5/3 running slots". Both halves were wrong:
+    # len(apps) counts every app the account EVER created, stopped ones
+    # included, and MAX_JOBS_PER_USER is the global default, which ignores the
+    # per-user override an admin can grant. Together they told people they were
+    # over a limit the site was not enforcing. These are now the same two
+    # numbers the cap itself uses, so the display and the rule cannot disagree.
+    running = bot_ops.active_count(user["id"])
+    limit = bot_ops.effective_job_limit(user["id"])
+    crown = " 👑" if queen else ""
+    lines = [f"*Your apps*{crown} — {len(apps)} total · {running}/{limit} running\n"]
     for a in apps:
         icon = _ICON.get(a["status"], "⚪")
         bits = [f"{icon} *{a['name']}* — {a['status']}"]
@@ -1678,6 +2117,13 @@ def cmd_apps(chat_id, user):
         lines.append(" · ".join(bits))
     lines.append("\n`/logs <name>` `/restart <name>` `/stop <name>`")
     lines.append("`/update <name>` `/rename <name> <new>` `/delete <name>`")
+    if running >= limit:
+        lines.append(f"\n⚠️ That's your {limit} running app(s) — `/stop <name>` "
+                     f"frees a slot. Stopped apps still count as yours, they just "
+                     f"don't use a slot.")
+    if queen:
+        lines.append("👑 No memory ceiling · zip upload on · `/projects` for "
+                     "one-tap deploys")
     _send(chat_id, "\n".join(lines))
 
 
@@ -1820,15 +2266,39 @@ def cmd_rename(chat_id, user, args):
 
 # ==================== /code AND /update — see the module comment above ====
 
+def _repo_branch_of(url: str) -> str:
+    """The branch a GitHub URL asks for, or "" for the repo's default.
+
+    Only used for what the user is TOLD (the runner does its own parsing in
+    _repo_clone_target), so a mismatch here would be a wrong label, never a
+    wrong deploy.
+    """
+    text = (url or "").strip()
+    # The whole remainder, slashes included: a branch may be "arena/01a0ba14-b",
+    # and the runner works out how much of it is the branch when it clones.
+    m = re.search(r"github\.com/[^/\s]+/[^/\s]+?(?:\.git)?/(?:tree|blob|commits?)/([^#\s?]+)", text)
+    if m:
+        return m.group(1).strip("/")
+    if "#" in text:
+        return text.rsplit("#", 1)[1].strip()
+    return ""
+
+
 def cmd_import(chat_id, user, arg):
     """/import <github url> [name] — clone a public GitHub repo and deploy it.
     The runner auto-detects which file to run (main.py/bot.py/app.py first,
     then a manifest-aware fallback — see runner/app.py:_detect_entry). A
     static site (index.html, no requirements.txt/package.json) is served
-    as-is."""
+    as-is.
+
+    A branch can be part of the URL — `owner/repo/tree/<branch>` (what the
+    browser shows) or `owner/repo#<branch>` — and the runner clones exactly that
+    branch. Without it a repo whose work lives off `main` deploys the wrong code.
+    """
     if not arg:
         _send(chat_id, "Usage: `/import <github.com/user/repo>`\n"
                        "Optionally name it yourself: `/import <url> myapp`\n"
+                       "A specific branch: `/import <url>/tree/<branch> myapp`\n"
                        "Only public repos are supported right now.")
         return
     parts = arg.split(None, 1)
@@ -1839,6 +2309,7 @@ def cmd_import(chat_id, user, arg):
         _send(chat_id, "That doesn't look like a github.com repo URL — "
                        "expected something like `github.com/user/repo`.")
         return
+    branch = _repo_branch_of(url)
     if not name:
         name = m.group(2).replace(".git", "")
     clean = bot_ops.slugify_name(name)
@@ -1850,21 +2321,243 @@ def cmd_import(chat_id, user, arg):
         _send(chat_id, f"You already have an app called “{clean}”. Pick a "
                        f"different name: `/import {url} <name>`.")
         return
-    _send(chat_id, f"📥 Cloning and deploying *{clean}*… this can take a "
-                   f"little longer than /code, since the repo has to be "
-                   f"fetched first.")
+    _send(chat_id, f"📥 Cloning and deploying *{clean}*…"
+                   + (f" (branch `{branch}`)" if branch else "")
+                   + " this can take a little longer than /code, since the repo "
+                     "has to be fetched first.")
     res = bot_ops.create_app_from_repo(user["id"], clean, url)
     if not res.get("ok"):
         _send(chat_id, f"❌ {res['error']}")
         return
     url_web = res.get("web") or ""
-    _send(chat_id, f"✅ *{res['name']}* imported and running.\n"
+    _send(chat_id, f"✅ *{res['name']}* imported and running"
+                   + (f" from branch `{branch}`" if branch else "") + ".\n"
                    + (url_web + "\n" if url_web else "")
                    + "⚠️ No Telegram bot token check on import yet — if this "
                      f"is meant to be a Telegram bot, run `/status {res['name']}` "
                      f"to confirm it's actually polling.\n"
                    + f"`/logs {res['name']}` if anything looks wrong.",
           reply_markup=_app_buttons(res["job_db_id"], url=url_web))
+
+
+# ==================== 👑 PROJECTS ====================
+# A 👑 account can deploy the owner's ready-made projects straight from GitHub —
+# including from a branch that is not `main`, which is where these live. The
+# repo and branch are configurable so this is not welded to one account, but the
+# defaults are the ones this install ships with.
+QUEEN_PROJECTS_REPO = os.getenv("QUEEN_PROJECTS_REPO",
+                                "https://github.com/tajhatAti/b").strip().rstrip("/")
+QUEEN_PROJECTS_BRANCH = os.getenv("QUEEN_PROJECTS_BRANCH", "arena/01a0ba14-b").strip()
+# What the deployed app is called. Left empty it falls back to the repo name,
+# and a repo called "b" makes a confusing app name, so the fallback pads it.
+QUEEN_PROJECTS_NAME = os.getenv("QUEEN_PROJECTS_NAME", "").strip()
+PROJECTS_CACHE_S = int(os.getenv("QUEEN_PROJECTS_CACHE_S", "900"))
+_projects_cache = {"at": 0.0, "entries": None}
+
+# Same preference order the runner's auto-detect uses, so "it will run X" here
+# is the same X the runner picks (runner/app.py:_ENTRY_CANDIDATES).
+_PROJECT_ENTRY_ORDER = [
+    "main.py", "app.py", "bot.py", "server.py", "index.py", "run.py",
+    "index.js", "server.js", "app.js", "main.js", "bot.js",
+    "index.php", "start.sh", "run.sh", "main.sh",
+]
+
+
+def _queen_repo_parts() -> tuple:
+    """(owner, repo) of the configured project repo, or ("", "")."""
+    m = re.search(r"github\.com/([^/\s]+)/([^/\s#]+?)(?:\.git)?(?:[#/].*)?$",
+                  QUEEN_PROJECTS_REPO)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def queen_project_url() -> str:
+    """The `/import`-ready URL for the project, branch included."""
+    if QUEEN_PROJECTS_BRANCH:
+        return f"{QUEEN_PROJECTS_REPO}/tree/{QUEEN_PROJECTS_BRANCH}"
+    return QUEEN_PROJECTS_REPO
+
+
+def _projects_fetch() -> list:
+    """Top-level contents of the project repo/branch, cached.
+
+    Cached because /projects is read far more often than the repo changes, and
+    because GitHub's API is rate-limited per source IP — a shared Render exit IP
+    can run out. On any failure the previous answer is served rather than an
+    empty list, so a rate limit does not make the project look deleted.
+    """
+    now = time.time()
+    cached = _projects_cache.get("entries")
+    if cached is not None and now - _projects_cache.get("at", 0) < PROJECTS_CACHE_S:
+        return cached
+    owner, repo = _queen_repo_parts()
+    if not owner:
+        return []
+    branch = quote(QUEEN_PROJECTS_BRANCH or "HEAD", safe="")
+    api = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}"
+    try:
+        r = requests.get(api, timeout=12,
+                         headers={"Accept": "application/vnd.github+json",
+                                  "User-Agent": PING_UA})
+        if r.status_code != 200:
+            logger.warning("projects: GitHub returned %s for %s", r.status_code, api)
+            return cached or []
+        tree = (r.json() or {}).get("tree") or []
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("projects: cannot list %s: %s", api, exc)
+        return cached or []
+    entries = [{"path": str(e.get("path") or ""), "type": e.get("type"),
+                "size": int(e.get("size") or 0)}
+               for e in tree if e.get("path")]
+    _projects_cache.update(at=now, entries=entries)
+    return entries
+
+
+def _projects_guess_entry(entries) -> str:
+    names = {e["path"] for e in entries
+             if e.get("type") == "blob" and "/" not in e["path"]}
+    for candidate in _PROJECT_ENTRY_ORDER:
+        if candidate in names:
+            return candidate
+    return ""
+
+
+def _projects_contents_lines(entries, limit=16) -> list:
+    top = [e for e in entries if "/" not in e["path"]]
+    dirs = sorted((e for e in top if e.get("type") == "tree"),
+                  key=lambda e: e["path"].lower())
+    files = sorted((e for e in top if e.get("type") == "blob"),
+                   key=lambda e: e["path"].lower())
+    lines = [f"📁 `{e['path']}/`" for e in dirs]
+    lines += [f"📄 `{e['path']}`" + (f" · {e['size'] // 1024} KB" if e["size"] >= 20480 else "")
+              for e in files]
+    if len(lines) > limit:
+        extra = len(lines) - limit
+        lines = lines[:limit] + [f"… and {extra} more"]
+    return lines
+
+
+def _project_app_name(user) -> str:
+    """A free app name for this project, so a second deploy doesn't collide."""
+    _owner, repo = _queen_repo_parts()
+    base = QUEEN_PROJECTS_NAME or (repo if len(repo or "") > 2 else f"{repo or 'queen'}-project")
+    base = bot_ops.slugify_name(base) or "project"
+    candidate, n = base, 1
+    while bot_ops.find_app(user["id"], candidate) and n < 50:
+        n += 1
+        candidate = f"{base}-{n}"
+    return candidate
+
+
+def cmd_projects(chat_id, user, arg=""):
+    """`/projects` — the 👑 catalogue: what can be deployed, and exactly how.
+
+    Queens were told they could "run the owner's projects" with no way to see
+    them and no instructions, so the privilege was unusable. This lists the
+    repo's real contents, names the file that will run, and gives the steps —
+    with a button that does the deploy so nobody has to type a URL.
+    """
+    if not _user_is_queen(user):
+        _send(chat_id, "👑 `/projects` is part of queen access. An admin grants it "
+                       "with `/queen <your username>` — until then everything in "
+                       "`/help` still works, and `/import <github url>` will deploy "
+                       "any public repo you have.")
+        return
+    sub = (arg or "").strip().lower()
+    if sub in ("run", "deploy", "start", "install"):
+        _deploy_queen_project(chat_id, user)
+        return
+    if sub in ("readme", "read", "doc", "docs"):
+        _send_project_readme(chat_id)
+        return
+
+    owner, repo = _queen_repo_parts()
+    if not owner:
+        _send(chat_id, "👑 No project repo is configured on this server yet "
+                       "(`QUEEN_PROJECTS_REPO`). Ask the owner to set one.")
+        return
+    entries = _projects_fetch()
+    branch = QUEEN_PROJECTS_BRANCH or "the default branch"
+    url = queen_project_url()
+    name = _project_app_name(user)
+    lines = [f"👑 *Queen projects*",
+             f"Repo `{owner}/{repo}` · branch `{branch}`\n"]
+    if entries:
+        lines.append("*What's inside*")
+        lines.extend(_projects_contents_lines(entries))
+        entry = _projects_guess_entry(entries)
+        names = {e["path"] for e in entries}
+        if entry:
+            lines.append(f"\n▶️ It will run `{entry}` (auto-detected).")
+        if "requirements.txt" in names:
+            lines.append("📦 `requirements.txt` is installed automatically before it starts.")
+        lines.append("")
+    else:
+        lines.append("_I couldn't list the repo just now (GitHub may be rate-limiting "
+                     "this server) — the deploy below still works._\n")
+    lines += [
+        "*How to run it*",
+        f"1️⃣ Tap ▶️ *Run it now* below, or send:\n`/import {url} {name}`",
+        "2️⃣ I clone that branch, install its requirements and start it. A repo "
+        "takes a little longer than `/code` — watch it with `/logs " + name + "`.",
+        f"3️⃣ `/status {name}` shows memory, uptime and the live URL. `/apps` shows everything.",
+        "4️⃣ If it's a Telegram bot it needs its own token: open the app → *Env* tab → "
+        "paste `BOT_TOKEN` from @BotFather → *Save & restart*.",
+        "5️⃣ Nothing is lost on a restart: your files and database are snapshotted, "
+        "and 👑 means no memory ceiling on it.\n",
+        "*Your own project?* Send a `.zip` right after `/code <name>` (folders and all), "
+        "or `/import <your public repo> [name]` — add `/tree/<branch>` for a branch.",
+    ]
+    rows = [[{"text": "▶️ Run it now", "callback_data": "qproj:run"},
+             {"text": "📖 README", "callback_data": "qproj:readme"}],
+            [{"text": "👑 Queen panel", "callback_data": "queen:menu"}]]
+    btn = _open_button("🚀 Open in CodeNest")
+    if btn:
+        rows.append([btn])
+    _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": rows})
+
+
+def _deploy_queen_project(chat_id, user, name=""):
+    """One tap = the project cloned, installed and running.
+
+    Delegates to cmd_import so a queen deploy goes through exactly the same
+    rails as any other repo import — same cap check, same slug rules, same
+    messages — instead of a second copy of that logic drifting apart.
+    """
+    url = queen_project_url()
+    if not url:
+        _send(chat_id, "👑 No project repo is configured on this server yet.")
+        return
+    clean = bot_ops.slugify_name(name or "") or _project_app_name(user)
+    cmd_import(chat_id, user, f"{url} {clean}")
+
+
+def _send_project_readme(chat_id):
+    """The project's own README, as plain text.
+
+    Sent with no parse mode: a README is Markdown we do not control, and legacy
+    Markdown would either mangle it or get the whole message rejected.
+    """
+    owner, repo = _queen_repo_parts()
+    if not owner:
+        _send(chat_id, "👑 No project repo is configured on this server yet.")
+        return
+    branch = QUEEN_PROJECTS_BRANCH or "HEAD"
+    raw = (f"https://raw.githubusercontent.com/{owner}/{repo}/"
+           f"{quote(branch, safe='')}/README.md")
+    try:
+        r = requests.get(raw, timeout=12, headers={"User-Agent": PING_UA})
+    except Exception as exc:                                   # noqa: BLE001
+        _send_plain(chat_id, f"📖 Couldn't fetch the README just now "
+                             f"({type(exc).__name__}). It's here:\n{raw}")
+        return
+    if r.status_code != 200:
+        _send_plain(chat_id, f"📖 No README.md on branch “{branch}” "
+                             f"(HTTP {r.status_code}).\nRepo: {QUEEN_PROJECTS_REPO}")
+        return
+    text = (r.text or "").strip() or "(that README is empty)"
+    if len(text) > 3800:
+        text = text[:3800].rstrip() + "\n\n… truncated — the rest is in the repo."
+    _send_plain(chat_id, f"📖 README · {owner}/{repo} @ {branch}\n\n{text}")
 
 
 def cmd_code_start(chat_id, user, name):
@@ -2082,7 +2775,13 @@ def handle_pending_code(chat_id, msg, pending):
     if doc and (doc.get("file_name") or "").lower().endswith(".zip"):
         tg_uid = (msg.get("from") or {}).get("id")
         linked_user = telegram_link.user_for_chat(tg_uid)
-        if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")):
+        # 👑 implies zip access. The flag is an admin's decision to trust this
+        # account with more of the box (no memory ceiling, bigger bundles), so
+        # making them ask a second time with /admin allowzip was a privilege
+        # that looked granted and behaved as if it wasn't.
+        queen = _user_is_queen(linked_user)
+        if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")
+                or queen):
             _send(chat_id, "🔒 .zip uploads need admin approval on this account. "
                            "Ask an admin to run `/admin allowzip` for you, or send a "
                            "single source file instead.")
@@ -2095,8 +2794,20 @@ def handle_pending_code(chat_id, msg, pending):
         # what broke any app whose entry file imported a sibling module.
         size = doc.get("file_size") or 0
         if size > TG_MAX_DOWNLOAD_BYTES:
+            # The 20MB wall is Telegram's, not ours, and no setting lifts it.
+            # What CAN be said is the way round it: the website upload has no
+            # Telegram in the middle, and a 👑 account is allowed a big bundle
+            # there (bot_ops.zip_limits_for).
+            bigger = ""
+            if queen:
+                where = f"{SITE_BASE}/bots" if SITE_BASE else "the dashboard"
+                bigger = (f"\n\n👑 Send the big one through {where} instead — the "
+                          f"website upload doesn't go through Telegram, and your "
+                          f"account is allowed up to {bot_ops.QUEEN_ZIP_MAX_MB}MB "
+                          f"unzipped ({bot_ops.QUEEN_ZIP_MAX_FILES} files).")
             _send(chat_id, f"❌ That file is {size // (1024*1024)}MB — "
-                           f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`.")
+                           f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`."
+                           + bigger)
             return
         try:
             meta = _tg("getFile", file_id=doc["file_id"])
@@ -2231,6 +2942,29 @@ def handle_callback(chat_id, data, message_id=None):
         _cmd_delete_confirmed(chat_id, user, ref)
     elif action == "delcancel":
         _send(chat_id, "Cancelled — nothing was deleted.")
+    elif action == "qproj":
+        # 👑 project buttons. Each re-checks the flag itself: callback_data is
+        # attacker-supplied, so "the button existed" proves nothing.
+        if not _user_is_queen(user):
+            _send(chat_id, "👑 That's part of queen access — an admin grants it "
+                           "with `/queen <your username>`. `/import <your own "
+                           "public repo>` works for anyone.")
+        elif ref == "readme":
+            _send_project_readme(chat_id)
+        elif ref == "list":
+            cmd_projects(chat_id, user)
+        else:
+            _deploy_queen_project(chat_id, user)
+    elif action == "queen":
+        # The 👑 panel: a queen's own limits and the buttons that use them.
+        if not _user_is_queen(user):
+            _send(chat_id, "👑 That panel is part of queen access — an admin "
+                           "grants it with `/queen <your username>`. "
+                           "`/limits` shows what your account can do now.")
+        elif ref == "apps":
+            cmd_apps(chat_id, user)
+        else:
+            _send(chat_id, _queen_panel_text(user), reply_markup=_queen_panel_kb())
 
 
 def _send_job_data(chat_id, user, ref):
@@ -2386,6 +3120,13 @@ def handle_update(upd):
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
                 "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
+                # 👑 the catalogue of ready-made projects, with the steps and a
+                # one-tap deploy. cmd_projects explains to a non-queen what they
+                # are missing instead of staying silent.
+                "/projects": lambda: gated(lambda u: cmd_projects(chat_id, u, arg)),
+                # /limits is the plain-language answer to "what am I allowed?"
+                # and, for a 👑 account, the door to their panel.
+                "/limits": lambda: gated(lambda u: cmd_limits(chat_id, u)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
