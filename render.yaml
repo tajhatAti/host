@@ -64,13 +64,15 @@ services:
       # ── Auth / admin ─────────────────────────────────────
       - key: ADMIN_EMAILS        # comma-separated owner emails → auto-granted admin
         sync: false
-      # OPTIONAL, and free here: Render invents a stable random value, so
-      # hosted-bot BOT_TOKENs are encrypted at rest without you typing anything.
-      # Delete this block and the app still runs — secrets are then stored as
-      # plain JSON in your own database. Never rotate the generated value
-      # without migrating existing encrypted secrets first.
-      - key: JOB_SECRETS_KEY
-        generateValue: true
+      # No JOB_SECRETS_KEY on purpose: bot secrets are stored as plain JSON in
+      # your own database (see services/secrets_store.py). A generated key here
+      # is exactly what used to break recovery — rotate or lose it and every
+      # restarted bot came back without its BOT_TOKEN.
+      #
+      # Upgrading from a version that DID encrypt? Add JOB_SECRETS_KEY with the
+      # old value for ONE deploy: the startup migration rewrites those rows as
+      # plain text (GET /health -> bot_secrets_legacy_rows reaches 0), then
+      # delete the variable again.
 
       # ── Email (OTP) ──────────────────────────────────────
       - key: BREVO_API_KEY

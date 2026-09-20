@@ -739,8 +739,10 @@ _SCHEMA_TABLES = [
     )
     """,
     """
-    -- Dynamically managed runner services. Secrets are Fernet-encrypted; the
-    -- admin API never returns them after registration.
+    -- Dynamically managed runner services. The secret is stored as plain JSON
+    -- (see services/secrets_store.py); the admin API never returns it after
+    -- registration. The column keeps its old name so no schema migration is
+    -- needed for a change in how the value is encoded.
     CREATE TABLE IF NOT EXISTS runner_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         label TEXT NOT NULL,
@@ -755,7 +757,7 @@ _SCHEMA_TABLES = [
     """,
     """
     -- Immutable source revisions. Environment secrets are deliberately not
-    -- duplicated here; rollback reuses the job's current encrypted env.
+    -- duplicated here; rollback reuses the job's current stored env.
     CREATE TABLE IF NOT EXISTS bot_revisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER NOT NULL,

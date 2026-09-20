@@ -20,12 +20,11 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   tests/test_bot_dispatch_analytics.py \
   tests/test_job_url_routes.py \
   tests/test_bot_list_fast.py \
-  tests/test_secrets_rotation.py \
+  tests/test_secrets_plain.py \
   tests/test_job_recovery.py \
   tests/test_bot_ops_multirunner.py \
   tests/test_store.py \
-  tests/test_overview_analytics.py \
-  tests/test_secrets_optional.py
+  tests/test_overview_analytics.py
 
 # Script-style suites: they drive the bot's real dispatch path against their own
 # throwaway database and exit non-zero on failure, so they are run directly

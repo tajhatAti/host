@@ -13,7 +13,7 @@ This is a **Docker** web service (`runtime: docker` in `render.yaml`). Do **not*
 | Health check | `/health` |
 | Build Command | leave Render's Docker default (the image builds itself) |
 
-Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. `JOB_SECRETS_KEY` is optional — `render.yaml` generates one for you, and nothing refuses to work without it.
+Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. That is the whole list — bot secrets are stored as plain JSON in your own database, so there is no encryption key to generate or lose.
 
 The default `claude` branch of the old repo shipped a truncated `index.html` stub that never loaded `pro.js`/`miniapp.js`, so the boot overlay stayed on **“Securing your session…”** forever. This copy uses the full shell and hides that splash after 2.5s even if JS fails.
 
@@ -62,7 +62,7 @@ Full details in `STORE.md`.
 
 - Raw BotFather tokens are never returned in bot/admin metadata.
 - Secret-looking environment values are write-only in owner APIs.
-- `JOB_SECRETS_KEY` (optional) encrypts bot environments at rest with Fernet. Unset, the same values are stored as plain JSON and everything still works — see `services/secrets_store.py` for when the extra layer is worth it (multi-tenant installs holding other people's bot tokens) and when it is not (your own site, your own tokens).
+- Bot environments (`BOT_TOKEN`, API keys) are stored as plain JSON in your own database. They are still masked in every API response and every log line. An older version Fernet-encrypted them with `JOB_SECRETS_KEY`; those rows are still readable and are rewritten as plain text on the first startup — see `services/secrets_store.py` for why a key that can be lost was worse than no key.
 - A keyed token fingerprint prevents the same Telegram token from being deployed twice on CodeNest.
 - Verification proofs are authenticated, expire after 15 minutes, and are consumed after creation.
 - Admin routes are 404-stealth for non-admin callers.
@@ -102,13 +102,11 @@ RUNNER_MODE=embedded \
 .venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-Optional — encrypt local bot secrets at rest with a stable key:
+No encryption key is needed. If you are upgrading from a version that set `JOB_SECRETS_KEY`, keep the old value for **one** boot so the startup migration can rewrite the `enc:v1:` rows as plain text, then delete it:
 
 ```bash
-export JOB_SECRETS_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+curl -s https://your-service/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["bot_secrets_legacy_rows"])'   # 0 = done
 ```
-
-Skip it and secrets are stored as plain JSON; no endpoint requires the key. If you do set it, do not rotate or lose it while encrypted bot environments exist.
 
 ## Adding runner capacity
 
@@ -120,7 +118,7 @@ Admins can add runners from **Admin → Runners → Add runner** without editing
 4. Deploy the Render service.
 5. Paste its public URL and the same secret into CodeNest; **Test & add runner** verifies health and authentication before enabling placement.
 
-Runner credentials are encrypted with `JOB_SECRETS_KEY` and never returned by the API. **Drain** removes a runner from new-job placement while keeping existing assigned jobs addressable. Deletion is blocked until no deployed jobs remain. When the first remote runner is added, already-running embedded jobs are explicitly pinned to the embedded engine while new bots use the remote pool. Environment-configured runners continue to work beside database-managed runners.
+Runner credentials are stored in your database and never returned by the API. **Drain** removes a runner from new-job placement while keeping existing assigned jobs addressable. Deletion is blocked until no deployed jobs remain. When the first remote runner is added, already-running embedded jobs are explicitly pinned to the embedded engine while new bots use the remote pool. Environment-configured runners continue to work beside database-managed runners.
 
 ## Production topology
 
@@ -142,7 +140,7 @@ Required/important environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Durable PostgreSQL database |
-| `JOB_SECRETS_KEY` | Optional: encrypt hosted-bot environment secrets |
+| `JOB_SECRETS_KEY` | Only to unlock `enc:v1:` rows from an older version; then delete |
 | `ADMIN_EMAILS` | Comma-separated platform owners |
 | `RUNNER_SERVICE_URL` | Remote execution service |
 | `RUNNER_SERVICE_SECRET` | Shared main-site/runner credential |
@@ -153,11 +151,11 @@ Required/important environment variables:
 | `SENDER_EMAIL` | Verified email sender |
 | `CORS_ALLOWED_ORIGINS` | Optional comma-separated trusted external origins |
 
-`render.yaml` generates `JOB_SECRETS_KEY`; configure the remaining secret values in Render.
+`render.yaml` needs no encryption key; configure the remaining secret values in Render.
 
 ## Safe deployments and rollback
 
-Every successful creation/update is stored as an immutable source revision. An update remains a `building` candidate until the runner accepts it; a rejected candidate is marked `failed` and never replaces the last healthy source. The Versions tab lists status/error history and can restore any healthy revision. Rollback reuses the current encrypted environment secrets and preserves the bot workspace.
+Every successful creation/update is stored as an immutable source revision. An update remains a `building` candidate until the runner accepts it; a rejected candidate is marked `failed` and never replaces the last healthy source. The Versions tab lists status/error history and can restore any healthy revision. Rollback reuses the stored environment secrets and preserves the bot workspace.
 
 ## Bot health
 

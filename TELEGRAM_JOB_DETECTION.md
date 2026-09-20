@@ -17,7 +17,7 @@ Supported framework signals include aiogram, python-telegram-bot, pyTelegramBotA
 
 After analysis, the owner pastes a BotFather token. The server asks Telegram `getMe`, then returns the verified `@username`, a clickable link, and a 15-minute single-use verification proof. The database stores only the token's SHA-256 digest in that proof—not the token.
 
-The browser submits the token as `BOT_TOKEN` together with the proof. The server checks that the authenticated user, proof, token digest, and expiry all match. The proof is consumed only after successful bot creation. The environment is encrypted at rest with `JOB_SECRETS_KEY`, and owner APIs return secret-looking values as write-only masks.
+The browser submits the token as `BOT_TOKEN` together with the proof. The server checks that the authenticated user, proof, token digest, and expiry all match. The proof is consumed only after successful bot creation. The environment is stored in the site's own database as plain JSON, and owner APIs return secret-looking values as write-only masks.
 
 A keyed token fingerprint is retained separately from the encrypted value. CodeNest rejects a second deployed bot using the same BotFather token, preventing the common Telegram `409 terminated by other getUpdates request` conflict inside the platform.
 

@@ -65,14 +65,18 @@ async def _self_ping_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    # Encrypt any pre-existing plaintext bot environments before serving user
-    # traffic. Local SQLite remains zero-config; production health reports a
-    # missing key explicitly.
+    # Rewrite any pre-change `enc:v1:` env blobs as plain JSON BEFORE serving
+    # traffic (and before bot recovery below reads them). After one successful
+    # boot there is no ciphertext left, so a lost or rotated JOB_SECRETS_KEY can
+    # never again be the reason a restarted bot comes back without its token.
     try:
         from services import secrets_store
-        secrets_store.migrate_job_envs()
+        result = secrets_store.migrate_job_envs()
+        if result.get("unreadable"):
+            logger.error("%d env blob(s) could not be decrypted — those bots need "
+                         "their secrets re-entered", result["unreadable"])
     except Exception as exc:
-        logger.error("Bot secret migration failed: %s", exc)
+        logger.error("Secret storage migration failed: %s", exc)
     try:
         from services import retention
         retention.cleanup()
@@ -85,6 +89,11 @@ async def startup_event():
     try:
         from services import job_recovery
         asyncio.create_task(job_recovery.recover_background())
+        # …and then KEEP doing it. The pass above only covers a restart of THIS
+        # service; when the RUNNER redeploys or wakes on its own, nothing else
+        # notices that every 24/7 bot just vanished. The reconciler re-checks on
+        # an interval, so a runner restart repairs itself with nobody involved.
+        job_recovery.start_reconciler()
     except Exception as exc:
         logger.warning("Bot recovery scheduler failed: %s", exc)
     # Telegram server-alive bot — starts automatically if TELEGRAM_PING_BOT_TOKEN is set
@@ -491,7 +500,12 @@ def health():
         "status": "ok",
         "database": DIALECT,
         "runner": "embedded" if runner_client.embedded_mode() else "remote",
-        "bot_secrets_encrypted": secrets_store.configured(),
+        # Bot env vars live as plain JSON in your own database (see
+        # services/secrets_store.py for why). `legacy_rows` is the only number
+        # worth watching: it is how many rows are STILL in the old encrypted
+        # form, and it should be 0 after the first boot.
+        "bot_secrets_storage": "plain-text",
+        "bot_secrets_legacy_rows": secrets_store.legacy_rows(),
         "production_isolation": "unsafe-embedded" if runner_client.embedded_mode() else "remote-runner",
         "ping_bot": "running" if bool(os.getenv("BOT_TOKEN", "").strip()
                                        or os.getenv("TELEGRAM_PING_BOT_TOKEN", "").strip()) else "not configured",

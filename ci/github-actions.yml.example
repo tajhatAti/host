@@ -19,6 +19,8 @@ jobs:
       PYTHONPATH: .
       DATA_DIR: /tmp/codenest-ci-data
       DB_PATH: /tmp/codenest-ci-db/test.db
+      # Only used by tests that build a legacy `enc:v1:` row and prove it is
+      # still readable; nothing is encrypted on the way in any more.
       JOB_SECRETS_KEY: ci-only-key-material
       TELEGRAM_PING_BOT_TOKEN: 123456:AAFakeBotTokenForTests
       TELEGRAM_BOT_USERNAME: MyCodeNestBot
@@ -51,5 +53,5 @@ jobs:
           test -f Dockerfile
           test -f runner/Dockerfile
           test -f render.yaml
-          grep -q 'JOB_SECRETS_KEY' render.yaml
+          grep -q 'DATABASE_URL' render.yaml
           grep -q 'RUNNER_SERVICE_URL' README.md

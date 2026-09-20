@@ -180,13 +180,10 @@ def admin_runner_secret(authorization: Optional[str] = Header(None)):
 def admin_add_runner(payload: AdminRunnerIn,
                      authorization: Optional[str] = Header(None)):
     admin, _ = require_admin(authorization)
-    # JOB_SECRETS_KEY used to be a HARD gate here: without it this endpoint
-    # answered 409 "Configure JOB_SECRETS_KEY…", which blocked a working
-    # single-owner install from adding its own runner until a second env var
-    # was generated and set. secrets_store.pack_env() already falls back to
-    # plain JSON when no key exists, and unpack_env() reads either form, so the
-    # key is an OPTIONAL extra layer (it protects a dumped/backed-up database),
-    # not a precondition. Render generates it for free anyway — see render.yaml.
+    # Secrets are stored as plain JSON in your own database (see
+    # services/secrets_store.py), so there is no key to configure and nothing to
+    # refuse: this endpoint used to answer 409 "Configure JOB_SECRETS_KEY…" and
+    # blocked a working single-owner install from adding its own runner.
     label = (payload.label or "").strip()[:60] or "Runner"
     url = (payload.url or "").strip().rstrip("/")
     secret = (payload.secret or "").strip()
@@ -434,7 +431,11 @@ def admin_overview_route(authorization: Optional[str] = Header(None)):
             "active_users": active_users,
             "active_window_min": ACTIVE_WINDOW_MIN,
             "telegram_linked": tg_linked,
-            "bot_secrets_encrypted": secrets_store.configured(),
+            # Plain JSON in your own database — see services/secrets_store.py.
+            # The count is what matters: rows still in the old `enc:v1:` form,
+            # which should reach 0 after the first boot and stay there.
+            "bot_secrets_storage": "plain-text",
+            "bot_secrets_legacy_rows": secrets_store.legacy_rows(),
             "runner_isolation": "embedded" if runner_client.embedded_mode() else "remote",
         }
     finally:

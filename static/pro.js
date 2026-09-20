@@ -756,7 +756,7 @@ async function _demoApi(path, method = "GET", body = null) {
   if (clean.startsWith("/admin/")) {
     const ov = {
       users: 128, verified: 111, suspended: 2, jobs_deployed: _demo.jobs.length,
-      telegram_linked: 12, bot_secrets_encrypted: true, runner_isolation: "embedded",
+      telegram_linked: 12, bot_secrets_storage: "plain-text", bot_secrets_legacy_rows: 0, runner_isolation: "embedded",
       mem_safe_mb: 512, mem_used_mb: 37, mem_pct: 8, mem_total_mb: 512, runner_running: _demo.jobs.filter(j => j.status === "running").length,
       signups_daily: [], workers: [], workers_online: 0,
     };
@@ -7361,7 +7361,12 @@ function renderAdminStats(ov) {
     chip("suspended", ov.suspended ?? 0, ov.suspended ? "warn" : "") +
     chip("apps live", ov.jobs_deployed ?? 0) +
     chip("on telegram", ov.telegram_linked ?? 0) +
-    chip("bot secrets", ov.bot_secrets_encrypted ? "encrypted" : "NOT ENCRYPTED", ov.bot_secrets_encrypted ? "" : "warn") +
+    // Secrets are stored as plain JSON in the owner's own database, so this is
+    // a fact, not a warning: the only thing worth flagging is rows still in the
+    // old encrypted form, which a startup migration rewrites to 0.
+    chip("bot secrets", ov.bot_secrets_legacy_rows
+        ? `${ov.bot_secrets_legacy_rows} old row(s) still encrypted`
+        : "plain text", ov.bot_secrets_legacy_rows ? "warn" : "") +
     chip("runner", ov.runner_isolation === "remote" ? "isolated service" : "embedded", ov.runner_isolation === "remote" ? "" : "warn") +
     chip("runner memory used", ov.mem_safe_mb != null
         ? `${Math.round(ov.mem_used_mb ?? 0)}MB used`
