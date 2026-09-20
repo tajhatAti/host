@@ -64,15 +64,20 @@ services:
       # ── Auth / admin ─────────────────────────────────────
       - key: ADMIN_EMAILS        # comma-separated owner emails → auto-granted admin
         sync: false
-      # No JOB_SECRETS_KEY on purpose: bot secrets are stored as plain JSON in
-      # your own database (see services/secrets_store.py). A generated key here
-      # is exactly what used to break recovery — rotate or lose it and every
-      # restarted bot came back without its BOT_TOKEN.
+      # Bot secrets are stored as plain JSON in your own database (see
+      # services/secrets_store.py), so NOTHING here needs a key any more — a
+      # generated one is exactly what used to break recovery: rotate or lose it
+      # and every restarted bot came back without its BOT_TOKEN.
       #
-      # Upgrading from a version that DID encrypt? Add JOB_SECRETS_KEY with the
-      # old value for ONE deploy: the startup migration rewrites those rows as
-      # plain text (GET /health -> bot_secrets_legacy_rows reaches 0), then
-      # delete the variable again.
+      # It is listed with sync:false for one reason only: an existing deployment
+      # already has rows an older version encrypted ("enc:v1:"), and the startup
+      # migration needs the old value ONCE to rewrite them as plain text.
+      # sync:false tells Render to leave whatever is already set alone, so
+      # applying this blueprint cannot delete the key before that migration has
+      # run. Check GET /health -> bot_secrets_legacy_rows: when it is 0, delete
+      # this block (and the variable) for good.
+      - key: JOB_SECRETS_KEY
+        sync: false
 
       # ── Email (OTP) ──────────────────────────────────────
       - key: BREVO_API_KEY
