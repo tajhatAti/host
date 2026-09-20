@@ -142,8 +142,11 @@ code আর latency লিক হতো।
   রেজাল্টের IP চেক। অর্থাৎ internal address-এ কোনো রিকোয়েস্টই যায় না।
 - রিডাইরেক্ট এখন হাতে ফলো হয় (`allow_redirects=False`), তাই পাবলিক URL থেকে
   internal address-এ রিডাইরেক্ট করলেও সেই hop-টা আটকে যায়।
-- ডিফল্ট টার্গেট আর হার্ডকোড করা অন্য কারো হোস্ট না — এখন `SITE_BASE`
-  (মানে নিজের সাইট), তারপর `PING_DEFAULT_TARGET`, শেষে `api.telegram.org`।
+- ডিফল্ট টার্গেট আর হার্ডকোড করা অন্য কারো হোস্ট না। অগ্রাধিকার: প্রথমে
+  `PING_DEFAULT_TARGET` (ওনার পছন্দ), না থাকলে `SITE_BASE_URL` / Render-এর
+  `RENDER_EXTERNAL_URL` (মানে নিজের সাইট), শেষে `api.telegram.org`।
+  অর্থাৎ **`PING_DEFAULT_TARGET` সেট করতেই হবে না** — খালি `/ping` নিজের সাইটই
+  মাপে। একই অগ্রাধিকার `bot/app.py`, `routes/ping.py` আর `samples/ping_bot.py`-তে।
 - এরর মেসেজ আর কাঁচা exception না: টাইমআউট / DNS / connection refused / TLS —
   প্রতিটার জন্য এক লাইনের মানুষের ভাষা। আগে ইউজার দেখত
   `❌ HTTPSConnectionPool(host='...', port=443): Read timed out.`
