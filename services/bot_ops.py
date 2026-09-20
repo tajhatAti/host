@@ -75,7 +75,11 @@ def _effective_job_limit(user_id: int) -> int:
 def _mem_limit_for(user_id: int):
     """None (runner's global MAX_MEM_MB default) unless /queen granted this
     user mem_unlimited=1, in which case 0 tells the runner to skip the
-    per-job RLIMIT entirely (see runner/app.py's mem_limit_mb)."""
+    per-job RLIMIT entirely (see runner/app.py's mem_limit_mb).
+
+    Public alias below: routes/runspace.py needs the SAME answer when a queen
+    deploys from the web editor, and a second copy of this rule is how the two
+    surfaces would drift apart."""
     conn = get_db_connection()
     try:
         row = conn.execute("SELECT mem_unlimited FROM users WHERE id = ?",
@@ -83,6 +87,47 @@ def _mem_limit_for(user_id: int):
     finally:
         conn.close()
     return 0 if (row and row["mem_unlimited"]) else None
+
+
+mem_limit_for = _mem_limit_for
+
+
+def reapply_mem_limit(user_id: int) -> int:
+    """Push the CURRENT /queen flag to this user's already-running bots.
+
+    WHY THIS EXISTS: the runner stores a job's RLIMIT when the job is created,
+    so granting or revoking 👑 changed only FUTURE deploys. The bot that was
+    being OOM-killed right now kept its old ceiling until its owner happened to
+    redeploy — which reads exactly like "/queen did nothing". One PATCH per
+    running job closes that: the runner re-spawns the process with the new
+    limit and the job's directory (database.db, session.json, data/) is
+    untouched, same as any in-place update.
+
+    Returns how many bots were re-limited. Best-effort: a bot on a runner that
+    is asleep is skipped, not an error — it picks the flag up on its next
+    deploy or cold start anyway.
+    """
+    limit = _mem_limit_for(user_id)
+    conn = get_db_connection()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, name, runner_job_id, worker_url FROM jobs "
+            "WHERE user_id = ? AND runner_job_id IS NOT NULL "
+            "AND desired_state != 'stopped'", (user_id,)).fetchall()]
+    finally:
+        conn.close()
+
+    done = 0
+    for row in rows:
+        try:
+            resp = runner_client._runner_http(
+                "PATCH", f"/internal/jobs/{row['runner_job_id']}",
+                {"mem_limit_mb": limit}, worker=row.get("worker_url"))
+            if resp.status_code == 200:
+                done += 1
+        except Exception as exc:
+            logger.info("mem-limit reapply skipped for job %s: %s", row.get("id"), exc)
+    return done
 
 
 def slugify_name(raw: str) -> str:
@@ -683,7 +728,11 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
     except Exception as exc:
         logger.warning("bot update_from_zip: pre-update snapshot failed for job %s: %s", row["id"], exc)
 
-    patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64}
+    patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64,
+                  # Re-sync the /queen flag on every redeploy: the runner only
+                  # ever stored it at creation time, so a 👑 granted after the
+                  # first deploy never reached a job updated in place.
+                  "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch_body,
                                        worker=_worker_of(row))
     if resp.status_code == 200:
@@ -782,7 +831,11 @@ def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict
     except Exception as exc:
         logger.warning("bot update_code: pre-update snapshot failed for job %s: %s", row["id"], exc)
 
-    patch_body = {"name": row["name"], "language": lang, "code": code, "env": env}
+    patch_body = {"name": row["name"], "language": lang, "code": code, "env": env,
+                  # See update_from_zip: keeps the runner's RLIMIT in step with
+                  # the account's current 👑 flag instead of the one it was
+                  # first deployed with.
+                  "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch_body,
                                        worker=_worker_of(row))
     if resp.status_code == 200:

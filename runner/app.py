@@ -1353,6 +1353,11 @@ def _save_manifest(j: dict) -> None:
             "restart_enabled": bool(j.get("restart_enabled", True)),
             "started_at": j.get("started_at"),
             "pid": proc.pid if proc else None,
+            # A 👑 user's "no ceiling" must survive a runner restart too:
+            # without this the re-adopted job came back with no limit on
+            # record, and its first crash-restart silently applied the
+            # default cap again.
+            "mem_limit_mb": j.get("mem_limit_mb"),
         }
         with open(_manifest_path(j["id"]), "w") as fh:
             json.dump(data, fh)
@@ -1610,6 +1615,7 @@ def _recover_jobs() -> None:
                 "access_key": m.get("access_key") or secrets.token_urlsafe(12),
                 "repo_url": m.get("repo_url"),
                 "env": m.get("env") or {},
+                "mem_limit_mb": m.get("mem_limit_mb"),
                 "adopted": True,
             }
             j["log"].append("[system] re-adopted after a runner restart (process still alive)")
@@ -1666,6 +1672,11 @@ def _job_public(j: dict) -> dict:
         # Peak RSS seen for this run — a job can look small right now and still
         # have spiked; the peak is what explains an OOM after the fact.
         "peak_mem_mb": round(j.get("peak_mem_mb") or 0.0, 1),
+        # The ceiling this job was spawned under: a number in MB, or 0 for a
+        # 👑 (unlimited) user, or None for "runner default". Reporting it is
+        # what turns "did /queen actually take effect?" from a guess into a
+        # glance — the flag lives in the site's DB, the RLIMIT lives here.
+        "mem_limit_mb": j.get("mem_limit_mb"),
         "last_exit_reason": j.get("last_exit_reason"),
         "web_slug": j.get("web_slug"),
         "web_public": bool(j.get("web_public", True)),
@@ -2252,6 +2263,12 @@ class JobUpdateRequest(BaseModel):
     repo_url: Optional[str] = ""
     entry: Optional[str] = ""
     zip_b64: Optional[str] = ""
+    # Per-job RLIMIT override, same meaning as on create: None = keep whatever
+    # this job already has, 0 = no cap at all (an admin-granted 👑 user).
+    # Accepting it here is what lets the flag reach a bot that is ALREADY
+    # running — before this, the runner stored the limit once at creation and
+    # a later grant only took effect on the next cold start.
+    mem_limit_mb: Optional[int] = None
 
 
 @app.patch("/internal/jobs/{job_id}")
@@ -2279,6 +2296,13 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
     # serving the values it was originally created with.
     if req.env is not None:
         j["env"] = _clean_env(req.env)
+    # Same reasoning for the memory ceiling: _spawn() reads j["mem_limit_mb"]
+    # when it builds the preexec_fn, so updating the record before the respawn
+    # below is all it takes for a 👑 grant/revoke to apply to a live bot.
+    limit_changed = (req.mem_limit_mb is not None
+                     and req.mem_limit_mb != j.get("mem_limit_mb"))
+    if req.mem_limit_mb is not None:
+        j["mem_limit_mb"] = req.mem_limit_mb
     cfg = LANGS[j["lang"]]
 
     repo_url = (req.repo_url or "").strip()
@@ -2356,7 +2380,12 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
     if not j.get("port"):
         j["port"] = _alloc_port()
 
-    j["log"].append("[system] Code updated — restarting (data preserved)")
+    # A limit-only PATCH (services/bot_ops.reapply_mem_limit after /queen)
+    # carries no code, and saying "Code updated" for it would put a lie in the
+    # log the owner reads to work out why their bot just restarted.
+    note = ("Memory limit updated" if (limit_changed and req.code is None)
+            else "Code updated")
+    j["log"].append(f"[system] {note} — restarting (data preserved)")
     j["status"] = "starting"
     _spawn(j)
     logger.info("Job %s updated in place (dir: %s)", job_id, j.get("dir"))

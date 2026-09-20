@@ -64,9 +64,11 @@ services:
       # ── Auth / admin ─────────────────────────────────────
       - key: ADMIN_EMAILS        # comma-separated owner emails → auto-granted admin
         sync: false
-      # Encrypts hosted-bot BOT_TOKEN and other environment secrets at rest.
-      # Render generates a stable random value; never rotate without migrating
-      # existing encrypted secrets first.
+      # OPTIONAL, and free here: Render invents a stable random value, so
+      # hosted-bot BOT_TOKENs are encrypted at rest without you typing anything.
+      # Delete this block and the app still runs — secrets are then stored as
+      # plain JSON in your own database. Never rotate the generated value
+      # without migrating existing encrypted secrets first.
       - key: JOB_SECRETS_KEY
         generateValue: true
 

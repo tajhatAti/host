@@ -234,6 +234,23 @@ def _row_env(row) -> dict:
         return {}
 
 
+def _mem_limit_for(user_id: int):
+    """The 👑 (users.mem_unlimited) flag in the runner's terms: 0 means "no
+    per-job memory ceiling", None means "runner default".
+
+    bot_ops owns the rule and the Telegram bot already sent it on every
+    deploy — the web editor sent nothing at all, so a 👑 granted by an admin
+    applied to bots created from chat and quietly NOT to the same person's
+    bots created from the browser. One shared helper is the fix; two copies of
+    the rule is how they would drift apart again.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.mem_limit_for(user_id)
+    except Exception:
+        return None
+
+
 def _restore_then_restart(job_id: int, info: dict, worker: str = None) -> dict:
     """After a COLD start, push the last snapshot into the fresh workspace.
 
@@ -469,6 +486,7 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
         "code": canonical_code,
         "name": f"u{user['id']}-{name}",
         "env": env_map,
+        "mem_limit_mb": _mem_limit_for(user["id"]),
     }
     if repo_url:
         body["repo_url"] = repo_url
@@ -650,7 +668,8 @@ def rollback_bot_revision(job_id: int, revision_id: int,
         raise HTTPException(status_code=409, detail="Restart this bot once before rolling it back.")
     env = _row_env(row)
     body = {"name": row["name"], "language": rev["language"],
-            "code": rev["code"], "env": env}
+            "code": rev["code"], "env": env,
+            "mem_limit_mb": _mem_limit_for(user["id"])}
     try:
         resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", body,
                                           worker=_worker_of(row))
@@ -1126,6 +1145,7 @@ def restart_job(job_id: int, request: Request, authorization: Optional[str] = He
             # Replay saved env, otherwise a cold restart silently loses the
             # job's API keys / bot tokens and it crash-loops.
             "env": _row_env(row),
+            "mem_limit_mb": _mem_limit_for(user["id"]),
         })
         if resp.status_code == 201:
             info = resp.json()
@@ -1290,7 +1310,11 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
         logger.warning("pre-update snapshot failed for job %s: %s", job_id, exc)
 
     # Forward to runner for in-place update (same dir, same slug, same port).
-    patch_body = {"name": new_name, "language": new_lang, "code": new_code, "env": new_env}
+    patch_body = {"name": new_name, "language": new_lang, "code": new_code, "env": new_env,
+                  # Re-sync 👑 on every redeploy, so a grant made after this
+                  # bot's first deploy reaches the running process instead of
+                  # waiting for the next cold start.
+                  "mem_limit_mb": _mem_limit_for(user["id"])}
     if new_repo:
         patch_body["repo_url"] = new_repo
         if new_entry: patch_body["entry"] = new_entry
@@ -1306,7 +1330,8 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
     elif resp.status_code == 404:
         # Runner restarted — fall back to cold-start Restart path.
         create_body = {"language": new_lang, "code": new_code,
-                       "name": f"u{user['id']}-{new_name}", "env": new_env}
+                       "name": f"u{user['id']}-{new_name}", "env": new_env,
+                       "mem_limit_mb": _mem_limit_for(user["id"])}
         if new_repo:
             create_body["repo_url"] = new_repo
             if new_entry: create_body["entry"] = new_entry

@@ -101,6 +101,7 @@ def _admin_menu_kb():
          {"text": "🏪 Store queue", "callback_data": "admin:store"}],
         [{"text": "📜 Terms status", "callback_data": "admin:terms"},
          {"text": "🧑‍⚖️ Audit by admin", "callback_data": "admin:auditadmins"}],
+        [{"text": "👑 Queens", "callback_data": "admin:queens"}],
         [{"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
     ]}
 
@@ -115,10 +116,12 @@ def _admin_user_row_kb(target: dict):
     admin_lbl = "➖ Revoke admin" if target.get("is_admin") else "➕ Grant admin"
     zip_lbl = "🚫 Deny zip" if target.get("can_upload_zip") else "📦 Allow zip"
     susp_lbl = "✅ Unsuspend" if target.get("is_suspended") else "⛔ Suspend"
+    queen_lbl = "🚫 Remove 👑" if target.get("mem_unlimited") else "👑 Make queen"
     rows = [
         [{"text": admin_lbl, "callback_data": f"admin:togadmin:{uid}"},
          {"text": zip_lbl, "callback_data": f"admin:togzip:{uid}"}],
-        [{"text": susp_lbl, "callback_data": f"admin:togsuspend:{uid}"}],
+        [{"text": susp_lbl, "callback_data": f"admin:togsuspend:{uid}"},
+         {"text": queen_lbl, "callback_data": f"admin:togqueen:{uid}"}],
         [{"text": "⬅️ Users", "callback_data": "admin:users:0"}],
     ]
     return {"inline_keyboard": rows}
@@ -129,6 +132,7 @@ def _admin_user_detail_text(target: dict) -> str:
     if target.get("is_admin"): flags.append("admin")
     if target.get("can_upload_zip"): flags.append("zip-allowed")
     if target.get("is_suspended"): flags.append("suspended")
+    if target.get("mem_unlimited"): flags.append("👑 unlimited memory")
     tag = ", ".join(flags) or "no special flags"
     tid = target.get("telegram_id") or "not linked"
     seen = telegram_admin_ext.last_seen_for_user(target["id"])
@@ -157,6 +161,104 @@ def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
     telegram_link.set_zip_permission(target["id"], sub == "allowzip")
     verb = "can now upload" if sub == "allowzip" else "can no longer upload"
     _send(chat_id, f"✅ {target.get('username') or ref} {verb} .zip bundles.")
+
+
+def _safe_reapply_mem(user_id: int) -> int:
+    """Push a fresh 👑 decision to the bots that are running RIGHT NOW, and
+    report how many were restarted.
+
+    Best-effort on purpose: the flag is already written to users.mem_unlimited
+    before this is called, so a runner that is asleep or mid-deploy only means
+    "the next deploy applies it" — never "the grant failed". Raising here would
+    turn a cosmetic follow-up into a lost admin command."""
+    try:
+        return bot_ops.reapply_mem_limit(user_id)
+    except Exception:
+        logger.exception("Could not re-apply the memory limit for user %s", user_id)
+        return 0
+
+
+def _queens_text() -> str:
+    rows = telegram_link.list_queens()
+    if not rows:
+        return ("👑 *Queens* — nobody has unlimited memory yet.\n"
+                "Grant it with `/queen <username or telegram_id>`.")
+    lines = [f"👑 *Queens* ({len(rows)}) — no per-bot memory ceiling:"]
+    for r in rows:
+        extra = f" · jobs:`{r['job_limit_override']}`" if r.get("job_limit_override") else ""
+        lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                     f"tg:`{r.get('telegram_id') or '—'}`{extra}")
+    lines.append("\nRevoke with `/queen off <user>`.")
+    return "\n".join(lines)
+
+
+def cmd_queen(chat_id, telegram_user_id, arg):
+    """👑 /queen — the unlimited-memory flag, back by request.
+
+      /queen                 list everyone who has it
+      /queen <user>          grant  (users.mem_unlimited=1 → the runner is told
+                             mem_limit_mb=0, which skips the per-job RLIMIT_AS)
+      /queen off <user>      revoke (back to the runner's default cap)
+      /unqueen <user>        the same revoke, one word shorter
+
+    <user> is a CodeNest username, email or linked Telegram id — resolved by
+    telegram_link.resolve_user_ref, the same lookup /admin limit and /see use,
+    because an admin usually knows one of those and never the internal id.
+
+    Admin-only and SILENT for everyone else, the same posture as /admin and
+    /see: a non-admin gets nothing back, not even proof the command exists.
+
+    The flag alone used to be the whole feature, and that was the complaint:
+    the runner stores a job's RLIMIT when the job is created, so a bot that was
+    already being OOM-killed kept its old ceiling until someone redeployed it.
+    reapply_mem_limit() below closes that gap for bots that are running now.
+    """
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return  # silent — same as /admin
+
+    parts = (arg or "").split(None, 1)
+    if not parts:
+        _send(chat_id, _queens_text())
+        return
+
+    off = parts[0].lower() in ("off", "remove", "revoke", "no", "unqueen")
+    # "/queen off" on its own is a real thing an admin types mid-thought —
+    # indexing parts[1] unconditionally raised IndexError, which the dispatcher
+    # logged as an error and answered with nothing at all.
+    if off:
+        ref = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        ref = parts[0].strip()
+    if not ref:
+        _send(chat_id, "Usage:\n"
+                       "`/queen <username or telegram_id>` — grant 👑\n"
+                       "`/queen off <username or telegram_id>` — revoke it\n"
+                       "`/queen` — list everyone who has it")
+        return
+
+    target = telegram_link.resolve_user_ref(ref)
+    if not target:
+        _send(chat_id, f"No user found for “{ref}”.")
+        return
+
+    name = target.get("username") or ref
+    grant = not off
+    if bool(target.get("mem_unlimited")) == grant:
+        _send(chat_id, f"{name} is {'already 👑 — no memory ceiling' if grant else 'already on the default memory cap'}. "
+                       "Nothing changed.")
+        return
+
+    telegram_link.set_unlimited_permission(target["id"], grant)
+    reapplied = _safe_reapply_mem(target["id"])
+    text = (f"👑 {name} now has unlimited memory — no per-bot RAM ceiling."
+            if grant else
+            f"✅ {name} is back on the runner's default memory cap.")
+    if reapplied:
+        text += f"\n🔁 Restarted {reapplied} running bot(s) so it applies now — data kept."
+    else:
+        text += "\nAny running bot picks it up on its next deploy or restart."
+    _send(chat_id, text)
 
 
 def cmd_see(chat_id, telegram_user_id, arg):
@@ -240,6 +342,8 @@ def cmd_admin(chat_id, telegram_user_id, arg):
       /admin unban <telegram_id>
       /admin broadcast <message>
       /admin limit <username|telegram_id> <number|clear>
+      /admin queen <username|telegram_id> — 👑 unlimited memory (see /queen)
+      /admin unqueen <username|telegram_id> / /admin queens — list them
       /admin grant|revoke|allowzip|denyzip <username|telegram_id>
       /admin addrunner <label> <url> <secret>
       /admin deleterunner <id>
@@ -316,6 +420,18 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         telegram_admin_ext.set_job_limit_override(target["id"], int(val) if val else None)
         _send(chat_id, f"✅ Job limit for {target.get('username') or bits[0]} "
                        + (f"set to {val}." if val else "cleared (back to default)."))
+        return
+
+    if sub in ("queen", "unqueen", "queens"):
+        # One implementation, two spellings: /admin queen and the top-level
+        # /queen are the same command, so there is only one place that decides
+        # what the flag does or how it is reported.
+        if sub == "queens":
+            _send(chat_id, _queens_text())
+        elif sub == "queen":
+            cmd_queen(chat_id, telegram_user_id, rest)
+        else:
+            cmd_queen(chat_id, telegram_user_id, f"off {rest}".strip())
         return
 
     if sub == "addrunner":
@@ -458,6 +574,7 @@ def _admin_users_text(page: int) -> str:
         if r.get("is_admin"): flags.append("admin")
         if r.get("can_upload_zip"): flags.append("zip")
         if r.get("is_suspended"): flags.append("suspended")
+        if r.get("mem_unlimited"): flags.append("👑")
         tag = f" _{', '.join(flags)}_" if flags else ""
         tid = r.get("telegram_id")
         lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
@@ -476,6 +593,7 @@ def _admin_users_kb(page: int):
         if r.get("is_admin"): flags.append("A")
         if r.get("can_upload_zip"): flags.append("Z")
         if r.get("is_suspended"): flags.append("S")
+        if r.get("mem_unlimited"): flags.append("👑")
         label = r.get("username") or f"#{r['id']}"
         if flags:
             label += " [" + "".join(flags) + "]"
@@ -528,11 +646,12 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
         return
 
-    if action in ("togadmin", "togzip", "togsuspend"):
+    if action in ("togadmin", "togzip", "togsuspend", "togqueen"):
         target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
         if not target:
             _edit_or_send(chat_id, message_id, "That user no longer exists.")
             return
+        note = ""
         if action == "togadmin":
             if target.get("telegram_id") == SUPER_ADMIN_TG_ID and target.get("is_admin"):
                 _edit_or_send(chat_id, message_id, "Can't revoke the built-in super-admin.")
@@ -540,10 +659,47 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
                 telegram_link.set_admin(target["id"], not target.get("is_admin"))
         elif action == "togzip":
             telegram_link.set_zip_permission(target["id"], not target.get("can_upload_zip"))
-        else:
+        elif action == "togsuspend":
             telegram_link.set_suspended(target["id"], not target.get("is_suspended"))
+        else:
+            # 👑 — same decision /queen makes from typed text, and the same
+            # follow-up: the flag is written first, then pushed to whatever
+            # this user has running so it is not a "next deploy" surprise.
+            grant = not target.get("mem_unlimited")
+            telegram_link.set_unlimited_permission(target["id"], grant)
+            reapplied = _safe_reapply_mem(target["id"])
+            note = ("👑 Granted — no per-bot memory ceiling." if grant
+                    else "👑 Removed — back to the runner's default cap.")
+            note += (f" Restarted {reapplied} running bot(s)." if reapplied
+                     else " Running bots pick it up on their next deploy or restart.")
         target = telegram_link.get_user_by_id(target["id"])  # fresh flags
-        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        card = _admin_user_detail_text(target)
+        if note:
+            card += f"\n\n_{note}_"
+        _edit_or_send(chat_id, message_id, card, reply_markup=_admin_user_row_kb(target))
+        return
+
+    if action in ("queens", "unqueen"):
+        if action == "unqueen":
+            target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
+            if target:
+                telegram_link.set_unlimited_permission(target["id"], False)
+                _safe_reapply_mem(target["id"])
+        rows = telegram_link.list_queens()
+        kb = []
+        if not rows:
+            lines = ["👑 *Queens* — nobody has unlimited memory right now.",
+                     "Grant it from a user's card (👑 Make queen) or with "
+                     "`/queen <username or telegram_id>`."]
+        else:
+            lines = [f"👑 *Queens* ({len(rows)}) — no per-bot memory ceiling:"]
+            for r in rows:
+                who = r.get("username") or f"#{r['id']}"
+                lines.append(f"`{r['id']}` · {who} · tg:`{r.get('telegram_id') or '—'}`")
+                kb.append([{"text": f"🚫 Remove 👑 {who}"[:60],
+                            "callback_data": f"admin:unqueen:{r['id']}"}])
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "runners":
@@ -2234,6 +2390,12 @@ def handle_update(upd):
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
                 "/see": lambda: cmd_see(chat_id, msg.get("from", {}).get("id"), arg),
+                # 👑 admin-only, and NOT behind gated(): /queen has to work for
+                # an admin who never ran /link, exactly like /admin and /see.
+                # cmd_queen re-checks _is_admin itself and stays silent otherwise.
+                "/queen": lambda: cmd_queen(chat_id, msg.get("from", {}).get("id"), arg),
+                "/unqueen": lambda: cmd_queen(chat_id, msg.get("from", {}).get("id"),
+                                              f"off {arg}".strip()),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
             }

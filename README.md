@@ -13,7 +13,7 @@ This is a **Docker** web service (`runtime: docker` in `render.yaml`). Do **not*
 | Health check | `/health` |
 | Build Command | leave Render's Docker default (the image builds itself) |
 
-Set `DATABASE_URL`, `JOB_SECRETS_KEY`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard.
+Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. `JOB_SECRETS_KEY` is optional — `render.yaml` generates one for you, and nothing refuses to work without it.
 
 The default `claude` branch of the old repo shipped a truncated `index.html` stub that never loaded `pro.js`/`miniapp.js`, so the boot overlay stayed on **“Securing your session…”** forever. This copy uses the full shell and hides that splash after 2.5s even if JS fails.
 
@@ -62,7 +62,7 @@ Full details in `STORE.md`.
 
 - Raw BotFather tokens are never returned in bot/admin metadata.
 - Secret-looking environment values are write-only in owner APIs.
-- `JOB_SECRETS_KEY` encrypts bot environments at rest with Fernet.
+- `JOB_SECRETS_KEY` (optional) encrypts bot environments at rest with Fernet. Unset, the same values are stored as plain JSON and everything still works — see `services/secrets_store.py` for when the extra layer is worth it (multi-tenant installs holding other people's bot tokens) and when it is not (your own site, your own tokens).
 - A keyed token fingerprint prevents the same Telegram token from being deployed twice on CodeNest.
 - Verification proofs are authenticated, expire after 15 minutes, and are consumed after creation.
 - Admin routes are 404-stealth for non-admin callers.
@@ -102,13 +102,13 @@ RUNNER_MODE=embedded \
 .venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-For encrypted local bot secrets, also set a stable key:
+Optional — encrypt local bot secrets at rest with a stable key:
 
 ```bash
 export JOB_SECRETS_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 ```
 
-Do not rotate or lose this key while encrypted bot environments exist.
+Skip it and secrets are stored as plain JSON; no endpoint requires the key. If you do set it, do not rotate or lose it while encrypted bot environments exist.
 
 ## Adding runner capacity
 
@@ -142,7 +142,7 @@ Required/important environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Durable PostgreSQL database |
-| `JOB_SECRETS_KEY` | Encrypt hosted-bot environment secrets |
+| `JOB_SECRETS_KEY` | Optional: encrypt hosted-bot environment secrets |
 | `ADMIN_EMAILS` | Comma-separated platform owners |
 | `RUNNER_SERVICE_URL` | Remote execution service |
 | `RUNNER_SERVICE_SECRET` | Shared main-site/runner credential |

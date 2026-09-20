@@ -180,9 +180,13 @@ def admin_runner_secret(authorization: Optional[str] = Header(None)):
 def admin_add_runner(payload: AdminRunnerIn,
                      authorization: Optional[str] = Header(None)):
     admin, _ = require_admin(authorization)
-    if not secrets_store.configured():
-        raise HTTPException(status_code=409,
-                            detail="Configure JOB_SECRETS_KEY before storing runner credentials.")
+    # JOB_SECRETS_KEY used to be a HARD gate here: without it this endpoint
+    # answered 409 "Configure JOB_SECRETS_KEY…", which blocked a working
+    # single-owner install from adding its own runner until a second env var
+    # was generated and set. secrets_store.pack_env() already falls back to
+    # plain JSON when no key exists, and unpack_env() reads either form, so the
+    # key is an OPTIONAL extra layer (it protects a dumped/backed-up database),
+    # not a precondition. Render generates it for free anyway — see render.yaml.
     label = (payload.label or "").strip()[:60] or "Runner"
     url = (payload.url or "").strip().rstrip("/")
     secret = (payload.secret or "").strip()

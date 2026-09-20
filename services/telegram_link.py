@@ -321,11 +321,14 @@ def set_unlimited_permission(user_id: int, value: bool) -> None:
 
 
 def list_admin_overview(limit: int = 30) -> list:
-    """Recent users with their admin/zip flags, newest first — for /admin users."""
+    """Recent users with their admin/zip/queen flags, newest first — for
+    /admin users. mem_unlimited is selected here because the panel marks a
+    👑 next to the name; without it the list could not show the flag at all."""
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended, "
+            "mem_unlimited "
             "FROM users ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     finally:
@@ -370,7 +373,8 @@ def get_user_by_id(user_id: int) -> dict:
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended, "
+            "mem_unlimited "
             "FROM users WHERE id = ?", (user_id,)
         ).fetchone()
     finally:

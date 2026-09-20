@@ -1,4 +1,23 @@
-"""Encrypted-at-rest storage for hosted bot environment variables.
+"""Optional encrypted-at-rest storage for hosted bot environment variables.
+
+HOW MUCH OF THIS YOU NEED
+-------------------------
+Set `JOB_SECRETS_KEY` and values are Fernet-encrypted before they reach the
+database. Leave it unset and the SAME functions store plain JSON — nothing else
+in the app changes, no endpoint refuses to work, and `unpack_env()` reads both
+forms transparently (the `enc:v1:` prefix tells them apart).
+
+So this is a trade, not a requirement:
+
+  * Worth setting when the database holds OTHER people's bot tokens (a public
+    multi-tenant install). Then a leaked backup or a dumped table is a way to
+    hijack someone's Telegram bot, and the ciphertext is what stops that.
+  * Not worth thinking about on a single-owner install with one or two
+    operators, where the database is already behind the provider's own access
+    control and the tokens in it are yours.
+
+On Render it costs literally nothing: render.yaml sets `generateValue: true`, so
+the platform invents a stable key and you never type one.
 
 `JOB_SECRETS_KEY` is the primary key. Older deployments used
 `RUNNER_SERVICE_SECRET` as an implicit fallback; both are kept in the decrypt
@@ -93,7 +112,13 @@ def migrate_job_envs():
     RUNNER_SERVICE_SECRET, then is atomically encrypted with the new primary.
     """
     if not configured():
-        logger.warning("JOB_SECRETS_KEY is not configured; bot env secrets are not encrypted at rest")
+        # info, not warning, on purpose: JOB_SECRETS_KEY is OPTIONAL. Without it
+        # pack_env() writes plain JSON into jobs.env / runner_nodes and
+        # unpack_env() reads it straight back — everything works. A warning on
+        # every single boot trains the owner to ignore the log, which is worse
+        # than the thing it was flagging.
+        logger.info("JOB_SECRETS_KEY not set — bot env kept as plain JSON in the "
+                    "database (encryption at rest is optional)")
         return {"migrated": 0, "rewrapped": 0, "configured": False}
     from database import get_db_connection
     conn = get_db_connection()
