@@ -233,6 +233,10 @@ def _row_env(row, rescue: bool = True) -> dict:
     empty. Empty is what the Env tab would then show — and what a Save would
     then write, silently deleting every other variable the app had.
 
+    Also promotes a BOT_TOKEN found in the source file into the returned map
+    when Env has none — Telegram-board deploys often skip the Env tab. This is
+    in-memory only; the DB row is not rewritten.
+
     Pass rescue=False where this runs in a loop over many jobs (a list
     endpoint): the rescue is one HTTP call per broken row, and a list must not
     stall on a runner that is asleep.
@@ -240,16 +244,23 @@ def _row_env(row, rescue: bool = True) -> dict:
     try:
         raw = dict(row).get("env")
     except Exception:
-        return {}
-    values, readable = secrets_store.read_env(raw)
-    if readable or not rescue:
-        return values
+        values, readable = {}, True
+    else:
+        values, readable = secrets_store.read_env(raw)
+    if not readable and rescue:
+        try:
+            from services import env_rescue
+            got, _outcome = env_rescue.rescue_job_env(row)
+            if got:
+                values = got
+        except Exception:
+            pass
     try:
-        from services import env_rescue
-        got, _outcome = env_rescue.rescue_job_env(row)
-        return got or values
+        from services import bot_ops
+        values = bot_ops.ensure_bot_token_in_env(row, values)
     except Exception:
-        return values
+        pass
+    return values
 
 
 def _account_flags(user_id: int) -> dict:
@@ -660,7 +671,7 @@ def telegram_job_health(job_id: int, authorization: Optional[str] = Header(None)
     row = dict(_get_own_job(job_id, user))
     token = str(_row_env(row).get("BOT_TOKEN") or "").strip()
     if not token:
-        raise HTTPException(status_code=404, detail="This bot has no configured BOT_TOKEN.")
+        raise HTTPException(status_code=404, detail="No BOT_TOKEN in Env or source. Paste one in Env, or put BOT_TOKEN=... in the code.")
     health = telegram_detector.telegram_delivery_health(
         token, row.get("telegram_update_mode") or "unknown")
     health.update({"process_status": "offline", "runtime_conflict": False,

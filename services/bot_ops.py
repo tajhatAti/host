@@ -293,27 +293,31 @@ def _row_env(row, rescue: bool = True) -> dict:
     job, and both would otherwise act on an empty env: a start with no
     BOT_TOKEN, or a set_env that silently deletes every other variable the bot
     had. Pass rescue=False only for a read that must not touch the network.
+
+    A BOT_TOKEN found only in the source file is promoted into the returned
+    map (in-memory). Env tab is optional when the code already holds the token.
     """
     try:
         raw = dict(row).get("env")
     except Exception:
-        return {}
-    values, readable = secrets_store.read_env(raw)
-    if readable or not rescue:
-        return values
-    from services import env_rescue
-    got, outcome = env_rescue.rescue_job_env(row)
-    if got:
-        try:
-            # Keep the caller's row in sync with what was just written to the
-            # database — several callers read row["env"] again afterwards.
-            row["env"] = secrets_store.pack_env(got)
-        except Exception:
-            pass
-        return got
-    logger.error("job %s: stored variables could not be read and the runner had "
-                 "no copy to restore (outcome=%s)", dict(row).get("name"), outcome)
-    return {}
+        values, readable = {}, True
+    else:
+        values, readable = secrets_store.read_env(raw)
+    if not readable and rescue:
+        from services import env_rescue
+        got, outcome = env_rescue.rescue_job_env(row)
+        if got:
+            try:
+                row["env"] = secrets_store.pack_env(got)
+            except Exception:
+                pass
+            values = got
+        else:
+            logger.error(
+                "job %s: stored variables could not be read and the runner had "
+                "no copy to restore (outcome=%s)", dict(row).get("name"), outcome)
+    # Defined below; fine at call time. Avoids every caller forgetting.
+    return ensure_bot_token_in_env(row, values)
 
 
 def _url_slug(name) -> str:

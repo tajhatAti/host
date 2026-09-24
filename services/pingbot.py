@@ -2187,7 +2187,7 @@ _SLOW_COMMANDS = frozenset((
 # saying nothing useful costs a legitimate user one visit to /start, which
 # does explain the link step — but only to a chat that asked for help, not to
 # one probing for a deploy endpoint.
-UNKNOWN_REPLY = "🤔 Unknown command. Send /start to see what I can do."
+UNKNOWN_REPLY = "🤔 Unknown command. Send /start or /guide — or try /apps, /id, /help."
 
 
 def _require_link(chat_id):
@@ -4651,6 +4651,8 @@ def handle_update(upd):
                 # NOT gated: "what is my id?" is asked before an account is
                 # linked, and it is the number an admin needs to grant one.
                 "/id": lambda: cmd_id(chat_id, msg.get("from") or {}),
+                "/whoami": lambda: cmd_id(chat_id, msg.get("from")),
+                "/me": lambda: cmd_id(chat_id, msg.get("from")),
                 "/web": lambda: cmd_web(chat_id),
                 "/webapp": lambda: cmd_web(chat_id),
                 "/cancel": lambda: cmd_cancel_pending(chat_id),
