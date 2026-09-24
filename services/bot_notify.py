@@ -132,16 +132,28 @@ def check_once() -> dict:
             if status in _BAD and prev in _GOOD:
                 if not _cooled(rid, "down"):
                     continue
+                # Reasons the runner stamps into last_exit_reason. Keep the
+                # wording short and actionable: the owner should know WHETHER
+                # to restart, and WHAT to look at, without opening a dashboard.
                 why = {
-                    "oom": "it went over its memory limit",
+                    "oom": "it went over its memory limit (other apps were not touched)",
+                    "limit": "the host was full and this was the largest app — stopped so the runner itself stayed up",
                     "crash": "it exited with an error",
+                    "crash_loop": "it crash-looped and was stopped for good",
+                    "isolation": "the runner stopped it to protect every other app",
                     "manual": "it was stopped",
                     "exit": "it finished and exited",
+                    "workspace missing": "its files were gone on the runner",
                 }.get(reason, "it stopped running")
+                tip = {
+                    "oom": "Trim memory use, or ask an admin for a higher limit, then `/restart`.",
+                    "limit": "Wait a moment for free RAM, then `/restart` — or stop another app first.",
+                    "crash": "`/logs` shows the error; fix it, then `/restart`.",
+                    "crash_loop": "`/logs` has the repeating error. Fix the code before `/restart`.",
+                    "isolation": "`/logs` explains why. `/restart` when ready.",
+                }.get(reason, "`/logs` to see why · `/restart` to bring it back.")
                 _send(meta["telegram_id"],
-                      f"🔴 *{meta['name']}* stopped — {why}.\n\n"
-                      f"`/logs {meta['name']}` to see why · "
-                      f"`/restart {meta['name']}` to bring it back")
+                      f"🔴 *{meta['name']}* stopped — {why}.\n\n{tip}")
                 sent += 1
             elif status in _GOOD and prev in _BAD:
                 if not _cooled(rid, "up"):

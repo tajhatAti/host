@@ -503,9 +503,23 @@ def _admission() -> dict:
         "admit": projected <= MEM_SAFE_MB and running < MAX_BG_JOBS_HARD,
     }
 JOB_LOG_LINES = 2000                                # ring buffer per job (full history)
-JOB_RESTART_LIMIT = 3                               # auto-restart attempts
-JOB_RESTART_DELAY_S = 5
+JOB_RESTART_LIMIT = int(os.getenv("JOB_RESTART_LIMIT", "3"))  # auto-restart attempts
+JOB_RESTART_DELAY_S = int(os.getenv("JOB_RESTART_DELAY_S", "5"))
 JOB_PIP_TIMEOUT_S = int(os.getenv("JOB_PIP_TIMEOUT_S", "240"))  # pip install budget
+# How often the isolation loop samples every live job. A runaway that would
+# otherwise push the container into swap (and the host into killing the WHOLE
+# runner) is caught here and stopped alone, with a reason written into its log
+# and last_exit_reason — the user sees why, the other bots keep running.
+JOB_WATCH_INTERVAL_S = float(os.getenv("JOB_WATCH_INTERVAL_S", "4"))
+# Soft ceiling above the job's own RLIMIT: some languages (Node) allocate past
+# RLIMIT_AS without dying cleanly, and the kernel OOM killer then picks the
+# parent runner. Stopping the offender ourselves is the only way the other
+# jobs survive. 0 disables the soft check (RLIMIT still applies).
+JOB_SOFT_OVER_MB = int(os.getenv("JOB_SOFT_OVER_MB", "32"))
+# Crash-loop window: N non-zero exits inside this many seconds → stop for good
+# with reason "crash_loop", instead of thrashing the box forever.
+JOB_CRASH_WINDOW_S = float(os.getenv("JOB_CRASH_WINDOW_S", "120"))
+JOB_CRASH_LOOP_N = int(os.getenv("JOB_CRASH_LOOP_N", "4"))
 
 _jobs: dict = {}                                    # id -> job record
 _jobs_lock = threading.Lock()
@@ -2023,6 +2037,8 @@ def _job_public(j: dict) -> dict:
         "repo_commit": j.get("repo_commit"),
         "deps": list(j.get("deps") or []),
         "last_exit_reason": j.get("last_exit_reason"),
+        "last_exit_code": j.get("last_exit_code"),
+        "oom": bool(j.get("oom")),
         "web_slug": j.get("web_slug"),
         "web_public": bool(j.get("web_public", True)),
         # access_key only reaches the main site (this API is secret-guarded) —
@@ -2101,7 +2117,142 @@ def _kill_job_tree(j: dict) -> None:
         logger.warning("job %s pid %s did not exit after SIGKILL", j.get("id"), pid)
 
 
+def _stop_job_with_reason(j: dict, reason: str, message: str) -> None:
+    """Stop ONE job, write why, leave every other job alone.
+
+    This is the only path a limit / isolation kill should take. It never raises,
+    never touches sibling jobs, and always leaves a sentence in the owner's log
+    so "the bot vanished" has an answer.
+    """
+    try:
+        j["stop_requested"] = True
+        j["last_exit_reason"] = reason
+        if reason == "oom":
+            j["oom"] = True
+        try:
+            j["log"].append(f"[system] {message}")
+        except Exception:
+            pass
+        _kill_job_tree(j)
+        # supervisor will finalise status once the child exits; if the child is
+        # already gone, mark it here so the fleet doesn't keep saying "running".
+        proc = j.get("proc")
+        if not proc or proc.poll() is not None:
+            j["status"] = "stopped" if reason in ("manual", "limit", "isolation") else "crashed"
+            j["proc"] = None
+            _clear_manifest_pid(j)
+    except Exception as exc:                                       # noqa: BLE001
+        logger.warning("stop_with_reason failed for %s: %s", j.get("id"), exc)
+
+
+def _job_ceiling_mb(j: dict) -> Optional[int]:
+    """Effective soft ceiling in MB for the isolation loop, or None if unlimited."""
+    ml = j.get("mem_limit_mb")
+    if ml == 0:
+        return None                     # 👑 / explicit unlimited
+    if ml is None:
+        return MAX_MEM_MB + JOB_SOFT_OVER_MB if JOB_SOFT_OVER_MB else MAX_MEM_MB
+    return int(ml) + (JOB_SOFT_OVER_MB or 0)
+
+
+def _isolation_tick() -> dict:
+    """One pass of the isolation loop. Returns a small summary for tests/health.
+
+    Two threats, one answer:
+      * a single job whose RSS is past its ceiling (RLIMIT didn't catch it, or
+        the language allocated outside the address-space limit) — stop THAT job
+        with reason=oom before the kernel OOM-kills the runner process.
+      * the box itself past the admission safe line because of one offender —
+        stop the fattest non-unlimited job rather than let the host shoot the
+        whole container.
+    Either way the other bots keep running and the owner gets a reason.
+    """
+    stopped = []
+    try:
+        with _jobs_lock:
+            items = list(_jobs.values())
+    except Exception:
+        return {"checked": 0, "stopped": []}
+
+    # Per-job soft ceiling.
+    for j in items:
+        try:
+            proc = j.get("proc")
+            if not proc or proc.poll() is not None:
+                continue
+            if j.get("stop_requested"):
+                continue
+            stats = _proc_stats(proc) or {}
+            _track_peak(j, stats)
+            used = float(stats.get("mem_mb") or 0.0)
+            ceiling = _job_ceiling_mb(j)
+            if ceiling is not None and used > ceiling:
+                _stop_job_with_reason(
+                    j, "oom",
+                    f"Stopped: using {used:.0f}MB, over its "
+                    f"{ceiling}MB ceiling. Other apps were not touched. "
+                    f"`/logs` · `/restart` after you trim memory use."
+                )
+                stopped.append({"id": j.get("id"), "reason": "oom", "mem_mb": used})
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("isolation per-job check failed: %s", exc)
+
+    # Box-level pressure: if committed RSS is past the safe line, cull the
+    # fattest job that still has a ceiling (never a 👑 unlimited one first —
+    # admission already refused new work; this is the emergency brake).
+    try:
+        used_total = _used_mem_mb()
+        if used_total > MEM_SAFE_MB:
+            candidates = []
+            for j in items:
+                proc = j.get("proc")
+                if not proc or proc.poll() is not None or j.get("stop_requested"):
+                    continue
+                if j.get("mem_limit_mb") == 0:
+                    continue          # unlimited: last resort only
+                mb = float((j.get("peak_mem_mb") or 0.0)
+                           or (_proc_stats(proc) or {}).get("mem_mb") or 0.0)
+                candidates.append((mb, j))
+            if not candidates:
+                # Only unlimited jobs left and the box is still full — pick the
+                # fattest anyway. Better one queen bot stops than the runner dies.
+                for j in items:
+                    proc = j.get("proc")
+                    if not proc or proc.poll() is not None or j.get("stop_requested"):
+                        continue
+                    mb = float((j.get("peak_mem_mb") or 0.0)
+                               or (_proc_stats(proc) or {}).get("mem_mb") or 0.0)
+                    candidates.append((mb, j))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                mb, j = candidates[0]
+                if not any(s.get("id") == j.get("id") for s in stopped):
+                    _stop_job_with_reason(
+                        j, "limit",
+                        f"Stopped to protect the runner: this host is at "
+                        f"{used_total:.0f}MB / {MEM_SAFE_MB}MB safe. "
+                        f"This app was using ~{mb:.0f}MB (largest). "
+                        f"Other apps keep running. `/restart` when there's room."
+                    )
+                    stopped.append({"id": j.get("id"), "reason": "limit", "mem_mb": mb})
+    except Exception as exc:                                       # noqa: BLE001
+        logger.warning("isolation box check failed: %s", exc)
+
+    return {"checked": len(items), "stopped": stopped}
+
+
+def _isolation_loop():
+    """Background loop. Exceptions are swallowed so the loop never dies."""
+    while True:
+        try:
+            _isolation_tick()
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("isolation loop tick failed: %s", exc)
+        time.sleep(max(1.0, JOB_WATCH_INTERVAL_S))
+
+
 def _spawn(j: dict) -> None:
+
     """(Re)start the job process + reader thread + supervisor thread."""
     if not os.path.isdir(j.get("dir") or "") or not os.path.isfile(j.get("file") or ""):
         # The workspace is gone: the job was deleted, or the container was
@@ -2164,59 +2315,175 @@ def _spawn(j: dict) -> None:
         threading.Thread(target=_web_watch, args=(j, proc, j["port"]), daemon=True).start()
 
     def _reader():
+        # Never let a stdout-read failure take down the runner process. A dead
+        # pipe is the child's problem; the rest of the fleet keeps running.
         try:
             for line in proc.stdout:
-                j["log"].append(line.rstrip("\n"))
-        except Exception:
-            pass
+                try:
+                    j["log"].append(line.rstrip("\n"))
+                except Exception:
+                    pass
+        except Exception as exc:                                   # noqa: BLE001
+            try:
+                j["log"].append(f"[system] log reader stopped: {type(exc).__name__}")
+            except Exception:
+                pass
 
     def _supervisor():
-        rc = proc.wait()
-        # Explain an OOM kill in the LOG only. Nothing is announced up front —
-        # users may attempt whatever they like — but a process that vanishes
-        # with no reason reads as "the platform is broken", so anyone who opens
-        # the log finds a plain sentence instead of a mystery.
-        #
-        # RLIMIT_AS makes the allocation fail rather than signalling, so Python
-        # usually dies with MemoryError (rc=1) and CPython prints the traceback
-        # to stderr, which is already in this log. A kernel OOM kill arrives as
-        # SIGKILL, i.e. rc == -9.
-        oom = False
-        if rc == -9:
-            oom = True
-        elif rc not in (0, None):
-            try:
-                tail = "\n".join(list(j["log"])[-25:])
-                oom = ("MemoryError" in tail
-                       or "Cannot allocate memory" in tail
-                       or "OutOfMemoryError" in tail
-                       or "JavaScript heap out of memory" in tail)
-            except Exception:
-                oom = False
-        j["last_exit_reason"] = ("oom" if oom
-                                 else "manual" if j.get("stop_requested")
-                                 else "crash" if rc not in (0, None) else "exit")
-        if oom:
-            j["log"].append(
-                f"[system] Process stopped: exceeded memory limit "
-                f"({MAX_MEM_MB}MB)."
-            )
-            j["oom"] = True
-        j["log"].append(f"[system] exited with code {rc}")
-        if j.get("stop_requested"):
-            j["status"] = "stopped"
-            return
-        if j["restart_enabled"] and j["restarts"] < JOB_RESTART_LIMIT:
-            j["restarts"] += 1
-            j["log"].append(f"[system] restarting in {JOB_RESTART_DELAY_S}s (attempt {j['restarts']}/{JOB_RESTART_LIMIT})")
-            time.sleep(JOB_RESTART_DELAY_S)
-            if not j.get("stop_requested"):
-                _spawn(j)
-        else:
-            j["status"] = "crashed" if rc != 0 else "stopped"
+        """Watch ONE child. Any exception here must die here — never the runner.
 
-    threading.Thread(target=_reader, daemon=True).start()
-    threading.Thread(target=_supervisor, daemon=True).start()
+        The whole point of isolation: one job that OOMs, crash-loops, or raises
+        inside this thread used to be able to leave the runner in a bad state
+        (or, with a kernel OOM, dead). Everything that can go wrong with THIS
+        job is caught, written into its own log as a reason the owner can read,
+        and the job is marked stopped/crashed. Sibling jobs are untouched.
+        """
+        try:
+            rc = proc.wait()
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("supervisor wait failed for %s: %s", j.get("id"), exc)
+            try:
+                j["log"].append(f"[system] supervisor lost the process: {type(exc).__name__}")
+                j["last_exit_reason"] = "crash"
+                j["status"] = "crashed"
+                j["proc"] = None
+                _clear_manifest_pid(j)
+            except Exception:
+                pass
+            return
+
+        try:
+            # A stop we asked for (the isolation loop, an admin Stop, a soft
+            # over-limit kill) already stamped last_exit_reason. Keep it.
+            preset = j.get("last_exit_reason") if j.get("stop_requested") else None
+
+            # RLIMIT_AS makes the allocation fail rather than signalling, so
+            # Python usually dies with MemoryError (rc=1) and the traceback is
+            # already in this log. A kernel OOM kill arrives as SIGKILL (rc==-9).
+            # The isolation loop may also have killed us for soft-over — that
+            # path sets last_exit_reason="oom" before signalling.
+            oom = bool(j.get("oom")) or preset == "oom"
+            if not oom and rc == -9:
+                oom = True
+            elif not oom and rc not in (0, None):
+                try:
+                    tail = "\n".join(list(j["log"])[-40:])
+                    oom = ("MemoryError" in tail
+                           or "Cannot allocate memory" in tail
+                           or "OutOfMemoryError" in tail
+                           or "JavaScript heap out of memory" in tail
+                           or "std::bad_alloc" in tail)
+                except Exception:
+                    oom = False
+
+            if preset:
+                reason = preset
+            elif j.get("stop_requested"):
+                reason = "manual"
+            elif oom:
+                reason = "oom"
+            elif rc not in (0, None):
+                reason = "crash"
+            else:
+                reason = "exit"
+            j["last_exit_reason"] = reason
+            j["last_exit_code"] = rc
+            j["oom"] = bool(oom)
+
+            # Crash-loop detector: too many non-zero exits in a short window
+            # means the app is broken, not unlucky. Stop for good with a reason
+            # the owner can act on, instead of thrashing the box forever.
+            if reason in ("crash", "oom") and not j.get("stop_requested"):
+                now = time.time()
+                hist = list(j.get("crash_times") or [])
+                hist = [t for t in hist if now - t < JOB_CRASH_WINDOW_S]
+                hist.append(now)
+                j["crash_times"] = hist
+                if len(hist) >= JOB_CRASH_LOOP_N:
+                    reason = "crash_loop"
+                    j["last_exit_reason"] = reason
+                    j["stop_requested"] = True
+                    j["log"].append(
+                        f"[system] Stopped: crashed {len(hist)} times in "
+                        f"{int(JOB_CRASH_WINDOW_S)}s. Fix the code "
+                        f"(`/logs` shows why) then `/restart`."
+                    )
+
+            limit_mb = j.get("mem_limit_mb")
+            if limit_mb is None:
+                limit_mb = MAX_MEM_MB
+            if oom and reason == "oom":
+                j["log"].append(
+                    f"[system] Process stopped: exceeded memory limit "
+                    f"({limit_mb or 'unlimited'}MB"
+                    f"{'' if limit_mb else ' — host protected the other apps'})."
+                )
+            j["log"].append(f"[system] exited with code {rc}"
+                            + (f" · reason={reason}" if reason else ""))
+
+            if j.get("stop_requested") or reason in ("manual", "limit", "crash_loop",
+                                                       "isolation"):
+                j["status"] = "stopped" if reason in ("manual", "limit", "isolation") \
+                              else "crashed"
+                j["proc"] = None
+                _clear_manifest_pid(j)
+                return
+
+            if j.get("restart_enabled") and j.get("restarts", 0) < JOB_RESTART_LIMIT \
+                    and reason not in ("oom",):  # OOM: don't loop the same death
+                j["restarts"] = int(j.get("restarts") or 0) + 1
+                j["log"].append(
+                    f"[system] restarting in {JOB_RESTART_DELAY_S}s "
+                    f"(attempt {j['restarts']}/{JOB_RESTART_LIMIT})"
+                )
+                time.sleep(JOB_RESTART_DELAY_S)
+                if not j.get("stop_requested"):
+                    try:
+                        _spawn(j)
+                    except Exception as exc:                       # noqa: BLE001
+                        # A spawn failure must NEVER escape this thread — that
+                        # is exactly how one bad job used to take the runner.
+                        logger.exception("respawn failed for %s", j.get("id"))
+                        j["log"].append(
+                            f"[system] could not restart: {type(exc).__name__}: "
+                            f"{str(exc)[:160]}"
+                        )
+                        j["last_exit_reason"] = "crash"
+                        j["status"] = "crashed"
+                        j["proc"] = None
+                        _clear_manifest_pid(j)
+                return
+
+            # Out of restarts, or an OOM we refuse to loop: stop with a reason.
+            if reason == "oom":
+                j["log"].append(
+                    "[system] Not restarting after a memory kill — fix the leak "
+                    "or ask for a higher limit, then /restart."
+                )
+            elif j.get("restarts", 0) >= JOB_RESTART_LIMIT:
+                j["last_exit_reason"] = "crash_loop"
+                j["log"].append(
+                    f"[system] Stopped after {JOB_RESTART_LIMIT} restarts. "
+                    f"`/logs` has the error; `/restart` tries again once you fix it."
+                )
+            j["status"] = "crashed" if rc not in (0, None) else "stopped"
+            j["proc"] = None
+            _clear_manifest_pid(j)
+        except Exception as exc:                                   # noqa: BLE001
+            logger.exception("supervisor crashed for job %s: %s", j.get("id"), exc)
+            try:
+                j["log"].append(
+                    f"[system] internal supervisor error ({type(exc).__name__}) "
+                    f"— job marked crashed; the runner itself is fine."
+                )
+                j["last_exit_reason"] = j.get("last_exit_reason") or "crash"
+                j["status"] = "crashed"
+                j["proc"] = None
+            except Exception:
+                pass
+
+    threading.Thread(target=_reader, daemon=True, name=f"job-read-{j['id'][:8]}").start()
+    threading.Thread(target=_supervisor, daemon=True, name=f"job-sup-{j['id'][:8]}").start()
 
 
 @app.post("/internal/jobs", status_code=201)
@@ -3266,8 +3533,25 @@ async def _ws_inbound_loop(websocket, sess):
 
 @app.on_event("startup")
 def _startup_recover_jobs():
-    """Re-adopt jobs whose processes outlived the previous runner instance."""
-    _recover_jobs()
+    """Re-adopt jobs whose processes outlived the previous runner instance.
+
+    Also starts the isolation loop: one runaway job must never be able to take
+    the whole runner (and every other bot on it) down with it.
+    """
+    try:
+        _recover_jobs()
+    except Exception as exc:                                       # noqa: BLE001
+        # Recovery itself must not prevent the runner from serving. A partial
+        # recovery is better than a boot loop.
+        logger.exception("boot recovery failed: %s", exc)
+    try:
+        t = threading.Thread(target=_isolation_loop, daemon=True, name="job-isolation")
+        t.start()
+        logger.info("job isolation loop every %ss (soft over=%sMB, crash window=%ss/%s)",
+                    JOB_WATCH_INTERVAL_S, JOB_SOFT_OVER_MB,
+                    int(JOB_CRASH_WINDOW_S), JOB_CRASH_LOOP_N)
+    except Exception as exc:                                       # noqa: BLE001
+        logger.warning("could not start isolation loop: %s", exc)
 
 
 if __name__ == "__main__":

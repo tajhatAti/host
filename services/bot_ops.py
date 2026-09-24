@@ -236,6 +236,8 @@ def list_apps(user_id: int) -> list:
         r["uptime_s"] = info.get("uptime_s")
         r["restarts"] = info.get("restarts")
         r["last_exit_reason"] = info.get("last_exit_reason")
+        r["last_exit_code"] = info.get("last_exit_code")
+        r["oom"] = info.get("oom")
     return rows
 
 

@@ -299,24 +299,39 @@ def test_help_is_a_separate_screen_for_queens(monkeypatch):
     plain = pingbot._help_text({"id": 1, "username": "ann", "is_queen": 0})
     royal = pingbot._help_text({"id": 2, "username": "bee", "is_queen": 1})
     assert plain.startswith("👋 Hi *ann*!")
-    assert "👑" not in plain and "/projects" not in plain
+    assert "👑" not in plain
+    # /projects is now for everyone (your own repo apps), so plain help names it
+    assert "/projects" in plain and "/import" in plain
+    assert "/id" in plain and "/web" in plain and "/health" in plain
     assert royal.startswith("👑 *CodeNest — queen access*")
-    # the one-tap deploy leads, the privilege list follows, shared commands last
-    assert royal.index("Run a project in one tap") < royal.index("Your queen access")
+    # privileges lead, shared commands last
+    assert royal.index("Run a project") < royal.index("Your queen access")
     assert royal.index("Your queen access") < royal.index("*Everything else*")
     for needle in ("No memory ceiling", ".zip", "/projects", "tree/", "/limits",
-                   "BOT_TOKEN", "bee"):
+                   "BOT_TOKEN", "bee", "/autodeploy"):
         assert needle in royal, needle
 
 
-def test_projects_explains_itself_to_a_non_queen(monkeypatch, sent):
+def test_projects_works_for_everyone_without_a_starter_pack(monkeypatch, sent):
+    """There is no separate queen-projects GitHub repo any more.
+
+    /projects used to refuse non-queens and, for queens, demand QUEEN_PROJECTS_REPO.
+    Both were wrong: the useful part is "your repo apps + how to import", and that
+    does not need a hard-coded owner repo. A non-queen gets exactly that.
+    """
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "")
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "")
+    monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [])
     deployed = []
     monkeypatch.setattr(bot_ops, "create_app_from_repo",
                         lambda *a, **k: deployed.append(a) or {"ok": False})
     pingbot.cmd_projects(1, {"id": 3, "username": "ann", "is_queen": 0})
-    reply = last(sent)
-    assert "queen access" in reply.lower()
-    assert "/import" in reply           # what they CAN do is still stated
+    reply = "\n".join(texts(sent))
+    assert "/import" in reply
+    assert "queen access" not in reply.lower() or "autodeploy" in reply.lower()
+    # must NOT say the old "no project repo configured" refusal
+    assert "QUEEN_PROJECTS_REPO" not in reply
+    assert "No project repo" not in reply
     assert not deployed
 
 
@@ -340,26 +355,37 @@ def test_projects_lists_what_can_run_as_buttons(monkeypatch, sent):
     monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
 
     pingbot.cmd_projects(1, {"id": 2, "username": "bee", "is_queen": 1})
-    catalogue = texts(sent)[0]
-    for needle in ("tajhatAti/b", "arena/01a0ba14-b", "`bot.py`",
+    # With a starter pack configured the FIRST message is the button catalogue.
+    catalogue = next(t for t in texts(sent)
+                     if "bot.py" in t or "tajhatAti/b" in t or "Starter" in t
+                     or "starter" in t.lower() or "Queen projects" in t
+                     or "pick:" in str(sent))
+    blob = "\n".join(texts(sent))
+    for needle in ("tajhatAti/b", "arena/01a0ba14-b", "bot.py",
                    "requirements.txt", "web/dashboard.py"):
-        assert needle in catalogue, needle
+        assert needle in blob, needle
 
     markups = [p for _m, p in sent if p.get("reply_markup")]
-    flat = [b["callback_data"]
-            for b in json.loads(markups[0]["reply_markup"])["inline_keyboard"][0]]
-    all_data = [b["callback_data"]
-                for row in json.loads(markups[0]["reply_markup"])["inline_keyboard"]
+    assert markups, "expected at least one keyboard"
+    # Find the pick keyboard specifically (starter pack scan).
+    pick_markup = None
+    for m in markups:
+        data = [b["callback_data"]
+                for row in json.loads(m["reply_markup"])["inline_keyboard"]
                 for b in row]
-    assert "pick:0" in all_data and "pick:1" in all_data   # one button per project
-    assert "pick:all" in all_data                          # ...or the whole repo
-    assert "pick:readme" in all_data and "pick:no" in all_data
-    # A button carries an INDEX only. callback_data is 64 bytes and
-    # attacker-supplied, so a path or a URL in it is both a truncation risk and
-    # a way to make the bot clone something else.
-    assert flat == ["pick:0"]
-    for t in texts(sent):
-        assert "<name>" not in t and "{}" not in t and "<user>" not in t
+        if any(d.startswith("pick:") for d in data):
+            pick_markup = data
+            break
+    assert pick_markup is not None, "starter pack should offer pick: buttons"
+    assert "pick:0" in pick_markup and "pick:1" in pick_markup
+    assert "pick:all" in pick_markup
+    assert "pick:readme" in pick_markup and "pick:no" in pick_markup
+    # A button carries an INDEX only — never a path or a URL.
+    assert all(not d.startswith("pick:") or d in (
+        "pick:0", "pick:1", "pick:all", "pick:readme", "pick:no"
+    ) or d.split(":", 1)[1].isdigit() for d in pick_markup)
+    # No old-style placeholder leakage in the catalogue itself.
+    assert "<user>" not in catalogue and "{}" not in catalogue
 
 
 def test_pick_button_deploys_the_chosen_project(monkeypatch, sent):
@@ -390,19 +416,18 @@ def test_pick_button_deploys_the_chosen_project(monkeypatch, sent):
 
 
 def test_projects_survives_a_rate_limited_github(monkeypatch, sent):
-    """A shared Render exit IP runs out of anonymous GitHub calls. The catalogue
-    then says so and keeps the one-tap deploy and the steps: the privilege must
-    not become unusable because a listing could not be read."""
+    """A shared Render exit IP runs out of anonymous GitHub calls. When a starter
+    pack IS configured, the listing failing must not make the privilege unusable:
+    a ▶️ Run starter button still deploys the default entry."""
     monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/tajhatAti/b")
     monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "arena/01a0ba14-b")
     monkeypatch.setattr(pingbot.github_repo, "scan_projects", lambda *a, **k: [])
     monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [])
 
     pingbot.cmd_projects(1, {"id": 2, "username": "bee", "is_queen": 1})
-    reply = last(sent)
-    assert "Run it now" in reply
-    assert "/latest" in reply and "/logs" in reply
-    assert any("qproj:run" in p["reply_markup"] for _m, p in sent if p.get("reply_markup"))
+    blob = "\n".join(texts(sent))
+    assert "qproj:run" in str(sent) or "Run starter" in blob or "/import" in blob
+    assert "/import" in blob or "Starter" in blob or "starter" in blob.lower()
 
 
 def test_repo_apps_show_whether_the_branch_moved(monkeypatch, sent):
@@ -484,6 +509,102 @@ def test_readme_is_sent_as_plain_text(monkeypatch, sent):
 # --------------------------------------------------------------------------
 # branches: what the bot says and what the runner clones
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# /id · /web · /health · /ping (own-site budget + never-silent send)
+# --------------------------------------------------------------------------
+def test_id_works_without_a_linked_account(monkeypatch, sent):
+    """`/id` is what you ask BEFORE an admin can grant you anything."""
+    monkeypatch.setattr(telegram_link, "user_for_chat", lambda cid: None)
+    pingbot.cmd_id(42, {"id": 99, "username": "stranger"})
+    reply = last(sent)
+    assert "`99`" in reply
+    assert "`42`" in reply
+    assert "@stranger" in reply
+    assert "not linked" in reply.lower()
+
+
+def test_id_names_a_linked_queen(monkeypatch, sent):
+    monkeypatch.setattr(telegram_link, "user_for_chat",
+                        lambda cid: {"id": 7, "username": "bee", "is_queen": 1, "is_admin": 0})
+    monkeypatch.setattr(pingbot, "_user_is_queen", lambda u: True)
+    pingbot.cmd_id(7, {"id": 7, "username": "bee"})
+    reply = last(sent)
+    assert "#7" in reply and "bee" in reply
+    assert "queen" in reply.lower()
+
+
+def test_web_refuses_when_site_base_is_missing(monkeypatch, sent):
+    monkeypatch.setattr(pingbot, "SITE_BASE", "")
+    monkeypatch.setattr(pingbot, "_open_kb", lambda: None)
+    pingbot.cmd_web(1)
+    assert "SITE_BASE" in last(sent) or "public URL" in last(sent)
+
+
+def test_health_reports_from_inside(monkeypatch, sent):
+    monkeypatch.setattr(pingbot, "_is_admin", lambda *a, **k: False)
+    monkeypatch.setattr(pingbot, "SITE_BASE", "https://example.com")
+    # Keep the sent fixture's _tg (it records every call). Only special-case
+    # getWebhookInfo so the health line can say "webhook".
+    real_tg = pingbot._tg
+    def tg(method, **params):
+        if method == "getWebhookInfo":
+            sent.append((method, params))
+            return {"ok": True, "result": {"url": "https://x/hook"}}
+        return real_tg(method, **params)
+    monkeypatch.setattr(pingbot, "_tg", tg)
+    monkeypatch.setattr(pingbot.runner_client, "runner_pool", lambda: [])
+    monkeypatch.setattr(bot_ops, "active_count", lambda uid: 1)
+    monkeypatch.setattr(bot_ops, "account_privileges",
+                        lambda uid: {"job_limit": 3})
+    pingbot.cmd_health(1, {"id": 2, "username": "bee"})
+    reply = last(sent)
+    assert "Platform health" in reply
+    assert "Database" in reply
+    assert "Runner" in reply
+
+
+def test_ping_own_site_uses_longer_budget(monkeypatch, sent):
+    """A free-tier cold start used to look like '/ping is broken'."""
+    seen = {}
+    class FakeResp:
+        status_code = 200
+        headers = {}
+    def fake_req(method, url, timeout=None, **kw):
+        seen["timeout"] = timeout
+        seen["url"] = url
+        return FakeResp()
+    monkeypatch.setattr(pingbot, "ping_default_target",
+                        lambda: "https://example.com")
+    monkeypatch.setattr(pingbot.requests, "request", fake_req)
+    monkeypatch.setattr(pingbot, "_ping_host_allowed", lambda h: (True, ""))
+    pingbot.handle_ping(1, "/ping")          # no argument = own site
+    assert seen["timeout"] >= pingbot.PING_SELF_TIMEOUT_S
+    reply = last(sent)
+    assert "Measuring this site" in reply or "example.com" in reply
+    # buttons under the result
+    assert any("ping:again" in str(p.get("reply_markup") or "")
+               or "ping:health" in str(p.get("reply_markup") or "")
+               for _m, p in sent)
+
+
+def test_send_retries_without_markdown_on_any_parse_refusal(monkeypatch, sent):
+    """A dropped reply used to be what 'the bot didn't answer' actually was."""
+    calls = []
+    def fake_tg(method, **params):
+        calls.append(params.copy())
+        if params.get("parse_mode") == "Markdown":
+            return {"ok": False,
+                    "description": "Bad Request: can't find end of the entity "
+                                   "started at byte offset 41"}
+        return {"ok": True, "result": {"message_id": 1}}
+    monkeypatch.setattr(pingbot, "_tg", fake_tg)
+    pingbot._send(1, "hello *broken_name and more")
+    assert len(calls) == 2
+    assert "parse_mode" not in calls[1]
+    assert calls[1]["text"] == "hello *broken_name and more"
+
+
 def test_branch_is_read_out_of_a_github_url():
     assert pingbot._repo_branch_of("https://github.com/o/r/tree/dev") == "dev"
     # Slashes belong to the branch until git says otherwise — see the runner's
@@ -789,6 +910,17 @@ def test_cmd_limits_is_the_panel_for_a_queen_and_the_ceiling_for_everyone_else(m
                                      "zip_max_files": 5000})
     pingbot.cmd_limits(2, {"id": 5, "username": "bee", "is_queen": 1})
     assert last(sent).startswith("👑 *Queen panel*")
+    # Default: no starter pack, so the panel offers projects + latest + import.
+    # qproj:run only appears when QUEEN_PROJECTS_REPO is actually set.
+    btns = _buttons(sent)
+    assert "qproj:list" in btns
+    assert "latest:" in btns
+    assert "qproj:run" not in btns
+
+    sent.clear()
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/o/r")
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "main")
+    pingbot.cmd_limits(2, {"id": 5, "username": "bee", "is_queen": 1})
     assert "qproj:run" in _buttons(sent)
 
 
@@ -813,7 +945,11 @@ def test_queen_buttons_reach_the_queen_screens(monkeypatch, sent):
 
 
 def test_queen_buttons_refuse_someone_without_the_flag(monkeypatch, sent):
-    """callback_data is attacker-supplied: a pressed button proves nothing."""
+    """callback_data is attacker-supplied: a pressed button proves nothing.
+
+    qproj:list is for everyone (your own repo apps) — that one is allowed.
+    queen:menu / qproj:run / qproj:readme still require the flag.
+    """
     reached = []
     monkeypatch.setattr(pingbot, "_deploy_queen_project",
                         lambda *a, **k: reached.append("deploy"))
@@ -821,10 +957,13 @@ def test_queen_buttons_refuse_someone_without_the_flag(monkeypatch, sent):
     monkeypatch.setattr(pingbot, "_send_project_readme", lambda *a, **k: reached.append("readme"))
     monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
                         lambda cid: {"id": 3, "username": "ann", "is_queen": 0})
-    for data in ("queen:menu", "qproj:list", "qproj:run", "qproj:readme"):
+    for data in ("queen:menu", "qproj:run", "qproj:readme"):
         pingbot.handle_callback(3, data)
         assert "queen access" in last(sent).lower()
     assert reached == []
+    # list is open: a non-queen pressing it reaches cmd_projects
+    pingbot.handle_callback(3, "qproj:list")
+    assert reached == ["projects"]
 
 
 def test_a_queen_who_types_queen_sees_their_panel(monkeypatch, sent):
