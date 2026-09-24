@@ -4813,7 +4813,7 @@ function renderInspector() {
   const list = document.getElementById("inspEnvList");
   if (list) {
     if (!keys.length) {
-      list.innerHTML = '<p class="rs-insp-none">No variables set.</p>';
+      list.innerHTML = '<p class="rs-insp-none">No Env vars — fine if BOT_TOKEN is in the source.</p>';
     } else {
       // textContent per node — a key is user data and must never be parsed
       // as HTML.
@@ -6100,7 +6100,7 @@ function _jdEnvSave() {
       await api("/api/jobs/" + id, "PATCH", { env: _jdEnvCollect() }, true);
       const job = (window._lastJobs || []).find(x => String(x.id) === String(id));
       if (job) job.env = _jdEnvCollect();
-      _jdText("jdEnvHint", "Saved · applies on the next restart.");
+      _jdText("jdEnvHint", "Saved · applies on next restart. Token in code is also OK.");
     } catch (e) {
       _jdText("jdEnvHint", "Could not save: " + (e.message || "error"));
     }
@@ -6116,7 +6116,7 @@ function _jdEnvLoad() {
   const keys = Object.keys(data);
   if (!keys.length) list.appendChild(_jdEnvRow("", ""));
   else keys.forEach(k => list.appendChild(_jdEnvRow(k, data[k])));
-  _jdText("jdEnvHint", "Changes apply on the next restart.");
+  _jdText("jdEnvHint", "Changes apply on the next restart. BOT_TOKEN may also live in the code — recovery finds both.");
 }
 
 /* ---- downloads ------------------------------------------------------ */
