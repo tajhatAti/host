@@ -336,6 +336,39 @@ def dashboard_link(row) -> str:
     return f"{SITE_BASE}/bots/{_url_slug(item['name'])}" if SITE_BASE else ""
 
 
+def token_from_source(code: str = "", env: dict = None) -> str:
+    """A BOT_TOKEN found in source or env — without calling Telegram.
+
+    Many bots ship the token literally in the file (no Env tab). Recovery and
+    restart must treat that as a real token: refusing with "set BOT_TOKEN in
+    Env" when the code already has one is exactly the loop owners hate.
+    """
+    try:
+        from services import telegram_detector
+        text = telegram_detector._text(code or "", env or {})
+        m = telegram_detector.TOKEN_RE.search(text or "")
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def ensure_bot_token_in_env(row, env: dict = None) -> dict:
+    """Return env, promoting a token found in code into BOT_TOKEN when missing.
+
+    Does NOT rewrite the database: the code stays the source of truth the owner
+    already trusts. We only make sure the runner process receives BOT_TOKEN so
+    frameworks that read os.environ still work, and so our own "is there a
+    token?" gates stop blocking a perfectly runnable bot.
+    """
+    env = dict(env or {})
+    if (env.get("BOT_TOKEN") or "").strip():
+        return env
+    tok = token_from_source(row.get("code") or "", env)
+    if tok:
+        env["BOT_TOKEN"] = tok
+    return env
+
+
 def env_missing_message(row) -> str:
     """What the owner sees when a bot cannot start for want of its token.
 
@@ -349,10 +382,11 @@ def env_missing_message(row) -> str:
     name = item.get("name") or "your app"
     link = dashboard_link(item)
     where = f"{link} → *Env*" if link else "the dashboard → your app → *Env*"
-    return (f"❌ *{name}* can't start — its `BOT_TOKEN` isn't saved on the server.\n"
-            f"Fix it in a minute: open {where}, paste the token from @BotFather "
-            f"again, then *Save & restart*.\n"
-            f"Your code, files and database are untouched — only the token is missing.")
+    return (f"❌ *{name}* can't start — no `BOT_TOKEN` found in Env *or* in the source.\n"
+            f"Fix it either way:\n"
+            f"• open {where}, paste the token from @BotFather, *Save & restart*, **or**\n"
+            f"• put `BOT_TOKEN = '…'` (or `os.environ['BOT_TOKEN'] = '…'`) in the code itself.\n"
+            f"Your files and database are untouched — only the token is missing.")
 
 
 def _set_assignment(row, runner_id, worker, desired="running"):
@@ -377,15 +411,13 @@ def _cold_start(row, code=None, language=None) -> dict:
     The jobs-table id/name remains the user's stable identity. Runner ids are
     disposable implementation details and may change after any runner deploy.
     """
-    env = _row_env(row)
+    env = ensure_bot_token_in_env(row, _row_env(row))
     if row.get("telegram_bot_detected") and not env.get("BOT_TOKEN"):
-        # _row_env already tried to read the variables back off the runner, so
-        # getting here means nobody has the token: not the database, not the
-        # runner's own copy. Starting anyway would only produce an auth-error
-        # loop in the logs and a green "running" badge on a bot that answers
-        # nobody, so the owner is told what is missing and where to put it.
-        logger.error("cannot start %s: it is a Telegram bot and no BOT_TOKEN is "
-                     "available in its stored env or on the runner", row["name"])
+        # Still nothing: not in env, not in the runner's copy, not as a literal
+        # in the source. Only THEN do we refuse — a token sitting in the code
+        # is enough to run, Env is optional.
+        logger.error("cannot start %s: Telegram bot with no BOT_TOKEN in env, "
+                     "runner, or source", row["name"])
         return {"ok": False, "error": env_missing_message(row)}
     # Older Telegram-created rows did not persist worker_url. Before creating
     # anything, find the process by its stable internal name across the whole

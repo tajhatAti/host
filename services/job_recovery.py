@@ -202,11 +202,16 @@ def recover_once():
         # make the UI say “processing” while doing no useful work. With secrets
         # stored as plain text this now only happens when the row genuinely has
         # no token (or is unreadable everywhere, which is logged above).
+        from services import bot_ops
+        # Token may live in the source file itself (no Env tab). Promote it so
+        # the runner gets BOT_TOKEN and we stop refusing a bot that can run.
+        env = bot_ops.ensure_bot_token_in_env(row, env)
         if row.get("telegram_bot_detected") and not env.get("BOT_TOKEN"):
-            logger.error("Recovery skipped bot %s: no BOT_TOKEN in its stored env", row["id"])
+            # Truly nothing — not env, not code. Skip once; don't crash-loop.
+            logger.error("Recovery skipped bot %s: no BOT_TOKEN in env or source",
+                         row["id"])
             unresolved += 1
             continue
-        from services import bot_ops
         body = _recovery_body(row, env)
         if body is None:
             # Nothing the runner can start: no inline code AND no repo to clone.

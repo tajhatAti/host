@@ -200,6 +200,55 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Fingerprint"],
 )
 
+
+@app.get("/guides", include_in_schema=False)
+def guides_page():
+    """Public how-to cartoons — same art the Telegram /guide command sends."""
+    from fastapi.responses import HTMLResponse
+    from pathlib import Path as _P
+    gdir = _P(__file__).resolve().parent / "static" / "guides"
+    cards = []
+    catalog = [
+        ("guide_start.png", "Start here", "Three taps from zero to a running bot", "/guide start"),
+        ("guide_import.png", "Import a repo", "Public GitHub → live app", "/guide import"),
+        ("guide_id.png", "Your ids", "Copy-friendly numbers for admins", "/id"),
+        ("guide_token.png", "BOT_TOKEN tips", "Env tab or inside the code — both work", "/guide token"),
+        ("guide_admin.png", "Admin panel", "Every action = command + button", "/admin"),
+    ]
+    for fn, title, sub, cmd in catalog:
+        if (gdir / fn).is_file():
+            cards.append(
+                f'<article class="g-card"><img src="/static/guides/{fn}" alt="{title}" loading="lazy"/>'
+                f'<h2>{title}</h2><p>{sub}</p>'
+                f'<code>{cmd}</code></article>'
+            )
+    body = "".join(cards) or "<p>Guides are being prepared.</p>"
+    html = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CodeNest · Guides</title>
+<style>
+body{{margin:0;font-family:system-ui,sans-serif;background:#0b1220;color:#e2e8f0}}
+header{{padding:28px 20px 8px;max-width:1100px;margin:0 auto}}
+header h1{{margin:0;font-size:1.6rem}}
+header p{{color:#94a3b8;margin:8px 0 0}}
+main{{display:grid;gap:20px;padding:20px;max-width:1100px;margin:0 auto;
+grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
+.g-card{{background:#111827;border:1px solid #1f2937;border-radius:16px;overflow:hidden;
+padding:0 0 16px;box-shadow:0 8px 24px #0006}}
+.g-card img{{width:100%;display:block;background:#0f172a}}
+.g-card h2{{margin:12px 16px 4px;font-size:1.1rem}}
+.g-card p{{margin:0 16px 10px;color:#94a3b8;font-size:.92rem}}
+.g-card code{{margin:0 16px;display:inline-block;background:#1e293b;padding:4px 10px;
+border-radius:8px;font-size:.85rem;color:#a5b4fc}}
+a.home{{color:#a5b4fc;text-decoration:none;font-size:.9rem}}
+</style></head><body>
+<header><a class="home" href="/">← CodeNest</a>
+<h1>How-to guides</h1>
+<p>Same cartoons the Telegram bot sends for <code>/guide</code>. Long-press ids, import repos, keep tokens working after restart.</p>
+</header><main>{body}</main></body></html>"""
+    return HTMLResponse(html)
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

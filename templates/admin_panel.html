@@ -78,6 +78,9 @@
     /* status-colour left borders stay legible on glass */
     #tab-admin .adm-runner-card.is-online { border-left: 3px solid var(--ok); }
     #tab-admin .adm-runner-card.is-offline { border-left: 3px solid var(--danger); }
+    #tab-admin .adm-runner-card-actions .btn-ghost.primary-ish {
+      border-color: var(--ok, #22c55e); color: var(--ok, #22c55e); font-weight: 600;
+    }
     #tab-admin .adm-tg-job.is-live { border-left: 3px solid var(--ok); }
     #tab-admin .adm-risk-card.danger { border-color: var(--warn); }
 
@@ -185,7 +188,7 @@
       </nav>
       <div class="adm-stats" id="admStats"></div>
       <div class="adm-panel adm-runner-panel" id="admRunnerSection">
-        <div class="adm-panel-head"><div><h3>Runner fleet</h3><span class="adm-hint">Add or drain Render runner services without redeploying the main site</span></div><button class="btn-primary sm" id="admRunnerAddOpen">Add runner</button></div>
+        <div class="adm-panel-head"><div><h3>Runner fleet</h3><span class="adm-hint">Online = taking new jobs. Drain = keep existing bots, stop new placements. Add runners without redeploying the main site.</span></div><button class="btn-primary sm" id="admRunnerAddOpen">Add runner</button></div>
         <div class="adm-stats" id="admRunnerStats"></div>
         <div class="adm-runner-list" id="admRunners"></div>
         <div class="adm-runner-setup" id="admRunnerSetup" hidden>

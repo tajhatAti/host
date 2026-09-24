@@ -275,21 +275,38 @@ def admin_add_runner(payload: AdminRunnerIn,
 @router.post("/admin/runners/{node_id}/toggle")
 def admin_toggle_runner(node_id: int, payload: AdminRunnerToggle,
                         authorization: Optional[str] = Header(None)):
+    """Bring a managed runner online (enabled) or drain it (no new placements).
+
+    Body: ``{"enabled": true|false}``. Existing jobs on a drained runner keep
+    running and stay addressable — drain only stops *new* placement.
+    """
     admin, _ = require_admin(authorization)
+    # Pydantic already coerced bool; still normalise in case a client sent
+    # "true"/"1" through a looser path in the future.
+    enabled = bool(payload.enabled)
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT id,label,url FROM runner_nodes WHERE id=?", (node_id,)).fetchone()
+        row = conn.execute("SELECT id,label,url,enabled FROM runner_nodes WHERE id=?",
+                           (node_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="Runner not found.")
+            # Distinguish from the stealth 404 on non-admins: an authenticated
+            # admin who taps a stale card gets a real reason.
+            raise HTTPException(status_code=404,
+                                detail=f"Runner #{node_id} is gone — refresh the panel.")
         conn.execute("UPDATE runner_nodes SET enabled=?,updated_at=? WHERE id=?",
-                     (1 if payload.enabled else 0, now_utc_str(), node_id))
-        _admin_audit(conn, admin["id"], "runner_enable" if payload.enabled else "runner_disable",
+                     (1 if enabled else 0, now_utc_str(), node_id))
+        _admin_audit(conn, admin["id"], "runner_enable" if enabled else "runner_disable",
                      row["url"], row["label"])
         conn.commit()
+        label = row["label"]
     finally:
         conn.close()
     runner_client.invalidate_runner_registry()
-    return {"message": "Runner enabled." if payload.enabled else "Runner drained. Existing jobs remain addressable."}
+    if enabled:
+        return {"message": f"Runner “{label}” is online — taking new jobs.",
+                "enabled": True, "id": node_id}
+    return {"message": f"Runner “{label}” drained — existing jobs stay up, no new placements.",
+            "enabled": False, "id": node_id}
 
 
 @router.delete("/admin/runners/{node_id}")

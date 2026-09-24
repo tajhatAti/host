@@ -769,6 +769,10 @@ async function _demoApi(path, method = "GET", body = null) {
     if (clean === "/admin/bot-usage") return { days: 14, events: [], bots: [] };
     if (clean === "/admin/telegram-jobs") return { detected: 1, running: _demo.jobs.filter(j => j.status === "running").length, events: [], bots: _demo.jobs.filter(j => j.telegram_bot_detected).map(j => ({ id: j.id, owner: "demo", name: j.name, telegram_bot_username: j.telegram_bot_username, status: j.status, telegram_framework: j.telegram_framework, telegram_update_mode: j.telegram_update_mode, telegram_check_status: j.telegram_check_status, uptime_s: j.uptime_s })) };
     if (clean === "/admin/runners") return { total_enabled: 1, environment_runners: [], runners: [], embedded: { online: true, jobs: _demo.jobs.filter(j => j.status === "running").length, capacity: 4, mem_mb: 24 } };
+    const runnerTog = clean.match(/^\/admin\/runners\/(\d+)\/toggle$/);
+    if (runnerTog && method === "POST") return { message: (body && body.enabled) ? "Runner enabled." : "Runner drained.", id: Number(runnerTog[1]) };
+    const runnerDel = clean.match(/^\/admin\/runners\/(\d+)$/);
+    if (runnerDel && method === "DELETE") return { message: "Runner removed." };
     if (clean === "/admin/ip-clusters" || clean === "/admin/fingerprint-clusters" || clean === "/admin/signup-flags" || clean === "/admin/blocks") return { rows: [], clusters: [], flags: [] };
     if (clean === "/admin/bot-usage?") return { events: [], bots: [] };
   }
@@ -917,8 +921,43 @@ async function api(path, method = "POST", body = null, auth = false,
   }
   _serverUp();  // any well-formed response = the backend is alive again
 
-  if (!res.ok) throw new Error(data.detail || "Something went wrong");
+  if (!res.ok) throw new Error(_fmtApiDetail(data, res.status));
   return data;
+}
+
+/** Turn FastAPI `detail` (string | list | object) into one readable line.
+ *  The old `throw new Error(data.detail || …)` produced "Something went wrong"
+ *  whenever detail was an array (422 validation) or object — the classic
+ *  Admin "Online / Enable" button failure mode. */
+function _fmtApiDetail(data, status) {
+  const d = data && data.detail;
+  if (d == null || d === "") {
+    if (status === 404) return "Not found (or you are not an admin).";
+    if (status === 401) return "Session expired — sign in again.";
+    if (status === 403) return "Not allowed.";
+    if (status === 409) return "Conflict — try again.";
+    if (status >= 500) return "Server error (" + status + "). Try again in a moment.";
+    return "Something went wrong" + (status ? " (HTTP " + status + ")" : "");
+  }
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    return d.map(function (item) {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        var loc = Array.isArray(item.loc) ? item.loc.filter(function (x) {
+          return x !== "body" && x !== "query" && x !== "path";
+        }).join(".") : "";
+        var msg = item.msg || item.message || JSON.stringify(item);
+        return loc ? (loc + ": " + msg) : String(msg);
+      }
+      return String(item);
+    }).filter(Boolean).join("; ") || "Request failed";
+  }
+  if (typeof d === "object") {
+    try { return d.message || d.error || d.msg || JSON.stringify(d); }
+    catch (e) { return "Request failed"; }
+  }
+  return String(d);
 }
 
 /* ---------------- SERVER-UP BANNER ----------------
@@ -7183,7 +7222,10 @@ function renderAdminRunners(data) {
     const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b",r.label),_botText("span",r.url));
     const metrics=document.createElement("div");metrics.className="adm-runner-metrics";metrics.append(_botText("span",r.online?"online":"offline","adm-pill"+(r.online?" ok":" warn")),_botText("span",`${r.jobs||0}/${r.capacity||0} jobs`),_botText("span",`${Math.round(r.mem_mb||0)}MB used`),_botText("span",`${r.assigned_jobs||0} assigned`));
     const actions=document.createElement("div");actions.className="adm-runner-card-actions";
-    const toggle=document.createElement("button");toggle.className="btn-ghost sm";toggle.textContent=r.enabled?"Drain":"Enable";toggle.onclick=()=>_admToggleRunner(r.id,!r.enabled);actions.appendChild(toggle);
+    const toggle=document.createElement("button");toggle.className="btn-ghost sm"+(r.enabled?"":" primary-ish");
+    toggle.textContent=r.enabled?"Online · tap to drain":"Offline · tap to enable";
+    toggle.title=r.enabled?"Taking new jobs — tap to drain (stop new placements)":"Drained — tap to bring online";
+    toggle.onclick=()=>_admToggleRunner(r.id,!r.enabled);actions.appendChild(toggle);
     if(!r.assigned_jobs){const del=document.createElement("button");del.className="btn-ghost sm danger";del.textContent="Remove";del.onclick=()=>_admDeleteRunner(r.id);actions.appendChild(del);}
     card.append(main,metrics,actions);list.appendChild(card);
   });
@@ -7191,8 +7233,33 @@ function renderAdminRunners(data) {
   if(!rows.length&&!envRows.length&&!embedded)list.appendChild(_botText("div","No runner engine is available.","adm-empty"));
 }
 
-async function _admToggleRunner(id,enabled){try{await api(`/admin/runners/${id}/toggle`,"POST",{enabled},true);toast(enabled?"Runner enabled":"Runner drained","success");loadAdminPanel(true);}catch(e){toast(e.message,"error");}}
-async function _admDeleteRunner(id){if(!confirm("Remove this runner from the registry?"))return;try{await api(`/admin/runners/${id}`,"DELETE",null,true);toast("Runner removed","success");loadAdminPanel(true);}catch(e){toast(e.message,"error");}}
+async function _admToggleRunner(id, enabled) {
+  if (id == null || id === "" || id === "embedded") {
+    toast("The embedded engine stays on with the website — add a remote runner to drain/enable.", "info");
+    return;
+  }
+  try {
+    const d = await api(`/admin/runners/${encodeURIComponent(id)}/toggle`, "POST", {enabled: !!enabled}, true);
+    toast((d && d.message) || (enabled ? "Runner online" : "Runner drained"), "success");
+    await loadAdminPanel(true);
+  } catch (e) {
+    toast((e && e.message) || "Could not update runner", "error");
+  }
+}
+async function _admDeleteRunner(id) {
+  if (id == null || id === "" || id === "embedded") {
+    toast("The embedded engine cannot be removed.", "info");
+    return;
+  }
+  if (!confirm("Remove this runner from the registry?")) return;
+  try {
+    await api(`/admin/runners/${encodeURIComponent(id)}`, "DELETE", null, true);
+    toast("Runner removed", "success");
+    await loadAdminPanel(true);
+  } catch (e) {
+    toast((e && e.message) || "Could not remove runner", "error");
+  }
+}
 
 function _wireAdminRunners(){
   const setup=document.getElementById("admRunnerSetup");

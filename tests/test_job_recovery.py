@@ -320,3 +320,53 @@ def test_the_reconciler_runs_the_sweep_after_recovery(monkeypatch):
     assert loop.index("recover_once()") < loop.index("auto_deploy_sweep()")
     st = job_recovery.auto_deploy_status()
     assert set(st) >= {"enabled", "interval_s", "last"}
+
+
+def test_token_in_source_is_enough_for_recovery(monkeypatch):
+    """Telegram-board deploys often have the token IN the file, not in Env.
+
+    Recovery used to skip whenever env lacked BOT_TOKEN even if the source
+    already held a real token — the bot that "used to work" stayed down after
+    every runner restart. Code-embedded tokens must recover the same way.
+    """
+    # A realistic short token-shaped string that TOKEN_RE accepts.
+    code = (
+        "import os\n"
+        "TOKEN = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'\n"
+        "print('bot starting', TOKEN[:8])\n"
+    )
+    monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [
+        _row(id=41, name="code-token", code=code, env=None,
+             telegram_bot_detected=1, runner_job_id="old", worker_url=None)])
+    monkeypatch.setattr(runner_client, "fleet_jobs", lambda refresh=True: {})
+    sent = {}
+
+    def call(method, path, body=None, worker=None):
+        if path == "/health":
+            return Health()
+        sent.update(method=method, path=path, body=body, worker=worker)
+        return Response()
+
+    monkeypatch.setattr(runner_client, "_runner_http", call)
+    monkeypatch.setattr(job_recovery, "_remember", lambda *a, **k: None)
+    monkeypatch.setattr(snapshots, "restore_snapshot", lambda *a, **k: {"restored": 0})
+
+    assert job_recovery.recover_once() == 0
+    assert sent.get("path") == "/internal/jobs", sent
+    assert sent["body"]["env"]["BOT_TOKEN"].startswith("123456789:"), sent["body"]["env"]
+
+
+def test_token_still_missing_everywhere_is_skipped(monkeypatch):
+    """No env token AND no token in source → skip (do not crash-loop)."""
+    monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [
+        _row(id=42, name="empty", code="print('hi')", env=None,
+             telegram_bot_detected=1)])
+    monkeypatch.setattr(runner_client, "fleet_jobs", lambda refresh=True: {})
+
+    def call(method, path, body=None, worker=None):
+        if path == "/health":
+            return Health()
+        raise AssertionError("must not start")
+
+    monkeypatch.setattr(runner_client, "_runner_http", call)
+    assert job_recovery.recover_once() == 1
