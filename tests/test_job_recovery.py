@@ -146,6 +146,62 @@ def test_recovered_bot_keeps_its_queen_flag(monkeypatch):
     assert seen["mem_limit_mb"] == 0, seen
 
 
+def test_repo_bot_is_recovered_by_recloning_not_empty_code(monkeypatch):
+    """THE production bug: every restart logged 'Code is empty' for repo apps.
+
+    A GitHub import stores repo_url and leaves code=''. Recovery used to POST
+    only the empty code, the runner correctly refused with 400, and the next
+    sweep did the same thing forever. The bot that "used to work" never came
+    back until someone pressed Restart by hand (which goes through
+    update_from_repo and does send the URL).
+    """
+    monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [
+        _row(id=41, name="haven", code="",
+             repo_url="https://github.com/tajhatAti/b/tree/arena/01a0ba14-b",
+             repo_entry="bot.py", telegram_bot_detected=0)])
+    monkeypatch.setattr(runner_client, "fleet_jobs", lambda refresh=True: {})
+    monkeypatch.setattr(job_recovery, "_remember", lambda *a: None)
+    monkeypatch.setattr(snapshots, "restore_snapshot", lambda *a, **k: {"restored": 0})
+    seen = {}
+
+    def call(method, path, body=None, worker=None):
+        if path == "/health":
+            return Health()
+        if path == "/internal/jobs":
+            seen.update(body or {})
+            return Response()
+        return Response()
+
+    monkeypatch.setattr(runner_client, "_runner_http", call)
+    from services import bot_ops
+    monkeypatch.setattr(bot_ops, "mem_limit_for", lambda uid: None)
+
+    assert job_recovery.recover_once() == 0
+    assert seen.get("repo_url", "").startswith("https://github.com/tajhatAti/b")
+    assert seen.get("entry") == "bot.py"
+    assert (seen.get("code") or "") == ""
+    assert seen.get("env", {}).get("BOT_TOKEN") == "123:saved-token"
+
+
+def test_empty_code_without_repo_is_skipped_not_spammed(monkeypatch):
+    """A row with nothing to run must not hit the runner every five minutes."""
+    monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [
+        _row(id=99, code="", repo_url="", telegram_bot_detected=0,
+             env=secrets_store.pack_env({}))])
+    monkeypatch.setattr(runner_client, "fleet_jobs", lambda refresh=True: {})
+    hits = []
+
+    def call(method, path, body=None, worker=None):
+        if path == "/health":
+            return Health()
+        hits.append(path)
+        raise AssertionError("must not POST an empty job")
+
+    monkeypatch.setattr(runner_client, "_runner_http", call)
+    assert job_recovery.recover_once() == 1
+    assert hits == []
+
+
 def test_reconciler_is_started_once_and_can_be_switched_off(monkeypatch):
     started = []
     monkeypatch.setattr(job_recovery.threading, "Thread",

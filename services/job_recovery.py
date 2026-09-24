@@ -55,11 +55,19 @@ _reconciler_lock = threading.Lock()
 
 
 def _wanted_rows():
+    """Every job the site still wants running.
+
+    Includes repo_url / repo_entry / repo_commit: a GitHub-imported app stores
+    NO inline code (the runner clones it), so recovery that only re-POSTs
+    `code` arrives at the runner as "Code is empty" and the bot never comes
+    back. That is exactly the loop in production logs after every restart.
+    """
     conn = get_db_connection()
     try:
         return [dict(r) for r in conn.execute(
             "SELECT id,user_id,name,language,code,env,runner_job_id,worker_url,"
-            "telegram_bot_detected FROM jobs "
+            "telegram_bot_detected,repo_url,repo_entry,repo_commit "
+            "FROM jobs "
             "WHERE desired_state='running' AND runner_job_id IS NOT NULL "
             "ORDER BY id"
         ).fetchall()]
@@ -108,6 +116,51 @@ def _answered_workers(wanted: list) -> dict:
     return out
 
 
+def _recovery_body(row: dict, env: dict) -> dict | None:
+    """Build the POST /internal/jobs payload that brings ONE bot back.
+
+    Three shapes, same rails the original create used:
+
+      1. Inline code  — paste / /code path. `code` is non-empty.
+      2. Repo import  — `/import` / website GitHub. `code` is intentionally
+         empty; `repo_url` (+ optional entry) is what the runner clones.
+      3. Neither      — nothing to start. Return None so the caller logs and
+         skips instead of spamming "Code is empty" every five minutes.
+
+    Forgetting shape (2) is what made every GitHub-deployed bot die on a
+    runner restart and stay dead: recovery re-POSTed empty code, the runner
+    correctly refused, and the next sweep did the same thing forever.
+    """
+    from services import bot_ops
+    code = (row.get("code") or "").strip()
+    repo_url = (row.get("repo_url") or "").strip()
+    entry = (row.get("repo_entry") or "").strip()
+
+    if not code and not repo_url:
+        return None
+
+    body = {
+        "language": row.get("language") or "python",
+        # Repo jobs MUST send empty code: the runner clones instead. Sending a
+        # placeholder string would write a fake main.py over the clone.
+        "code": code if code else "",
+        "name": f"u{row['user_id']}-{row['name']}",
+        "env": env,
+        # A 👑 user must come back unlimited too: recovery is a fresh create,
+        # and a create without this silently re-applies the default ceiling.
+        "mem_limit_mb": bot_ops.mem_limit_for(row["user_id"]),
+    }
+    if repo_url:
+        body["repo_url"] = repo_url
+        if entry:
+            body["entry"] = entry
+        # Remember which commit we last knew about so auto-deploy can still
+        # tell "branch moved" from "just recovered at the same SHA".
+        # The runner will report the commit it actually built; bot_ops paths
+        # update the row. Recovery itself does not need to send it.
+    return body
+
+
 def recover_once():
     """Recreate missing desired-running jobs. Returns unresolved count."""
     rows = _wanted_rows()
@@ -154,15 +207,17 @@ def recover_once():
             unresolved += 1
             continue
         from services import bot_ops
-        body = {
-            "language": row.get("language") or "python",
-            "code": row.get("code") or "",
-            "name": f"u{row['user_id']}-{row['name']}",
-            "env": env,
-            # A 👑 user must come back unlimited too: recovery is a fresh create,
-            # and a create without this silently re-applies the default ceiling.
-            "mem_limit_mb": bot_ops.mem_limit_for(row["user_id"]),
-        }
+        body = _recovery_body(row, env)
+        if body is None:
+            # Nothing the runner can start: no inline code AND no repo to clone.
+            # Starting it would only produce the "Code is empty" 400 that used
+            # to spam the logs on every restart.
+            logger.error(
+                "Recovery skipped bot %s (%s): no source stored and no repo_url "
+                "to re-clone — owner must /update or re-import",
+                row["id"], row.get("name"))
+            unresolved += 1
+            continue
         try:
             response = runner_client._runner_http("POST", "/internal/jobs", body)
             if response.status_code != 201:
