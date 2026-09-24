@@ -109,7 +109,8 @@ def _admin_menu_kb():
          {"text": "🏪 Store queue", "callback_data": "admin:store"}],
         [{"text": "📜 Terms status", "callback_data": "admin:terms"},
          {"text": "🧑‍⚖️ Audit by admin", "callback_data": "admin:auditadmins"}],
-        [{"text": "👑 Queens", "callback_data": "admin:queens"}],
+        [{"text": "👑 Queens", "callback_data": "admin:queens"},
+         {"text": "♻️ Recover now", "callback_data": "admin:recovernow"}],
         [{"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
     ]}
 
@@ -588,6 +589,34 @@ def cmd_admin(chat_id, telegram_user_id, arg):
               reply_markup=_admin_menu_kb())
         return
 
+    
+    if sub in ("recover", "rescue", "reconcile"):
+        # Force the same recovery pass the interval loop runs — answer to
+        # "runner just woke up, bring every bot back NOW".
+        _send(chat_id, "♻️ Running recovery sweep…")
+        try:
+            from services import job_recovery
+            unresolved = job_recovery.recover_once()
+            sweep = job_recovery.auto_deploy_sweep(force=True)
+        except Exception as exc:  # noqa: BLE001
+            _send(chat_id, f"❌ Recovery failed: {type(exc).__name__}: {exc}")
+            return
+        extra = ""
+        if isinstance(sweep, dict) and not sweep.get("disabled") and not sweep.get("waiting"):
+            extra = (f"\nAuto-deploy: checked {sweep.get('checked', 0)}, "
+                     f"updated {sweep.get('updated', 0)}, "
+                     f"failed {sweep.get('failed', 0)}.")
+        _send(chat_id,
+              f"✅ Recovery pass done. Unresolved (still missing token/source): "
+              f"*{unresolved}*." + extra,
+              reply_markup={"inline_keyboard": [
+                  [{"text": "🩺 Health", "callback_data": "admin:health"},
+                   {"text": "🖥 Runners", "callback_data": "admin:runners"}],
+                  [{"text": "♻️ Run again", "callback_data": "admin:recovernow"},
+                   {"text": "⬅️ Menu", "callback_data": "admin:menu"}],
+              ]})
+        return
+
     if sub in ("overview", "stats", "dash"):
         handle_admin_callback(chat_id, telegram_user_id, "overview", "", None)
         return
@@ -607,7 +636,6 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     if sub in ("users", "userlist"):
         handle_admin_callback(chat_id, telegram_user_id, "users", "0", None)
         return
-
 
     if sub == "limit":
         if not rest:
@@ -964,8 +992,9 @@ def _admin_health_kb():
     return {"inline_keyboard": [
         [{"text": "🔁 Re-register webhook", "callback_data": "admin:fixwebhook"},
          {"text": "🩺 Refresh", "callback_data": "admin:health"}],
-        [{"text": "⚙️ Auto-deploy sweep now", "callback_data": "admin:autodepnow"},
-         {"text": "🚦 Set a job limit", "callback_data": "admin:limitflow"}],
+        [{"text": "♻️ Recover bots now", "callback_data": "admin:recovernow"},
+         {"text": "⚙️ Auto-deploy now", "callback_data": "admin:autodepnow"}],
+        [{"text": "🚦 Set a job limit", "callback_data": "admin:limitflow"}],
         [{"text": "🖥 Runners", "callback_data": "admin:runners"},
          {"text": "⬅️ Menu", "callback_data": "admin:menu"}],
     ]}
@@ -1031,6 +1060,19 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         if message_id:
             _edit_or_send(chat_id, message_id, _admin_health_text(),
                           reply_markup=_admin_health_kb())
+        return
+
+    if action == "recovernow":
+        _send(chat_id, "♻️ Running recovery sweep…")
+        try:
+            from services import job_recovery
+            unresolved = job_recovery.recover_once()
+            _send(chat_id, f"✅ Recovery done. Unresolved: *{unresolved}*.",
+                  reply_markup={"inline_keyboard": [
+                      [{"text": "🩺 Health", "callback_data": "admin:health"},
+                       {"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        except Exception as exc:  # noqa: BLE001
+            _send(chat_id, f"❌ {type(exc).__name__}: {exc}")
         return
 
     if action == "autodepnow":
@@ -4693,6 +4735,8 @@ def handle_update(upd):
                                               f"off {arg}".strip()),
                 # Admin shortcuts that match the inline buttons 1:1
                 "/runners": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "runners"),
+                "/recover": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "recover"),
+                "/rescue": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "recover"),
                 "/fleet": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "runners"),
                 "/health": lambda: _cmd_health_smart(chat_id, msg.get("from", {}).get("id")),
                 "/overview": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "overview"),
