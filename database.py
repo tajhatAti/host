@@ -168,11 +168,23 @@ def _translate_sql(sql: str) -> str:
     """Translate a qmark-style (? placeholders) statement to the active dialect.
 
     PostgreSQL's psycopg2 driver uses %s placeholders. Literal '%' is not used
-    anywhere in the app's SQL (no LIKE with %), so a straight swap is safe.
+    anywhere in the app's SQL (no LIKE with %), so a straight swap is safe —
+    EXCEPT inside `--` comments, where a plain English "?" ("is there a newer
+    version?") used to become `%s` and then crash boot with
+    `IndexError: tuple index out of range` the moment init_db ran CREATE TABLE
+    jobs against Postgres. Comments keep their text; only real bind slots change.
     """
     if DIALECT != "postgres":
         return sql
-    sql = sql.replace("?", "%s")
+    # Protect `-- …` comment tails so a rhetorical "?" cannot become a bind slot.
+    parts = []
+    for line in sql.splitlines(keepends=True):
+        if "--" in line:
+            code, dash, comment = line.partition("--")
+            parts.append(code.replace("?", "%s") + dash + comment)
+        else:
+            parts.append(line.replace("?", "%s"))
+    sql = "".join(parts)
     # SQLite's upsert spelling. The module docstring has always claimed this
     # was translated; it never was, and Postgres answers
     #   syntax error at or near "OR"
@@ -206,14 +218,28 @@ def _translate_sql(sql: str) -> str:
 
 
 def _translate_ddl(ddl: str) -> str:
-    """Translate SQLite-specific CREATE TABLE syntax to PostgreSQL."""
+    """Translate SQLite-specific CREATE TABLE syntax to PostgreSQL.
+
+    Also neutralises `?` inside `--` comments. DDL goes through the same
+    execute() path as queries, so a comment question mark would otherwise be
+    rewritten to `%s` and crash init_db on Postgres with
+    `IndexError: tuple index out of range` — that is what took the live site
+    down after the repo_commit migration shipped.
+    """
     if DIALECT != "postgres":
         return ddl
     # Case-insensitive uniqueness mirrors SQLite's "COLLATE NOCASE".
     ddl = ddl.replace("TEXT NOT NULL UNIQUE COLLATE NOCASE", "CITEXT NOT NULL UNIQUE")
     # Auto-increment integer PK -> SERIAL.
     ddl = ddl.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-    return ddl
+    fixed = []
+    for line in ddl.splitlines(keepends=True):
+        if "--" in line:
+            code, dash, comment = line.partition("--")
+            fixed.append(code + dash + comment.replace("?", "."))
+        else:
+            fixed.append(line)
+    return "".join(fixed)
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +627,7 @@ _SCHEMA_TABLES = [
         telegram_framework TEXT,
         telegram_update_mode TEXT,
         telegram_token_source TEXT,
-        -- Where a deployed app came from, so "is there a newer version?" is a
+        -- Where a deployed app came from, so "is there a newer version" is a
         -- comparison instead of an archaeology project. repo_commit is the SHA
         -- the runner actually cloned; repo_entry is the file inside the repo
         -- that runs, because one repo can hold more than one runnable thing.
