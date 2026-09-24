@@ -309,6 +309,34 @@ def admin_toggle_runner(node_id: int, payload: AdminRunnerToggle,
             "enabled": False, "id": node_id}
 
 
+@router.post("/admin/recover")
+def admin_recover_now(authorization: Optional[str] = Header(None)):
+    """Force one recovery + auto-deploy pass (same as Telegram /recover).
+
+    Brings desired-running bots back after a runner wake/redeploy. Token may
+    live in Env or in source — both are accepted.
+    """
+    admin, _ = require_admin(authorization)
+    from services import job_recovery
+    try:
+        unresolved = job_recovery.recover_once()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Recovery failed: {type(exc).__name__}: {exc}")
+    try:
+        sweep = job_recovery.auto_deploy_sweep(force=True)
+    except Exception as exc:  # noqa: BLE001
+        sweep = {"error": f"{type(exc).__name__}: {exc}"}
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "recover_now", "fleet",
+                     f"unresolved={unresolved}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "unresolved": unresolved, "auto_deploy": sweep,
+            "message": f"Recovery done. Unresolved: {unresolved}."}
+
+
 @router.delete("/admin/runners/{node_id}")
 def admin_delete_runner(node_id: int, authorization: Optional[str] = Header(None)):
     admin, _ = require_admin(authorization)

@@ -769,6 +769,7 @@ async function _demoApi(path, method = "GET", body = null) {
     if (clean === "/admin/bot-usage") return { days: 14, events: [], bots: [] };
     if (clean === "/admin/telegram-jobs") return { detected: 1, running: _demo.jobs.filter(j => j.status === "running").length, events: [], bots: _demo.jobs.filter(j => j.telegram_bot_detected).map(j => ({ id: j.id, owner: "demo", name: j.name, telegram_bot_username: j.telegram_bot_username, status: j.status, telegram_framework: j.telegram_framework, telegram_update_mode: j.telegram_update_mode, telegram_check_status: j.telegram_check_status, uptime_s: j.uptime_s })) };
     if (clean === "/admin/runners") return { total_enabled: 1, environment_runners: [], runners: [], embedded: { online: true, jobs: _demo.jobs.filter(j => j.status === "running").length, capacity: 4, mem_mb: 24 } };
+    if (clean === "/admin/recover" && method === "POST") return { ok: true, unresolved: 0, message: "Recovery done. Unresolved: 0.", auto_deploy: { checked: 0 } };
     const runnerTog = clean.match(/^\/admin\/runners\/(\d+)\/toggle$/);
     if (runnerTog && method === "POST") return { message: (body && body.enabled) ? "Runner enabled." : "Runner drained.", id: Number(runnerTog[1]) };
     const runnerDel = clean.match(/^\/admin\/runners\/(\d+)$/);
@@ -7089,7 +7090,7 @@ async function loadAdminPanel(force) {
     });
     _wireAdminBotUsage();
     _wireAdminRisk();
-    _wireAdminRunners();
+    _wireAdminRunners();_wireAdminRecover();
     _admMarkFresh();
     stats.dataset.loaded = "1";
   } catch (e) {
@@ -7259,6 +7260,21 @@ async function _admDeleteRunner(id) {
   } catch (e) {
     toast((e && e.message) || "Could not remove runner", "error");
   }
+}
+
+async function _admRecoverNow(){
+  const btn=document.getElementById("admRecoverNow");
+  try{
+    if(btn){btn.disabled=true;btn.textContent="♻️ Working…";}
+    const d=await api("/admin/recover","POST",{},true);
+    toast((d&&d.message)||"Recovery done","success");
+    await loadAdminPanel(true);
+  }catch(e){toast((e&&e.message)||"Recovery failed","error");}
+  finally{if(btn){btn.disabled=false;btn.textContent="♻️ Recover bots";}}
+}
+function _wireAdminRecover(){
+  const btn=document.getElementById("admRecoverNow");
+  if(btn&&!btn.dataset.wired){btn.dataset.wired="1";btn.onclick=()=>_admRecoverNow();}
 }
 
 function _wireAdminRunners(){
