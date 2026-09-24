@@ -2019,6 +2019,19 @@ def _send_plain(chat_id, text):
                disable_web_page_preview=True)
 
 
+def _send_html(chat_id, text, reply_markup=None):
+    """HTML parse mode — <code> chips are one-tap copy on mobile Telegram."""
+    data = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML",
+            "disable_web_page_preview": True}
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    result = _tg("sendMessage", **data)
+    if (result or {}).get("ok"):
+        return result
+    plain = re.sub(r"<[^>]+>", "", text or "")
+    return _send_plain(chat_id, plain)
+
+
 def _edit_or_send(chat_id, message_id, text, reply_markup=None):
     """Update the SAME message a button lives on, instead of sending a new
     one every press — without this, navigating the admin panel scrolled a
@@ -2739,7 +2752,6 @@ def cmd_commands(chat_id, user=None, telegram_user_id=None):
 
 def cmd_env(chat_id, user, arg=""):
     """`/env name` list keys · `/env name KEY=value` set · `/env name del KEY`."""
-    _maybe_guide(chat_id, "env", user)
     parts = (arg or "").split(None, 1)
     if not parts:
         _send(chat_id, "Usage:\n`/env myapp` — list key names\n"
@@ -2783,7 +2795,6 @@ def cmd_env(chat_id, user, arg=""):
 
 def cmd_backup(chat_id, user, arg=""):
     """`/backup name` — snapshot workspace data into durable storage now."""
-    _maybe_guide(chat_id, "backup", user)
     name = (arg or "").strip()
     if not name:
         _send(chat_id, "Which app? `/backup myapp` — saves its data files "
@@ -2815,7 +2826,6 @@ def cmd_backup(chat_id, user, arg=""):
 
 def cmd_history(chat_id, user, arg=""):
     """`/history name` — recent code revisions (website deploys)."""
-    _maybe_guide(chat_id, "history", user)
     name = (arg or "").strip()
     if not name:
         _send(chat_id, "Which app? `/history myapp`")
@@ -2920,16 +2930,22 @@ _COMMAND_GUIDES = {
 
 
 def _show_command_guide(chat_id, topic: str, user=None):
-    """Picture first, then short steps — for one user-facing command."""
+    """Picture first, then short steps — only when the user asked (/guide).
+
+    No home-menu keyboard: dumping the full help pad after every cartoon was
+    spam. One optional "More guides" row is enough.
+    """
     topic = (topic or "").strip().lower()
     info = _COMMAND_GUIDES.get(topic)
     if not info:
-        _send(chat_id, "Unknown guide — try `/guide` or `/commands`.",
-              reply_markup=_help_guide_kb(user))
+        _send(chat_id, "Unknown guide — try `/guide`.")
         return
     png, caption, body = info
     _send_guide(chat_id, png, caption)
-    _send(chat_id, f"*{caption}*\n\n{body}", reply_markup=_help_guide_kb(user))
+    _send(chat_id, f"*{caption}*\n\n{body}",
+          reply_markup={"inline_keyboard": [[
+              {"text": "📖 More guides", "callback_data": "help:catalog"},
+          ]]})
 
 
 def _cmd_guide(chat_id, arg=""):
@@ -2966,7 +2982,7 @@ def _cmd_guide(chat_id, arg=""):
                  "`/guide apps` · `/guide logs` · `/guide restart` · `/guide stop`",
                  "`/guide status` · `/guide env` · `/guide token` · `/guide id`",
                  "`/guide backup` · `/guide history` · `/guide projects` · `/guide link`"]
-        _send(chat_id, "\n".join(lines), reply_markup=_help_guide_kb(user))
+        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         return
     if ref in _COMMAND_GUIDES:
         _show_command_guide(chat_id, ref, user)
@@ -3301,33 +3317,31 @@ def handle_ping(chat_id, text):
 
 
 def cmd_id(chat_id, msg_from=None):
-    """`/id` — the numbers that identify you, copy-friendly.
+    """`/id` — numbers only, each in HTML <code> so Telegram copies on tap.
 
-    Telegram Legacy Markdown treats `<…>` as a broken tag, so a line like
-    `/queen id` used to arrive as `/queen &lt;id&gt;` — unreadable and
-    un-copyable. Every id here is on its own line inside backticks so a long
-    press copies the number alone; the admin examples use a real sample id
-    instead of angle brackets.
+    No how-to cartoon, no home menu, no second "Open the site" bubble.
+    One message: tap a grey code chip → copy that id alone.
     """
-    _maybe_guide(chat_id, "id", telegram_link.user_for_chat(chat_id))
     frm = msg_from or {}
     tg_id = frm.get("id") or chat_id
     username = (frm.get("username") or "").strip()
     user = telegram_link.user_for_chat(chat_id)
     account_id = (user or {}).get("id")
 
-    # PLAIN send (no parse_mode): usernames with _ break Markdown, and the whole
-    # point of /id is that the numbers must survive the trip to the phone.
-    lines = [
-        "Your ids (long-press a number to copy it)",
+    def esc(x):
+        return (str(x).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    parts = [
+        "<b>Your ids</b> — tap a grey number to copy",
         "",
-        f"Telegram id:  {tg_id}",
-        f"This chat:    {chat_id}"
-        + ("  (same number — private chat)" if chat_id == tg_id else
-           "  (group chat)"),
+        f"Telegram id:  <code>{esc(tg_id)}</code>",
+        f"This chat:    <code>{esc(chat_id)}</code>"
+        + ("  <i>(same — private chat)</i>" if chat_id == tg_id else
+           "  <i>(group)</i>"),
     ]
     if username:
-        lines.append(f"Username:     @{username}")
+        parts.append(f"Username:     @{esc(username)}")
     if user:
         flags = []
         if _user_is_queen(user):
@@ -3336,29 +3350,28 @@ def cmd_id(chat_id, msg_from=None):
             flags.append("admin")
         flag_s = (" · " + ", ".join(flags)) if flags else ""
         uname = user.get("username") or ""
-        lines.append(f"CodeNest #:   {user['id']}"
-                     + (f"  ({uname})" if uname else "")
-                     + flag_s)
+        parts.append(
+            f"CodeNest #:   <code>{esc(user['id'])}</code>"
+            + (f"  ({esc(uname)})" if uname else "")
+            + flag_s
+        )
     else:
-        lines.append("CodeNest #:   not linked yet — send /link")
+        parts.append("CodeNest #:   not linked — send /link")
 
-    # Admin-only: ready-to-paste privileged commands. Never shown to others —
-    # leaking /queen /admin /see /user names teaches strangers the admin surface.
     tg_uid = frm.get("id") or chat_id
     if _is_admin(user, tg_uid):
         sample = account_id or tg_id
-        lines += [
+        parts += [
             "",
-            "Admin (you only):",
-            f"/queen {sample}",
-            f"/admin limit {sample} 10",
-            f"/see {sample}",
-            f"/user {sample}",
+            "<b>Admin</b> (you only) — tap a line to copy:",
+            f"<code>/queen {esc(sample)}</code>",
+            f"<code>/admin limit {esc(sample)} 10</code>",
+            f"<code>/see {esc(sample)}</code>",
+            f"<code>/user {esc(sample)}</code>",
         ]
-    _send_plain(chat_id, "\n".join(lines))
-    kb = _open_kb()
-    if kb:
-        _send(chat_id, "Open the site:", reply_markup=kb)
+    _send_html(chat_id, "\n".join(parts))
+
+
 
 
 def cmd_web(chat_id, user=None):
@@ -3531,55 +3544,157 @@ def _user_is_queen(user) -> bool:
         return False
 
 
+
+def _send_photo_file(chat_id, filepath, caption=""):
+    """Inline photo (not document download). Quiet on failure."""
+    if not TG_API or not filepath:
+        return {}
+    try:
+        import os as _os
+        with open(filepath, "rb") as fh:
+            r = requests.post(
+                f"{TG_API}/sendPhoto",
+                data={"chat_id": chat_id, "caption": (caption or "")[:1024]},
+                files={"photo": (_os.path.basename(str(filepath)), fh, "image/png")},
+                timeout=60,
+            )
+        return r.json() if r is not None else {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sendPhoto failed: %s", e)
+        return {}
+
+
+def _render_apps_card(apps, running=0, limit=0, mem_mb=0):
+    """One PNG dashboard: total / running / memory + per-app rows.
+
+    This is the answer to /apps — a live snapshot, not a how-to cartoon.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    from pathlib import Path as _P
+    import tempfile
+
+    W, H = 720, min(900, 160 + max(len(apps), 1) * 44 + 40)
+    BG, CARD, TEXT = (15, 23, 42), (30, 41, 59), (226, 232, 240)
+    MUTED, OK, OFF, WARN = (148, 163, 184), (34, 197, 94), (100, 116, 139), (251, 191, 36)
+    ACCENT = (99, 102, 241)
+
+    def font(sz, bold=False):
+        for c in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ):
+            if _P(c).exists():
+                return ImageFont.truetype(c, sz)
+        return ImageFont.load_default()
+
+    im = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(im)
+    # header
+    d.rounded_rectangle((16, 16, W - 16, 120), 16, fill=CARD)
+    d.text((32, 28), "Your apps", fill=TEXT, font=font(26, True))
+    d.text((32, 68), f"{len(apps)} total", fill=MUTED, font=font(16))
+    # big stats
+    stats = [
+        (220, "Running", f"{running}/{limit or '—'}", OK if running else OFF),
+        (400, "Memory", f"{round(mem_mb)} MB", ACCENT),
+        (560, "Live", str(sum(1 for a in apps if a.get("status") == "running")), OK),
+    ]
+    for x, label, val, col in stats:
+        d.text((x, 32), label, fill=MUTED, font=font(13))
+        d.text((x, 54), val, fill=col, font=font(22, True))
+
+    # rows
+    y = 140
+    for a in apps[:14]:
+        st = (a.get("status") or "offline").lower()
+        col = OK if st == "running" else (WARN if st in ("starting", "installing", "restarting", "recovering") else OFF)
+        d.rounded_rectangle((16, y, W - 16, y + 40), 10, fill=CARD)
+        d.ellipse((28, y + 12, 44, y + 28), fill=col)
+        name = str(a.get("name") or "?")[:28]
+        d.text((56, y + 10), name, fill=TEXT, font=font(16, True))
+        right = f"{st}"
+        if a.get("mem_mb"):
+            right += f"  ·  {round(a['mem_mb'])}MB"
+        if a.get("uptime_s"):
+            right += f"  ·  {_fmt_uptime(a['uptime_s'])}"
+        # right-align-ish
+        bbox = d.textbbox((0, 0), right, font=font(13))
+        tw = bbox[2] - bbox[0]
+        d.text((W - 32 - tw, y + 12), right, fill=MUTED, font=font(13))
+        y += 44
+    if len(apps) > 14:
+        d.text((32, y + 4), f"+{len(apps) - 14} more — scroll the list below", fill=MUTED, font=font(13))
+
+    out = _P(tempfile.gettempdir()) / f"codenest_apps_{os.getpid()}.png"
+    im.save(out, "PNG", optimize=True)
+    return str(out)
+
+
 def cmd_apps(chat_id, user):
-    _maybe_guide(chat_id, "apps", user)
+    """Live fleet card + list. Not a how-to — the user asked what they own."""
     apps = bot_ops.list_apps(user["id"])
     queen = _user_is_queen(user)
     if not apps:
         _send(chat_id,
-              "You have no apps yet.\n\n"
-              "• `/code myapp` then paste code or a file\n"
-              "• `/import owner/repo` for a public GitHub repo\n"
-              "• `/guide start` for the cartoon how-to"
-              + ("\n\n👑 Queen access on — `/projects` for one-tap deploys."
-                 if queen else ""),
-              reply_markup=_help_guide_kb())
+              "No apps yet.\n"
+              "`/code myapp` · `/import owner/repo` · `/guide code`")
         return
-    # This header used to read "5/3 running slots". Both halves were wrong:
-    # len(apps) counts every app the account EVER created, stopped ones
-    # included, and MAX_JOBS_PER_USER is the global default, which ignores the
-    # per-user override an admin can grant. Together they told people they were
-    # over a limit the site was not enforcing. These are now the same two
-    # numbers the cap itself uses, so the display and the rule cannot disagree.
+
     running = bot_ops.active_count(user["id"])
     limit = bot_ops.effective_job_limit(user["id"])
-    crown = " 👑" if queen else ""
-    lines = [f"*Your apps*{crown} — {len(apps)} total · {running}/{limit} running\n"]
-    for a in apps:
+    total = len(apps)
+    mem = sum(float(a.get("mem_mb") or 0) for a in apps)
+
+    # One picture that IS the answer: counts + bars — not a tutorial.
+    try:
+        path = _render_apps_card(apps, running=running, limit=limit, mem_mb=mem)
+        if path:
+            _send_photo_file(chat_id, path,
+                             caption=f"Your apps · {total} total · {running}/{limit} running")
+    except Exception:
+        logger.exception("apps card failed")
+
+    # Compact text + per-app buttons (logs/status/restart) — no how-to footer.
+    lines = []
+    for a in apps[:20]:
         icon = _ICON.get(a["status"], "⚪")
-        bits = [f"{icon} *{a['name']}* — {a['status']}"]
+        bits = [f"{icon} *{a['name']}* — `{a['status']}`"]
         if a.get("mem_mb"):
             bits.append(f"{round(a['mem_mb'])}MB")
         if a.get("uptime_s"):
             bits.append(_fmt_uptime(a["uptime_s"]))
-        if a.get("restarts"):
-            bits.append(f"{a['restarts']}× restarted")
         lines.append(" · ".join(bits))
-    lines.append("\n`/logs name` `/restart name` `/stop name`")
-    lines.append("`/update name` `/rename name newname` `/delete name`")
-    if running >= limit:
-        lines.append(f"\n⚠️ That's your {limit} running app(s) — `/stop name` "
-                     f"frees a slot. Stopped apps still count as yours, they just "
-                     f"don't use a slot.")
+    if total > 20:
+        lines.append(f"… +{total - 20} more")
     if queen:
-        lines.append("👑 No memory ceiling · zip upload on · `/projects` for "
-                     "one-tap deploys")
-    _send(chat_id, "\n".join(lines))
+        lines.append("👑 queen · no memory ceiling")
+    if running >= limit:
+        lines.append(f"⚠️ {limit}/{limit} slots full — `/stop name` frees one")
+
+    # Buttons: each app gets Logs | Status | Restart (max ~8 apps to stay under TG limit)
+    rows = []
+    for a in apps[:8]:
+        jid = a["id"]
+        name = (a.get("name") or "?")[:16]
+        rows.append([
+            {"text": f"📜 {name}", "callback_data": f"logs:{jid}"},
+            {"text": "📊", "callback_data": f"stat:{jid}"},
+            {"text": "🔄", "callback_data": f"restart:{jid}"},
+            {"text": "⏹", "callback_data": f"stop:{jid}"},
+        ])
+    kb = {"inline_keyboard": rows} if rows else None
+    _send(chat_id, "\n".join(lines) if lines else "—", reply_markup=kb)
+
+
 
 
 def cmd_status(chat_id, user, ref=""):
     """Whole-account summary, or one app in full."""
-    _maybe_guide(chat_id, "status", user)
     if ref:
         res = bot_ops.logs(user["id"], ref, lines=0)
         if not res.get("ok"):
@@ -3631,11 +3746,10 @@ def cmd_status(chat_id, user, ref=""):
           f"*{user.get('username') or 'you'}*{crown}\n\n"
           f"Apps: {len(apps)} · running {len(running)}/{limit}\n"
           f"Memory in use: {round(mem)}MB\n\n"
-          "`/apps` for the list · `/status name` for one app · `/guide` how-tos")
+          "`/apps` for the live card · `/status name` for one app")
 
 
 def cmd_logs(chat_id, user, ref):
-    _maybe_guide(chat_id, "logs", user)
     if not ref:
         _send(chat_id, "Which app? `/logs name` — /apps lists them.")
         return
@@ -3654,23 +3768,31 @@ def cmd_logs(chat_id, user, ref):
 
 
 def cmd_restart(chat_id, user, ref):
-    _maybe_guide(chat_id, "restart", user)
     if not ref:
-        _send(chat_id, "Which app? `/restart name`")
+        _send(chat_id, "Which app? `/restart name` — or open `/apps`.")
         return
     res = bot_ops.restart(user["id"], ref)
-    _send(chat_id, f"🔄 Restarting *{res['job']['name']}*…" if res.get("ok")
-          else f"❌ {res['error']}")
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    job = res["job"]
+    _send(chat_id, f"🔄 Restarting *{job['name']}*…",
+          reply_markup=_app_buttons(job["id"],
+                                    bot_username=job.get("telegram_bot_username") or ""))
 
 
 def cmd_stop(chat_id, user, ref):
-    _maybe_guide(chat_id, "stop", user)
     if not ref:
-        _send(chat_id, "Which app? `/stop name`")
+        _send(chat_id, "Which app? `/stop name` — or open `/apps`.")
         return
     res = bot_ops.stop(user["id"], ref)
-    _send(chat_id, f"⏹ Stopped *{res['job']['name']}*." if res.get("ok")
-          else f"❌ {res['error']}")
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    job = res["job"]
+    _send(chat_id, f"⏹ Stopped *{job['name']}*.",
+          reply_markup=_app_buttons(job["id"],
+                                    bot_username=job.get("telegram_bot_username") or ""))
 
 
 def cmd_source(chat_id, user, ref):
@@ -3678,7 +3800,6 @@ def cmd_source(chat_id, user, ref):
     it can be edited locally and pushed back with /update. Owner-scoped
     like every other user command (find_app checks user_id) — this is NOT
     the admin /see tool, it only ever returns the caller's own code."""
-    _maybe_guide(chat_id, "source", user)
     if not ref:
         _send(chat_id, "Usage: `/source name`")
         return
@@ -3708,7 +3829,6 @@ def cmd_source(chat_id, user, ref):
 
 
 def cmd_delete(chat_id, user, ref):
-    _maybe_guide(chat_id, "delete", user)
     if not ref:
         _send(chat_id, "Which app? `/delete name` — this cannot be undone.")
         return
@@ -3730,7 +3850,6 @@ def _cmd_delete_confirmed(chat_id, user, ref):
 
 
 def cmd_rename(chat_id, user, args):
-    _maybe_guide(chat_id, "rename", user)
     parts = (args or "").split()
     if len(parts) < 2:
         _send(chat_id, "Usage: `/rename x x`")
@@ -3774,7 +3893,6 @@ def cmd_import(chat_id, user, arg):
     browser shows) or `owner/repo#<branch>` — and the runner clones exactly that
     branch. Without it a repo whose work lives off `main` deploys the wrong code.
     """
-    _maybe_guide(chat_id, "import", user)
     if not arg:
         ex_owner, ex_repo = _queen_repo_parts()
         example = f"github.com/{ex_owner}/{ex_repo}" if ex_owner else "github.com/user/repo"
@@ -4052,7 +4170,6 @@ def _update_one_app(chat_id, user, row, force=False):
 
 def cmd_latest(chat_id, user, ref=""):
     """`/latest [name]` — bring a repo app up to date with its branch."""
-    _maybe_guide(chat_id, "latest", user)
     apps = [a for a in bot_ops.list_apps(user["id"]) if (a.get("repo_url") or "").strip()]
     if not apps:
         _send(chat_id, "None of your apps came from a repo, so there is no commit to "
@@ -4209,7 +4326,6 @@ def cmd_projects(chat_id, user, arg=""):
     QUEEN_PROJECTS_REPO as a personal starter pack, that is offered too — but
     nothing depends on it.
     """
-    _maybe_guide(chat_id, "projects", user)
     sub = (arg or "").strip().lower()
     if sub in ("run", "deploy", "start", "install"):
         if not _user_is_queen(user):
@@ -4317,7 +4433,6 @@ def _maybe_guide(chat_id, topic: str, user=None):
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
     app's source (text or a file)."""
-    _maybe_guide(chat_id, "code", user)
     if not name:
         _send(chat_id, "Usage: `/code myapp`, then send the source "
                        "as a message or upload a file.")
@@ -4344,7 +4459,6 @@ def cmd_code_start(chat_id, user, name):
 def cmd_update_start(chat_id, user, ref):
     """/update <existing app name> — the NEXT message becomes its new code,
     redeployed in place (workspace data preserved)."""
-    _maybe_guide(chat_id, "update", user)
     if not ref:
         _send(chat_id, "Usage: `/update myapp`, then send the new "
                        "source as a message or upload a file.")
@@ -4764,7 +4878,7 @@ def handle_callback(chat_id, data, message_id=None):
                   "`/latest name`."
                   + ("\n👑 `/autodeploy name on` follows the branch."
                      if user and _user_is_queen(user) else ""),
-                  reply_markup=_help_guide_kb())
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         elif ref == "start":
             _send_guide(chat_id, "guide_start", "Start here — three taps")
             _send(chat_id,
@@ -4773,13 +4887,13 @@ def handle_callback(chat_id, data, message_id=None):
                   "2. Deploy: paste code, pick a template, or `/import` a repo.\n"
                   "3. *Save & Run*. After a runner restart, bots come back alone.\n\n"
                   "Handy: `/apps` · `/status` · `/logs name` · `/id`",
-                  reply_markup=_help_guide_kb())
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         elif ref == "id":
             _send_guide(chat_id, "guide_id", "Your ids — long-press to copy")
             # Reuse the real /id output so the numbers match what admins need.
             cmd_id(chat_id)
             _send(chat_id, "Tip: long-press a number to copy it. No broken <id> markup.",
-                  reply_markup=_help_guide_kb())
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         elif ref == "token":
             _send_guide(chat_id, "guide_token", "BOT_TOKEN — Env or inside code")
             _send(chat_id,
@@ -4789,11 +4903,19 @@ def handle_callback(chat_id, data, message_id=None):
                   "• *In the code*: `BOT_TOKEN = '123:AA…'` (no Env needed)\n\n"
                   "After a runner restart your bot comes back if the token is "
                   "in either place. You do *not* have to set it only in Env.",
-                  reply_markup=_help_guide_kb())
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         elif ref in ("code", "update", "apps", "logs", "restart", "stop",
                      "status", "source", "delete", "rename", "latest",
                      "env", "backup", "history", "link", "projects"):
             _show_command_guide(chat_id, ref, user)
+        elif ref == "catalog":
+            lines = ["📖 *Guides* (how-to pictures — only when you ask):",
+                     "`/guide code` · `/guide update` · `/guide import`",
+                     "`/guide env` · `/guide token` · `/guide link`",
+                     "",
+                     "Day-to-day (no picture — direct answer):",
+                     "`/apps` · `/logs name` · `/status name` · `/restart name`"]
+            _send(chat_id, "\n".join(lines))
         elif ref == "commands":
             cmd_commands(chat_id, user)
         elif ref == "admin":
@@ -4801,7 +4923,7 @@ def handle_callback(chat_id, data, message_id=None):
             if not _is_admin(u, chat_id):
                 # Silent for non-admins — do not advertise the admin surface.
                 _send(chat_id, "Unknown guide — try /help.",
-                      reply_markup=_help_guide_kb(u))
+                      reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
             else:
                 _send_guide(chat_id, "guide_admin", "Admin — command + button")
                 _send(chat_id,
@@ -4810,9 +4932,9 @@ def handle_callback(chat_id, data, message_id=None):
                       "and a matching typed command.\n\n"
                       "`/admin` · `/runners` · `/recover` · `/user name`\n"
                       "`/queen id` · `/admin limit id 10` · `/see id`",
-                      reply_markup=_help_guide_kb(u))
+                      reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
         else:
-            _send(chat_id, "Unknown guide — try /help.", reply_markup=_help_guide_kb())
+            _send(chat_id, "Unknown guide — try /help.", reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
     elif action == "apps" and ref == "list":
         cmd_apps(chat_id, user)
     elif action == "queen":

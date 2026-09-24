@@ -31,28 +31,24 @@ def test_help_guide_kb_shows_admin_only_for_admin(monkeypatch):
 
 def test_cmd_id_hides_admin_cmds_for_normal(monkeypatch):
     sent = []
-    monkeypatch.setattr(pingbot, "_send_plain", lambda c, t: sent.append(t))
-    monkeypatch.setattr(pingbot, "_send", lambda *a, **k: None)
-    monkeypatch.setattr(pingbot, "_open_kb", lambda: None)
-    monkeypatch.setattr(pingbot, "_maybe_guide", lambda *a, **k: None)
+    monkeypatch.setattr(pingbot, "_send_html", lambda c, t, reply_markup=None: sent.append(t))
     monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
                         lambda c: {"id": 7, "username": "u", "is_admin": 0})
     monkeypatch.setattr(pingbot, "_is_admin", lambda u, t=None: False)
+    monkeypatch.setattr(pingbot, "_user_is_queen", lambda u: False)
     pingbot.cmd_id(99, {"id": 99, "username": "u"})
     plain = "\n".join(sent)
-    assert "99" in plain
+    assert "99" in plain and "<code>99</code>" in plain
     assert "/queen" not in plain and "/admin" not in plain
 
 
 def test_cmd_id_shows_admin_cmds_only_to_admin(monkeypatch):
     sent = []
-    monkeypatch.setattr(pingbot, "_send_plain", lambda c, t: sent.append(t))
-    monkeypatch.setattr(pingbot, "_send", lambda *a, **k: None)
-    monkeypatch.setattr(pingbot, "_open_kb", lambda: None)
-    monkeypatch.setattr(pingbot, "_maybe_guide", lambda *a, **k: None)
+    monkeypatch.setattr(pingbot, "_send_html", lambda c, t, reply_markup=None: sent.append(t))
     monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
                         lambda c: {"id": 7, "username": "boss", "is_admin": 1})
     monkeypatch.setattr(pingbot, "_is_admin", lambda u, t=None: True)
+    monkeypatch.setattr(pingbot, "_user_is_queen", lambda u: False)
     pingbot.cmd_id(99, {"id": 99})
     plain = "\n".join(sent)
     assert "/queen" in plain and "/admin limit" in plain
