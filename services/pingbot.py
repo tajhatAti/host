@@ -2215,10 +2215,11 @@ class _progress:
 # Commands that touch the network or the runner, so they get the repeating
 # indicator instead of a single one.
 _SLOW_COMMANDS = frozenset((
-    "/ping", "/apps", "/jobs", "/status", "/logs", "/restart", "/stop",
+    "/ping", "/apps", "/jobs", "/list", "/status", "/uptime", "/info", "/logs", "/restart", "/stop",
     "/delete", "/source", "/import", "/projects", "/latest", "/autodeploy",
     "/limits", "/admin", "/see", "/queen", "/rename", "/update", "/code",
     "/health", "/backup", "/restore", "/rollback", "/token", "/history", "/env",
+    "/guide", "/guides", "/howto", "/recover", "/rescue", "/whoami",
     "/templates", "/usage",
 ))
 
@@ -2658,6 +2659,11 @@ def _help_text(user):
     if _user_is_queen(user):
         return _queen_help_text(user)
     return _plain_help_text(user)
+
+
+def cmd_token_tips(chat_id):
+    """`/token` — where BOT_TOKEN can live (Env or source)."""
+    handle_callback(chat_id, "help:token", None)
 
 
 def _cmd_health_smart(chat_id, telegram_user_id=None):
@@ -4711,7 +4717,10 @@ def handle_update(upd):
                 "/cancel": lambda: cmd_cancel_pending(chat_id),
                 "/apps": lambda: gated(lambda u: cmd_apps(chat_id, u)),
                 "/jobs": lambda: gated(lambda u: cmd_apps(chat_id, u)),
+                "/list": lambda: gated(lambda u: cmd_apps(chat_id, u)),
                 "/status": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
+                "/uptime": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
+                "/info": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
                 "/logs": lambda: gated(lambda u: cmd_logs(chat_id, u, arg)),
                 "/restart": lambda: gated(lambda u: cmd_restart(chat_id, u, arg)),
                 "/stop": lambda: gated(lambda u: cmd_stop(chat_id, u, arg)),
@@ -4758,6 +4767,7 @@ def handle_update(upd):
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
                 "/guide": lambda: _cmd_guide(chat_id, arg),
+                "/token": lambda: cmd_token_tips(chat_id),
                 "/guides": lambda: _cmd_guide(chat_id, arg),
                 "/howto": lambda: _cmd_guide(chat_id, arg),
             }
