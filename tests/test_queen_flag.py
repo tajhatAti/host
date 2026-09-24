@@ -331,4 +331,5 @@ check("the web editor's create sends it", src.count('"mem_limit_mb": _mem_limit_
 
 
 print(f"\ntest_queen_flag: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

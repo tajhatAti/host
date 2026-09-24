@@ -193,4 +193,5 @@ fails = [x for x in results if not x[2]]
 print(f"\n================ {len(results)-len(fails)} pass, {len(fails)} fail ================")
 if fails:
     for name, code, _ in fails: print(f"  … {name} [{code}]")
-sys.exit(1 if fails else 0)
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

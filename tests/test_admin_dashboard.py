@@ -535,4 +535,5 @@ for j in list(R._jobs.values()):
         pass
 
 print(f"\ntest_admin_dashboard: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

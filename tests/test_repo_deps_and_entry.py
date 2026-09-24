@@ -455,4 +455,5 @@ ok("no module-level cache backs it",
    "_fb_cache" not in _src and "@lru_cache" not in _fb)
 
 print(f"\ntest_repo_deps_and_entry: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

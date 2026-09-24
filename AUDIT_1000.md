@@ -1,0 +1,2625 @@
+# CodeNest — ১০০০+ বিচার অডিট
+
+তারিখ: 2026-09-25 · HEAD roughly 893f177 · মোট বিচার: **2453**
+
+| সেভ | সংখ্যা |
+|---|---|
+| FAIL | 70 |
+| WARN | 48 |
+| OK | 2276 |
+| INFO | 59 |
+
+
+## ফিক্স এই টার্নে (অডিটের পর)
+
+1. `tests/conftest.py` — ৩৫টা script-style টেস্ট pytest কালেক্ট থেকে বাদ (suite ভাঙত)।
+2. ৩৩টা টেস্টে module-level `sys.exit` → `if __name__ == "__main__"` গার্ড।
+3. `requirements.txt` এ `Pillow>=10.0.0` স্পষ্ট।
+4. `database.py` — f-string SQL identifier `_safe_ident()` allowlist।
+5. `test_store.py` — BOT_TOKEN assert আধুনিক টেমপ্লেট ফর্ম গ্রহণ করে।
+6. আগের কাজ **ড্রপ হয়নি**: plain secrets, recovery, token-in-code, isolation, guides, admin soft-err, calm UX।
+
+pytest: ~১৮৯ passed (e2e/js বাদে)।
+
+---
+
+## সারাংশ (বাংলা)
+
+- **FAIL: 70** — এখনই ঠিক
+- **WARN: 48** — দেখা দরকার
+- আগের কাজ (plain secrets, recovery, token-in-code, isolation, guides, admin soft-err) **ডিস্কে আছে — ড্রপ হয়নি**।
+- UX (no auto-guide, live /apps card, copyable /id) **কমিটেড/পুশড**।
+- বড় সমস্যা: অনেক টেস্ট `sys.exit`/script-style → পুরো `pytest tests/` কালেক্ট ভাঙে।
+- Pillow `requirements.txt`-এ আছে কিনা যাচাই (apps card)।
+
+## FAIL
+
+- **[constraint]** Hardcoded queen projects repo
+- **[tests]** test_admin_dashboard.py module-level sys.exit breaks pytest
+- **[tests]** test_admin_stealth.py module-level sys.exit breaks pytest
+- **[tests]** test_all_routes.py module-level sys.exit breaks pytest
+- **[tests]** test_auth_abuse_system.py module-level sys.exit breaks pytest
+- **[tests]** test_badhash_evidence.py module-level sys.exit breaks pytest
+- **[tests]** test_badhash_verdict.py module-level sys.exit breaks pytest
+- **[tests]** test_bot_critical.py module-level sys.exit breaks pytest
+- **[tests]** test_bot_ops.py module-level sys.exit breaks pytest
+- **[tests]** test_embedded_single_service.py module-level sys.exit breaks pytest
+- **[tests]** test_env_and_stats.py module-level sys.exit breaks pytest
+- **[tests]** test_job_data_persistence.py module-level sys.exit breaks pytest
+- **[tests]** test_job_liveness.py module-level sys.exit breaks pytest
+- **[tests]** test_legacy_db_migration.py module-level sys.exit breaks pytest
+- **[tests]** test_memory_admission.py module-level sys.exit breaks pytest
+- **[tests]** test_miniapp_auth.py module-level sys.exit breaks pytest
+- **[tests]** test_miniapp_opens.py module-level sys.exit breaks pytest
+- **[tests]** test_multi_worker.py module-level sys.exit breaks pytest
+- **[tests]** test_pg_returning_id.py module-level sys.exit breaks pytest
+- **[tests]** test_pool_resilience.py module-level sys.exit breaks pytest
+- **[tests]** test_queen_flag.py module-level sys.exit breaks pytest
+- **[tests]** test_repo_deps_and_entry.py module-level sys.exit breaks pytest
+- **[tests]** test_routing.py module-level sys.exit breaks pytest
+- **[tests]** test_runner_capacity.py module-level sys.exit breaks pytest
+- **[tests]** test_runner_standalone_boot.py module-level sys.exit breaks pytest
+- **[tests]** test_runspace_fixes.py module-level sys.exit breaks pytest
+- **[tests]** test_security_batch.py module-level sys.exit breaks pytest
+- **[tests]** test_signature_field.py module-level sys.exit breaks pytest
+- **[tests]** test_snapshot_routes.py module-level sys.exit breaks pytest
+- **[tests]** test_system_tools.py module-level sys.exit breaks pytest
+- **[tests]** test_tab_status_sync.py module-level sys.exit breaks pytest
+- **[tests]** test_telegram_link.py module-level sys.exit breaks pytest
+- **[tests]** test_token_mismatch.py module-level sys.exit breaks pytest
+- **[tests]** test_web_batch.py module-level sys.exit breaks pytest
+- **[runtime]** pingbot smoke cannot unpack non-iterable bool object
+- **[matrix]** migrate_to_supabase.py · has_module_doc
+- **[matrix]** runner/__init__.py · nonempty
+- **[matrix]** runner/__init__.py · has_module_doc
+- **[matrix]** samples/ping_bot.py · has_module_doc
+- **[matrix]** tests/audit_sqlite_leftovers.py · has_module_doc
+- **[matrix]** tests/test_admin_abuse_controls.py · has_module_doc
+- **[matrix]** tests/test_admin_batch.py · has_module_doc
+- **[matrix]** tests/test_job_recovery.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_auth_abuse_system.py · has_module_doc
+- **[matrix]** tests/test_badhash_evidence.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_badhash_verdict.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_bot_critical.py · has_module_doc
+- **[matrix]** tests/test_bot_dispatch_analytics.py · has_module_doc
+- **[matrix]** tests/test_bot_ops_multirunner.py · has_module_doc
+- **[matrix]** tests/test_bot_templates.py · has_module_doc
+- **[matrix]** tests/test_env_and_stats.py · has_module_doc
+- **[matrix]** tests/test_runner_registry.py · has_module_doc
+- **[matrix]** tests/test_job_url_routes.py · has_module_doc
+- **[matrix]** tests/test_legacy_db_migration.py · has_module_doc
+- **[matrix]** tests/test_miniapp_auth.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_pool_resilience.py · has_module_doc
+- **[matrix]** tests/test_routing.py · has_module_doc
+- **[matrix]** tests/test_job_liveness.py · has_module_doc
+- **[matrix]** tests/test_runner_standalone_boot.py · has_module_doc
+- **[matrix]** tests/test_runspace_fixes.py · has_module_doc
+- **[matrix]** tests/test_bot_list_fast.py · has_module_doc
+- **[matrix]** tests/test_security_batch.py · has_module_doc
+- **[matrix]** tests/test_signature_field.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_store.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_tab_status_sync.py · has_module_doc
+- **[matrix]** tests/test_web_batch.py · has_module_doc
+- **[matrix]** tests/test_telegram_job_detection.py · has_module_doc
+- **[matrix]** tests/test_all_routes.py · has_module_doc
+- **[matrix]** tests/test_runspace_token_from_code.py · no_hardcoded_bot_token
+- **[matrix]** tests/test_token_in_code.py · no_hardcoded_bot_token
+
+## WARN (প্রথম ২৫০)
+
+- **[alias]** /ps
+- **[quality]** cmd_admin very long (294L)
+- **[quality]** _handle_admin_callback_inner very long (606L)
+- **[quality]** handle_update very long (268L)
+- **[security]** services/bot_ops.py may log BOT_TOKEN
+- **[security]** services/job_recovery.py may log BOT_TOKEN
+- **[security]** services/secrets_store.py may log BOT_TOKEN
+- **[security]** database.py f-string SQL x4
+- **[db]** SQL comment ? count=2
+- **[fn]** services/pingbot.py::cmd_admin — 294L br=60 calls=145 | long 294L, branches 60
+- **[fn]** services/pingbot.py::_handle_admin_callback_inner — 606L br=108 calls=321 | long 606L, branches 108
+- **[fn]** services/pingbot.py::handle_callback — 200L br=44 calls=71 | branches 44
+- **[fn]** services/pingbot.py::handle_update — 268L br=25 calls=201 | long 268L
+- **[test-style]** test_admin_batch.py=script — t=0 c=38
+- **[test-style]** test_admin_dashboard.py=script — t=0 c=111
+- **[test-style]** test_admin_stealth.py=script — t=0 c=22
+- **[test-style]** test_all_routes.py=script — t=0 c=53
+- **[test-style]** test_auth_abuse_system.py=script — t=0 c=56
+- **[test-style]** test_badhash_evidence.py=script — t=0 c=26
+- **[test-style]** test_badhash_verdict.py=script — t=0 c=25
+- **[test-style]** test_bot_critical.py=script — t=0 c=24
+- **[test-style]** test_bot_ops.py=script — t=0 c=68
+- **[test-style]** test_embedded_single_service.py=script — t=0 c=17
+- **[test-style]** test_env_and_stats.py=script — t=0 c=16
+- **[test-style]** test_job_data_persistence.py=script — t=0 c=42
+- **[test-style]** test_job_liveness.py=script — t=0 c=18
+- **[test-style]** test_legacy_db_migration.py=script — t=0 c=12
+- **[test-style]** test_memory_admission.py=script — t=0 c=43
+- **[test-style]** test_miniapp_auth.py=script — t=0 c=131
+- **[test-style]** test_miniapp_opens.py=script — t=0 c=31
+- **[test-style]** test_multi_worker.py=script — t=0 c=46
+- **[test-style]** test_pg_returning_id.py=script — t=0 c=31
+- **[test-style]** test_pool_resilience.py=script — t=0 c=11
+- **[test-style]** test_queen_flag.py=script — t=0 c=55
+- **[test-style]** test_repo_deps_and_entry.py=unknown — t=0 c=0
+- **[test-style]** test_routing.py=script — t=0 c=10
+- **[test-style]** test_runner_capacity.py=script — t=0 c=25
+- **[test-style]** test_runner_standalone_boot.py=script — t=0 c=8
+- **[test-style]** test_runspace_fixes.py=script — t=0 c=26
+- **[test-style]** test_security_batch.py=script — t=0 c=23
+- **[test-style]** test_signature_field.py=script — t=0 c=18
+- **[test-style]** test_snapshot_routes.py=script — t=0 c=24
+- **[test-style]** test_sqlite_flow.py=script — t=0 c=49
+- **[test-style]** test_system_tools.py=script — t=0 c=22
+- **[test-style]** test_tab_status_sync.py=script — t=0 c=13
+- **[test-style]** test_telegram_link.py=script — t=0 c=76
+- **[test-style]** test_token_mismatch.py=script — t=0 c=22
+- **[test-style]** test_web_batch.py=script — t=0 c=18
+
+## পূর্ণ তালিকা
+
+
+### FAIL (70)
+
+- [constraint] Hardcoded queen projects repo
+- [tests] test_admin_dashboard.py module-level sys.exit breaks pytest
+- [tests] test_admin_stealth.py module-level sys.exit breaks pytest
+- [tests] test_all_routes.py module-level sys.exit breaks pytest
+- [tests] test_auth_abuse_system.py module-level sys.exit breaks pytest
+- [tests] test_badhash_evidence.py module-level sys.exit breaks pytest
+- [tests] test_badhash_verdict.py module-level sys.exit breaks pytest
+- [tests] test_bot_critical.py module-level sys.exit breaks pytest
+- [tests] test_bot_ops.py module-level sys.exit breaks pytest
+- [tests] test_embedded_single_service.py module-level sys.exit breaks pytest
+- [tests] test_env_and_stats.py module-level sys.exit breaks pytest
+- [tests] test_job_data_persistence.py module-level sys.exit breaks pytest
+- [tests] test_job_liveness.py module-level sys.exit breaks pytest
+- [tests] test_legacy_db_migration.py module-level sys.exit breaks pytest
+- [tests] test_memory_admission.py module-level sys.exit breaks pytest
+- [tests] test_miniapp_auth.py module-level sys.exit breaks pytest
+- [tests] test_miniapp_opens.py module-level sys.exit breaks pytest
+- [tests] test_multi_worker.py module-level sys.exit breaks pytest
+- [tests] test_pg_returning_id.py module-level sys.exit breaks pytest
+- [tests] test_pool_resilience.py module-level sys.exit breaks pytest
+- [tests] test_queen_flag.py module-level sys.exit breaks pytest
+- [tests] test_repo_deps_and_entry.py module-level sys.exit breaks pytest
+- [tests] test_routing.py module-level sys.exit breaks pytest
+- [tests] test_runner_capacity.py module-level sys.exit breaks pytest
+- [tests] test_runner_standalone_boot.py module-level sys.exit breaks pytest
+- [tests] test_runspace_fixes.py module-level sys.exit breaks pytest
+- [tests] test_security_batch.py module-level sys.exit breaks pytest
+- [tests] test_signature_field.py module-level sys.exit breaks pytest
+- [tests] test_snapshot_routes.py module-level sys.exit breaks pytest
+- [tests] test_system_tools.py module-level sys.exit breaks pytest
+- [tests] test_tab_status_sync.py module-level sys.exit breaks pytest
+- [tests] test_telegram_link.py module-level sys.exit breaks pytest
+- [tests] test_token_mismatch.py module-level sys.exit breaks pytest
+- [tests] test_web_batch.py module-level sys.exit breaks pytest
+- [runtime] pingbot smoke cannot unpack non-iterable bool object
+- [matrix] migrate_to_supabase.py · has_module_doc
+- [matrix] runner/__init__.py · nonempty
+- [matrix] runner/__init__.py · has_module_doc
+- [matrix] samples/ping_bot.py · has_module_doc
+- [matrix] tests/audit_sqlite_leftovers.py · has_module_doc
+- [matrix] tests/test_admin_abuse_controls.py · has_module_doc
+- [matrix] tests/test_admin_batch.py · has_module_doc
+- [matrix] tests/test_job_recovery.py · no_hardcoded_bot_token
+- [matrix] tests/test_auth_abuse_system.py · has_module_doc
+- [matrix] tests/test_badhash_evidence.py · no_hardcoded_bot_token
+- [matrix] tests/test_badhash_verdict.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_critical.py · has_module_doc
+- [matrix] tests/test_bot_dispatch_analytics.py · has_module_doc
+- [matrix] tests/test_bot_ops_multirunner.py · has_module_doc
+- [matrix] tests/test_bot_templates.py · has_module_doc
+- [matrix] tests/test_env_and_stats.py · has_module_doc
+- [matrix] tests/test_runner_registry.py · has_module_doc
+- [matrix] tests/test_job_url_routes.py · has_module_doc
+- [matrix] tests/test_legacy_db_migration.py · has_module_doc
+- [matrix] tests/test_miniapp_auth.py · no_hardcoded_bot_token
+- [matrix] tests/test_pool_resilience.py · has_module_doc
+- [matrix] tests/test_routing.py · has_module_doc
+- [matrix] tests/test_job_liveness.py · has_module_doc
+- [matrix] tests/test_runner_standalone_boot.py · has_module_doc
+- [matrix] tests/test_runspace_fixes.py · has_module_doc
+- [matrix] tests/test_bot_list_fast.py · has_module_doc
+- [matrix] tests/test_security_batch.py · has_module_doc
+- [matrix] tests/test_signature_field.py · no_hardcoded_bot_token
+- [matrix] tests/test_store.py · no_hardcoded_bot_token
+- [matrix] tests/test_tab_status_sync.py · has_module_doc
+- [matrix] tests/test_web_batch.py · has_module_doc
+- [matrix] tests/test_telegram_job_detection.py · has_module_doc
+- [matrix] tests/test_all_routes.py · has_module_doc
+- [matrix] tests/test_runspace_token_from_code.py · no_hardcoded_bot_token
+- [matrix] tests/test_token_in_code.py · no_hardcoded_bot_token
+
+### WARN (48)
+
+- [alias] /ps
+- [quality] cmd_admin very long (294L)
+- [quality] _handle_admin_callback_inner very long (606L)
+- [quality] handle_update very long (268L)
+- [security] services/bot_ops.py may log BOT_TOKEN
+- [security] services/job_recovery.py may log BOT_TOKEN
+- [security] services/secrets_store.py may log BOT_TOKEN
+- [security] database.py f-string SQL x4
+- [db] SQL comment ? count=2
+- [fn] services/pingbot.py::cmd_admin — 294L br=60 calls=145 | long 294L, branches 60
+- [fn] services/pingbot.py::_handle_admin_callback_inner — 606L br=108 calls=321 | long 606L, branches 108
+- [fn] services/pingbot.py::handle_callback — 200L br=44 calls=71 | branches 44
+- [fn] services/pingbot.py::handle_update — 268L br=25 calls=201 | long 268L
+- [test-style] test_admin_batch.py=script — t=0 c=38
+- [test-style] test_admin_dashboard.py=script — t=0 c=111
+- [test-style] test_admin_stealth.py=script — t=0 c=22
+- [test-style] test_all_routes.py=script — t=0 c=53
+- [test-style] test_auth_abuse_system.py=script — t=0 c=56
+- [test-style] test_badhash_evidence.py=script — t=0 c=26
+- [test-style] test_badhash_verdict.py=script — t=0 c=25
+- [test-style] test_bot_critical.py=script — t=0 c=24
+- [test-style] test_bot_ops.py=script — t=0 c=68
+- [test-style] test_embedded_single_service.py=script — t=0 c=17
+- [test-style] test_env_and_stats.py=script — t=0 c=16
+- [test-style] test_job_data_persistence.py=script — t=0 c=42
+- [test-style] test_job_liveness.py=script — t=0 c=18
+- [test-style] test_legacy_db_migration.py=script — t=0 c=12
+- [test-style] test_memory_admission.py=script — t=0 c=43
+- [test-style] test_miniapp_auth.py=script — t=0 c=131
+- [test-style] test_miniapp_opens.py=script — t=0 c=31
+- [test-style] test_multi_worker.py=script — t=0 c=46
+- [test-style] test_pg_returning_id.py=script — t=0 c=31
+- [test-style] test_pool_resilience.py=script — t=0 c=11
+- [test-style] test_queen_flag.py=script — t=0 c=55
+- [test-style] test_repo_deps_and_entry.py=unknown — t=0 c=0
+- [test-style] test_routing.py=script — t=0 c=10
+- [test-style] test_runner_capacity.py=script — t=0 c=25
+- [test-style] test_runner_standalone_boot.py=script — t=0 c=8
+- [test-style] test_runspace_fixes.py=script — t=0 c=26
+- [test-style] test_security_batch.py=script — t=0 c=23
+- [test-style] test_signature_field.py=script — t=0 c=18
+- [test-style] test_snapshot_routes.py=script — t=0 c=24
+- [test-style] test_sqlite_flow.py=script — t=0 c=49
+- [test-style] test_system_tools.py=script — t=0 c=22
+- [test-style] test_tab_status_sync.py=script — t=0 c=13
+- [test-style] test_telegram_link.py=script — t=0 c=76
+- [test-style] test_token_mismatch.py=script — t=0 c=22
+- [test-style] test_web_batch.py=script — t=0 c=18
+
+### OK (2276)
+
+- [structure] services/pingbot.py exists — 264285 bytes
+- [structure] services/bot_ops.py exists — 54727 bytes
+- [structure] services/job_recovery.py exists — 18583 bytes
+- [structure] services/secrets_store.py exists — 10768 bytes
+- [structure] services/telegram_link.py exists — 16203 bytes
+- [structure] services/telegram_admin_ext.py exists — 32237 bytes
+- [structure] services/env_rescue.py exists — 8728 bytes
+- [structure] services/github_repo.py exists — 14926 bytes
+- [structure] services/runner_client.py exists — 19092 bytes
+- [structure] runner/app.py exists — 156625 bytes
+- [structure] runner/terminal.py exists — 44785 bytes
+- [structure] app.py exists — 31911 bytes
+- [structure] database.py exists — 48702 bytes
+- [structure] routes/runspace.py exists — 73565 bytes
+- [structure] routes/admin.py exists — 60034 bytes
+- [structure] routes/ping.py exists — 7477 bytes
+- [structure] static/pro.js exists — 475968 bytes
+- [structure] static/app.css exists — 279347 bytes
+- [structure] index.html exists — 136381 bytes
+- [structure] render.yaml exists — 5885 bytes
+- [structure] requirements.txt exists — 711 bytes
+- [structure] .env.example exists — 9552 bytes
+- [structure] README.md exists — 15579 bytes
+- [guides] 21 guide PNGs — guide_admin,guide_apps,guide_backup,guide_code,guide_delete,guide_env,guide_history,guide_id,guide_i
+- [constraint] Secrets stored as plain text in DB
+- [constraint] pack_env does not encrypt new rows
+- [constraint] Recovery looks at BOT_TOKEN / source
+- [constraint] job_recovery: no pure env-token lecture
+- [constraint] bot_ops: no pure env-token lecture
+- [constraint] runspace: no pure env-token lecture
+- [constraint] Runner isolation
+- [constraint] Runner crash-loop
+- [constraint] Runner OOM
+- [constraint] Runner sibling protection
+- [constraint] Boot recovery present
+- [constraint] Bare /ping platform wording
+- [constraint] cmd_commands admin-sample safe
+- [constraint] cmd_id admin-sample safe
+- [constraint] handle_start admin-sample safe
+- [constraint] _main_kb admin-sample safe
+- [constraint] QUEEN_PROJECTS_REPO default empty
+- [ux] cmd_apps: no auto guide
+- [ux] cmd_logs: no auto guide
+- [ux] cmd_restart: no auto guide
+- [ux] cmd_stop: no auto guide
+- [ux] cmd_status: no auto guide
+- [ux] cmd_id: no auto guide
+- [ux] cmd_source: no auto guide
+- [ux] cmd_delete: no auto guide
+- [ux] cmd_rename: no auto guide
+- [ux] cmd_env: no auto guide
+- [ux] cmd_backup: no auto guide
+- [ux] cmd_history: no auto guide
+- [ux] cmd_latest: no auto guide
+- [ux] cmd_import: no auto guide
+- [ux] cmd_code_start: no auto guide
+- [ux] cmd_update_start: no auto guide
+- [ux] cmd_autodeploy: no auto guide
+- [ux] cmd_limits: no auto guide
+- [ux] cmd_web: no auto guide
+- [ux] cmd_health: no auto guide
+- [ux] cmd_token_tips: no auto guide
+- [ux] cmd_projects: no auto guide
+- [ux] /id HTML code chips
+- [ux] apps card renderer present
+- [ux] cmd_apps uses card
+- [ux] Guide quiet More-guides only
+- [admin] Admin callback exception-safe
+- [admin] pro.js _admFriendlyErr
+- [constraint] bot_analytics present
+- [alias] /list
+- [alias] /uptime
+- [alias] /info
+- [alias] /token
+- [alias] /whoami
+- [alias] /bots
+- [dispatch] cmd_admin_short_toggle refs=3
+- [dispatch] cmd_queen refs=6
+- [dispatch] cmd_user refs=2
+- [dispatch] cmd_see refs=2
+- [dispatch] cmd_admin refs=11
+- [dispatch] cmd_limits refs=2
+- [dispatch] cmd_commands refs=4
+- [dispatch] cmd_env refs=2
+- [dispatch] cmd_backup refs=2
+- [dispatch] cmd_history refs=2
+- [dispatch] cmd_token_tips refs=2
+- [dispatch] cmd_id refs=5
+- [dispatch] cmd_web refs=3
+- [dispatch] cmd_health refs=5
+- [dispatch] cmd_apps refs=6
+- [dispatch] cmd_status refs=5
+- [dispatch] cmd_logs refs=3
+- [dispatch] cmd_restart refs=3
+- [dispatch] cmd_stop refs=3
+- [dispatch] cmd_source refs=2
+- [dispatch] cmd_delete refs=2
+- [dispatch] cmd_rename refs=2
+- [dispatch] cmd_import refs=4
+- [dispatch] cmd_latest refs=4
+- [dispatch] cmd_autodeploy refs=2
+- [dispatch] cmd_projects refs=4
+- [dispatch] cmd_code_start refs=2
+- [dispatch] cmd_update_start refs=2
+- [dispatch] cmd_cancel_pending refs=2
+- [quality] _is_admin size (4L)
+- [quality] _admin_notify_targets size (10L)
+- [quality] _admin_notify_loop size (24L)
+- [quality] _admin_menu_kb size (26L)
+- [quality] _maintenance_label size (3L)
+- [quality] _admin_user_row_kb size (29L)
+- [quality] _admin_user_detail_text size (50L)
+- [quality] _admin_job_detail_text size (56L)
+- [quality] _admin_job_kb size (20L)
+- [quality] cmd_admin_short_toggle size (19L)
+- [quality] _safe_reapply_mem size (13L)
+- [quality] _queens_text size (12L)
+- [quality] cmd_queen size (73L)
+- [quality] cmd_user size (21L)
+- [quality] cmd_see size (71L)
+- [quality] _admin_users_text size (17L)
+- [quality] _admin_users_kb size (26L)
+- [quality] _admin_health_text size (139L)
+- [quality] _admin_health_kb size (10L)
+- [quality] handle_admin_callback size (26L)
+- [quality] _site_base size (34L)
+- [quality] _start_admin_flow size (5L)
+- [quality] _advance_admin_flow size (19L)
+- [quality] _run_admin_flow size (104L)
+- [quality] _tg size (15L)
+- [quality] _guide_path size (6L)
+- [quality] _send_guide size (27L)
+- [quality] _send_document size (17L)
+- [quality] _is_parse_error size (15L)
+- [quality] _send size (23L)
+- [quality] _send_plain size (4L)
+- [quality] _send_html size (11L)
+- [quality] _edit_or_send size (18L)
+- [quality] _typing size (6L)
+- [quality] _progress_bar size (5L)
+- [quality] _require_link size (12L)
+- [quality] handle_link size (58L)
+- [quality] _cmd_arg size (4L)
+- [quality] _tg_display size (11L)
+- [quality] _miniapp_ok size (2L)
+- [quality] _open_button size (12L)
+- [quality] _open_kb size (4L)
+- [quality] _menu_buttons size (3L)
+- [quality] set_menu_button size (29L)
+- [quality] _queen_help_block size (22L)
+- [quality] _main_kb size (38L)
+- [quality] _help_guide_kb size (18L)
+- [quality] _queen_panel_kb size (16L)
+- [quality] _queen_panel_text size (62L)
+- [quality] cmd_limits size (18L)
+- [quality] _queen_help_text size (47L)
+- [quality] _plain_help_text size (37L)
+- [quality] _help_text size (5L)
+- [quality] cmd_commands size (36L)
+- [quality] cmd_env size (41L)
+- [quality] cmd_backup size (29L)
+- [quality] cmd_history size (36L)
+- [quality] cmd_token_tips size (3L)
+- [quality] _cmd_health_smart size (7L)
+- [quality] _show_command_guide size (17L)
+- [quality] _cmd_guide size (40L)
+- [quality] handle_start size (52L)
+- [quality] handle_unlink size (10L)
+- [quality] _link_rate_ok size (7L)
+- [quality] ping_default_target size (13L)
+- [quality] _ping_ip_blocked size (13L)
+- [quality] _ping_host_allowed size (35L)
+- [quality] _ping_error_detail size (17L)
+- [quality] _ping_error_text size (33L)
+- [quality] _ping_kb size (5L)
+- [quality] handle_ping size (101L)
+- [quality] cmd_id size (54L)
+- [quality] cmd_web size (28L)
+- [quality] cmd_health size (59L)
+- [quality] _app_buttons size (34L)
+- [quality] get_job_buttons size (2L)
+- [quality] _fmt_uptime size (10L)
+- [quality] _user_is_queen size (15L)
+- [quality] _send_photo_file size (17L)
+- [quality] _render_apps_card size (69L)
+- [quality] cmd_apps size (57L)
+- [quality] cmd_status size (54L)
+- [quality] cmd_logs size (16L)
+- [quality] cmd_restart size (12L)
+- [quality] cmd_stop size (12L)
+- [quality] cmd_source size (31L)
+- [quality] cmd_delete size (13L)
+- [quality] _cmd_delete_confirmed size (4L)
+- [quality] cmd_rename size (8L)
+- [quality] _repo_branch_of size (16L)
+- [quality] cmd_import size (82L)
+- [quality] _remember_picks size (7L)
+- [quality] _take_pick size (17L)
+- [quality] _free_app_name size (8L)
+- [quality] offer_repo_choices size (37L)
+- [quality] deploy_pick size (24L)
+- [quality] _send_deployed size (22L)
+- [quality] _send_repo_readme size (22L)
+- [quality] _update_one_app size (36L)
+- [quality] cmd_latest size (24L)
+- [quality] cmd_autodeploy size (32L)
+- [quality] toggle_autodeploy size (9L)
+- [quality] _queen_repo_parts size (5L)
+- [quality] queen_project_url size (5L)
+- [quality] _project_app_name size (10L)
+- [quality] _send_repo_apps size (38L)
+- [quality] cmd_projects size (61L)
+- [quality] _deploy_queen_project size (13L)
+- [quality] _send_project_readme size (14L)
+- [quality] _maybe_guide size (17L)
+- [quality] cmd_code_start size (24L)
+- [quality] cmd_update_start size (19L)
+- [quality] cmd_cancel_pending size (3L)
+- [quality] _get_pending size (10L)
+- [quality] _pick_zip_entry size (11L)
+- [quality] _extract_zip_document size (55L)
+- [quality] _download_document size (37L)
+- [quality] _lang_for_document size (3L)
+- [quality] handle_pending_code size (174L)
+- [quality] handle_callback size (200L)
+- [quality] _send_job_data size (48L)
+- [quality] _command_parts size (8L)
+- [quality] _row_id size (5L)
+- [quality] enable_webhook size (28L)
+- [quality] poll_loop size (84L)
+- [quality] start_bot size (96L)
+- [syntax] services/bot_ops.py parses
+- [syntax] services/job_recovery.py parses
+- [syntax] services/secrets_store.py parses
+- [syntax] services/env_rescue.py parses
+- [syntax] services/github_repo.py parses
+- [syntax] runner/app.py parses
+- [syntax] routes/runspace.py parses
+- [syntax] routes/admin.py parses
+- [syntax] database.py parses
+- [syntax] app.py parses
+- [security] Ping SSRF guard
+- [security] services/bot_ops.py f-string SQL clean
+- [security] services/job_recovery.py f-string SQL clean
+- [security] routes/admin.py f-string SQL clean
+- [security] routes/runspace.py f-string SQL clean
+- [security] services/pingbot.py eval/exec
+- [security] routes/runspace.py eval/exec
+- [security] app.py eval/exec
+- [security] Admin routes gated
+- [recovery] Recovery repo_url
+- [recovery] Admin /recover
+- [runner] job endpoint
+- [runner] subprocess
+- [runner] memory
+- [runner] logs
+- [runner] kill
+- [runner] health
+- [runner] pip
+- [web] index loads pro.js
+- [web] guides route
+- [web] gated admin panel html
+- [db] Postgres
+- [db] SQLite
+- [tests] test_cmd_id_plain.py (id)
+- [tests] test_command_guides_privacy.py (guides)
+- [tests] test_job_recovery.py (recovery)
+- [tests] test_token_in_code.py (token)
+- [tests] test_secrets_plain.py (secrets)
+- [tests] test_runner_isolation.py (isolation)
+- [tests] test_ping_and_queen.py (ping)
+- [tests] test_env_rescue.py (env_rescue)
+- [tests] test_new_bot_commands.py (cmds)
+- [tests] test_runspace_token_from_code.py (rs_token)
+- [tests] test_queen_flag.py (queen)
+- [tests] test_admin_progress.py (progress)
+- [deploy] .env.example secrets framing
+- [deps] Pillow in requirements
+- [deps] fastapi
+- [deps] uvicorn
+- [deps] requests
+- [runtime] pack_env plain
+- [runtime] unpack roundtrip
+- [runtime] legacy decrypt
+- [runtime] apps card /tmp/codenest_apps_2186.png
+- [runtime] cmd_id HTML
+- [fn] services/pingbot.py::_is_admin — 4L br=1 calls=2
+- [fn] services/pingbot.py::_admin_notify_targets — 10L br=3 calls=6
+- [fn] services/pingbot.py::_admin_notify_loop — 24L br=9 calls=9
+- [fn] services/pingbot.py::_admin_menu_kb — 26L br=0 calls=1
+- [fn] services/pingbot.py::_maintenance_label — 3L br=0 calls=1
+- [fn] services/pingbot.py::_admin_user_row_kb — 29L br=2 calls=12
+- [fn] services/pingbot.py::_admin_user_detail_text — 50L br=12 calls=39
+- [fn] services/pingbot.py::_admin_job_detail_text — 56L br=9 calls=61
+- [fn] services/pingbot.py::_admin_job_kb — 20L br=1 calls=4
+- [fn] services/pingbot.py::cmd_admin_short_toggle — 19L br=3 calls=9
+- [fn] services/pingbot.py::_safe_reapply_mem — 13L br=1 calls=2
+- [fn] services/pingbot.py::_queens_text — 12L br=2 calls=8
+- [fn] services/pingbot.py::cmd_queen — 73L br=8 calls=23
+- [fn] services/pingbot.py::cmd_user — 21L br=3 calls=12
+- [fn] services/pingbot.py::cmd_see — 71L br=12 calls=44
+- [fn] services/pingbot.py::_admin_users_text — 17L br=5 calls=14
+- [fn] services/pingbot.py::_admin_users_kb — 26L br=9 calls=18
+- [fn] services/pingbot.py::_admin_health_text — 139L br=14 calls=70
+- [fn] services/pingbot.py::_admin_health_kb — 10L br=0 calls=0
+- [fn] services/pingbot.py::handle_admin_callback — 26L br=3 calls=5
+- [fn] services/pingbot.py::_site_base — 34L br=2 calls=3
+- [fn] services/pingbot.py::_start_admin_flow — 5L br=0 calls=2
+- [fn] services/pingbot.py::_advance_admin_flow — 19L br=2 calls=10
+- [fn] services/pingbot.py::_run_admin_flow — 104L br=23 calls=90
+- [fn] services/pingbot.py::_tg — 15L br=2 calls=3
+- [fn] services/pingbot.py::_guide_path — 6L br=0 calls=3
+- [fn] services/pingbot.py::_send_guide — 27L br=4 calls=9
+- [fn] services/pingbot.py::_send_document — 17L br=2 calls=6
+- [fn] services/pingbot.py::_is_parse_error — 15L br=0 calls=4
+- [fn] services/pingbot.py::_send — 23L br=4 calls=14
+- [fn] services/pingbot.py::_send_plain — 4L br=0 calls=1
+- [fn] services/pingbot.py::_send_html — 11L br=2 calls=5
+- [fn] services/pingbot.py::_edit_or_send — 18L br=4 calls=8
+- [fn] services/pingbot.py::_typing — 6L br=1 calls=1
+- [class] services/pingbot.py::_working
+- [fn] services/pingbot.py::_progress_bar — 5L br=0 calls=4
+- [class] services/pingbot.py::_progress
+- [fn] services/pingbot.py::_require_link — 12L br=1 calls=2
+- [fn] services/pingbot.py::handle_link — 58L br=8 calls=22
+- [fn] services/pingbot.py::_cmd_arg — 4L br=0 calls=3
+- [fn] services/pingbot.py::_tg_display — 11L br=1 calls=5
+- [fn] services/pingbot.py::_miniapp_ok — 2L br=0 calls=1
+- [fn] services/pingbot.py::_open_button — 12L br=2 calls=1
+- [fn] services/pingbot.py::_open_kb — 4L br=0 calls=1
+- [fn] services/pingbot.py::_menu_buttons — 3L br=0 calls=1
+- [fn] services/pingbot.py::set_menu_button — 29L br=3 calls=6
+- [fn] services/pingbot.py::_queen_help_block — 22L br=0 calls=0
+- [fn] services/pingbot.py::_main_kb — 38L br=4 calls=10
+- [fn] services/pingbot.py::_help_guide_kb — 18L br=2 calls=3
+- [fn] services/pingbot.py::_queen_panel_kb — 16L br=2 calls=4
+- [fn] services/pingbot.py::_queen_panel_text — 62L br=3 calls=11
+- [fn] services/pingbot.py::cmd_limits — 18L br=1 calls=14
+- [fn] services/pingbot.py::_queen_help_text — 47L br=0 calls=5
+- [fn] services/pingbot.py::_plain_help_text — 37L br=0 calls=0
+- [fn] services/pingbot.py::_help_text — 5L br=1 calls=3
+- [fn] services/pingbot.py::cmd_commands — 36L br=3 calls=8
+- [fn] services/pingbot.py::cmd_env — 41L br=7 calls=29
+- [fn] services/pingbot.py::cmd_backup — 29L br=5 calls=14
+- [fn] services/pingbot.py::cmd_history — 36L br=5 calls=18
+- [fn] services/pingbot.py::cmd_token_tips — 3L br=0 calls=1
+- [fn] services/pingbot.py::_cmd_health_smart — 7L br=1 calls=6
+- [fn] services/pingbot.py::_show_command_guide — 17L br=1 calls=6
+- [fn] services/pingbot.py::_cmd_guide — 40L br=3 calls=11
+- [fn] services/pingbot.py::handle_start — 52L br=3 calls=9
+- [fn] services/pingbot.py::handle_unlink — 10L br=1 calls=5
+- [fn] services/pingbot.py::_link_rate_ok — 7L br=1 calls=3
+- [fn] services/pingbot.py::ping_default_target — 13L br=0 calls=2
+- [fn] services/pingbot.py::_ping_ip_blocked — 13L br=1 calls=5
+- [fn] services/pingbot.py::_ping_host_allowed — 35L br=11 calls=9
+- [fn] services/pingbot.py::_ping_error_detail — 17L br=1 calls=11
+- [fn] services/pingbot.py::_ping_error_text — 33L br=7 calls=6
+- [fn] services/pingbot.py::_ping_kb — 5L br=0 calls=0
+- [fn] services/pingbot.py::handle_ping — 101L br=18 calls=40
+- [fn] services/pingbot.py::cmd_id — 54L br=5 calls=31
+- [fn] services/pingbot.py::cmd_web — 28L br=2 calls=7
+- [fn] services/pingbot.py::cmd_health — 59L br=7 calls=47
+- [fn] services/pingbot.py::_app_buttons — 34L br=5 calls=7
+- [fn] services/pingbot.py::get_job_buttons — 2L br=0 calls=1
+- [fn] services/pingbot.py::_fmt_uptime — 10L br=3 calls=1
+- [fn] services/pingbot.py::_user_is_queen — 15L br=3 calls=4
+- [fn] services/pingbot.py::_send_photo_file — 17L br=2 calls=6
+- [fn] services/pingbot.py::_render_apps_card — 69L br=8 calls=48
+- [fn] services/pingbot.py::cmd_apps — 57L br=11 calls=29
+- [fn] services/pingbot.py::cmd_status — 54L br=7 calls=41
+- [fn] services/pingbot.py::cmd_logs — 16L br=3 calls=9
+- [fn] services/pingbot.py::cmd_restart — 12L br=2 calls=7
+- [fn] services/pingbot.py::cmd_stop — 12L br=2 calls=7
+- [fn] services/pingbot.py::cmd_source — 31L br=4 calls=11
+- [fn] services/pingbot.py::cmd_delete — 13L br=2 calls=4
+- [fn] services/pingbot.py::_cmd_delete_confirmed — 4L br=0 calls=3
+- [fn] services/pingbot.py::cmd_rename — 8L br=1 calls=7
+- [fn] services/pingbot.py::_repo_branch_of — 16L br=2 calls=6
+- [fn] services/pingbot.py::cmd_import — 82L br=10 calls=33
+- [fn] services/pingbot.py::_remember_picks — 7L br=1 calls=5
+- [fn] services/pingbot.py::_take_pick — 17L br=3 calls=11
+- [fn] services/pingbot.py::_free_app_name — 8L br=1 calls=2
+- [fn] services/pingbot.py::offer_repo_choices — 37L br=5 calls=20
+- [fn] services/pingbot.py::deploy_pick — 24L br=2 calls=22
+- [fn] services/pingbot.py::_send_deployed — 22L br=4 calls=15
+- [fn] services/pingbot.py::_send_repo_readme — 22L br=3 calls=9
+- [fn] services/pingbot.py::_update_one_app — 36L br=4 calls=21
+- [fn] services/pingbot.py::cmd_latest — 24L br=4 calls=13
+- [fn] services/pingbot.py::cmd_autodeploy — 32L br=4 calls=17
+- [fn] services/pingbot.py::toggle_autodeploy — 9L br=1 calls=7
+- [fn] services/pingbot.py::_queen_repo_parts — 5L br=0 calls=3
+- [fn] services/pingbot.py::queen_project_url — 5L br=1 calls=0
+- [fn] services/pingbot.py::_project_app_name — 10L br=1 calls=4
+- [fn] services/pingbot.py::_send_repo_apps — 38L br=7 calls=20
+- [fn] services/pingbot.py::cmd_projects — 61L br=7 calls=19
+- [fn] services/pingbot.py::_deploy_queen_project — 13L br=1 calls=5
+- [fn] services/pingbot.py::_send_project_readme — 14L br=1 calls=3
+- [fn] services/pingbot.py::_maybe_guide — 17L br=3 calls=7
+- [fn] services/pingbot.py::cmd_code_start — 24L br=3 calls=7
+- [fn] services/pingbot.py::cmd_update_start — 19L br=2 calls=5
+- [fn] services/pingbot.py::cmd_cancel_pending — 3L br=0 calls=2
+- [fn] services/pingbot.py::_get_pending — 10L br=2 calls=3
+- [fn] services/pingbot.py::_pick_zip_entry — 11L br=0 calls=7
+- [fn] services/pingbot.py::_extract_zip_document — 55L br=8 calls=25
+- [fn] services/pingbot.py::_download_document — 37L br=5 calls=13
+- [fn] services/pingbot.py::_lang_for_document — 3L br=0 calls=3
+- [fn] services/pingbot.py::handle_pending_code — 174L br=22 calls=103
+- [fn] services/pingbot.py::_send_job_data — 48L br=11 calls=21
+- [fn] services/pingbot.py::_command_parts — 8L br=1 calls=6
+- [fn] services/pingbot.py::_row_id — 5L br=1 calls=0
+- [fn] services/pingbot.py::telegram_webhook — 30L br=3 calls=5
+- [fn] services/pingbot.py::enable_webhook — 28L br=3 calls=8
+- [fn] services/pingbot.py::poll_loop — 84L br=10 calls=21
+- [fn] services/pingbot.py::start_bot — 96L br=8 calls=42
+- [fn] services/bot_ops.py::_effective_job_limit — 23L br=2 calls=5
+- [fn] services/bot_ops.py::is_queen — 16L br=1 calls=5
+- [fn] services/bot_ops.py::_mem_limit_for — 15L br=0 calls=4
+- [fn] services/bot_ops.py::account_privileges — 14L br=0 calls=3
+- [fn] services/bot_ops.py::zip_limits_for — 10L br=1 calls=1
+- [fn] services/bot_ops.py::reapply_mem_limit — 36L br=3 calls=10
+- [fn] services/bot_ops.py::slugify_name — 5L br=0 calls=4
+- [fn] services/bot_ops.py::list_apps — 22L br=1 calls=16
+- [fn] services/bot_ops.py::find_app — 31L br=5 calls=13
+- [fn] services/bot_ops.py::_worker_of — 5L br=1 calls=2
+- [fn] services/bot_ops.py::_row_env — 37L br=4 calls=9
+- [fn] services/bot_ops.py::_url_slug — 6L br=0 calls=6
+- [fn] services/bot_ops.py::dashboard_link — 10L br=2 calls=4
+- [fn] services/bot_ops.py::token_from_source — 14L br=1 calls=3
+- [fn] services/bot_ops.py::ensure_bot_token_in_env — 15L br=2 calls=5
+- [fn] services/bot_ops.py::env_missing_message — 18L br=0 calls=4
+- [fn] services/bot_ops.py::_set_assignment — 14L br=0 calls=5
+- [fn] services/bot_ops.py::_cold_start — 78L br=14 calls=36
+- [fn] services/bot_ops.py::_ensure_present — 16L br=5 calls=8
+- [fn] services/bot_ops.py::active_count — 14L br=1 calls=12
+- [fn] services/bot_ops.py::_act — 34L br=9 calls=15
+- [fn] services/bot_ops.py::restart — 2L br=0 calls=1
+- [fn] services/bot_ops.py::stop — 2L br=0 calls=1
+- [fn] services/bot_ops.py::delete — 22L br=3 calls=9
+- [fn] services/bot_ops.py::rename — 20L br=3 calls=9
+- [fn] services/bot_ops.py::set_env — 30L br=4 calls=13
+- [fn] services/bot_ops.py::logs — 12L br=2 calls=8
+- [fn] services/bot_ops.py::create_app_from_zip — 64L br=5 calls=35
+- [fn] services/bot_ops.py::create_app_from_repo — 91L br=7 calls=38
+- [fn] services/bot_ops.py::_runner_detail — 7L br=1 calls=3
+- [fn] services/bot_ops.py::_record_repo_state — 11L br=0 calls=5
+- [fn] services/bot_ops.py::update_from_repo — 77L br=12 calls=37
+- [fn] services/bot_ops.py::set_auto_deploy — 18L br=2 calls=9
+- [fn] services/bot_ops.py::auto_deploy_jobs — 15L br=0 calls=5
+- [fn] services/bot_ops.py::create_app — 68L br=5 calls=39
+- [fn] services/bot_ops.py::update_from_zip — 89L br=10 calls=45
+- [fn] services/bot_ops.py::update_code — 103L br=10 calls=48
+- [fn] services/job_recovery.py::_wanted_rows — 19L br=0 calls=5
+- [fn] services/job_recovery.py::_remember — 10L br=0 calls=4
+- [fn] services/job_recovery.py::_answered_workers — 27L br=2 calls=5
+- [fn] services/job_recovery.py::_recovery_body — 43L br=3 calls=8
+- [fn] services/job_recovery.py::recover_once — 95L br=16 calls=32
+- [fn] services/job_recovery.py::auto_deploy_status — 6L br=0 calls=3
+- [fn] services/job_recovery.py::auto_deploy_sweep — 81L br=11 calls=30
+- [fn] services/job_recovery.py::recover_background — 10L br=3 calls=5
+- [fn] services/job_recovery.py::_reconcile_loop — 29L br=5 calls=9
+- [fn] services/job_recovery.py::start_reconciler — 19L br=2 calls=4
+- [fn] services/secrets_store.py::_materials — 9L br=2 calls=4
+- [fn] services/secrets_store.py::configured — 7L br=0 calls=2
+- [fn] services/secrets_store.py::_fernet — 6L br=0 calls=6
+- [fn] services/secrets_store.py::pack_env — 6L br=1 calls=2
+- [fn] services/secrets_store.py::legacy_encrypt — 14L br=2 calls=8
+- [fn] services/secrets_store.py::_unpack_with_key_index — 32L br=6 calls=12
+- [fn] services/secrets_store.py::unpack_env — 3L br=0 calls=1
+- [fn] services/secrets_store.py::read_env — 11L br=0 calls=1
+- [fn] services/secrets_store.py::_is_legacy — 2L br=0 calls=2
+- [fn] services/secrets_store.py::legacy_rows — 20L br=2 calls=8
+- [fn] services/secrets_store.py::migrate_job_envs — 74L br=10 calls=35
+- [fn] services/env_rescue.py::_fields — 6L br=1 calls=1
+- [fn] services/env_rescue.py::read_manifest_env — 35L br=5 calls=14
+- [fn] services/env_rescue.py::_save_env — 15L br=1 calls=7
+- [fn] services/env_rescue.py::rescue_job_env — 34L br=5 calls=19
+- [fn] services/env_rescue.py::unreadable_rows — 21L br=3 calls=9
+- [fn] services/env_rescue.py::unreadable_count — 3L br=0 calls=2
+- [fn] services/env_rescue.py::rescue_unreadable_rows — 28L br=4 calls=12
+- [fn] services/github_repo.py::parse_repo — 34L br=6 calls=19
+- [fn] services/github_repo.py::repo_url — 4L br=0 calls=0
+- [fn] services/github_repo.py::_headers — 6L br=1 calls=0
+- [fn] services/github_repo.py::_cached — 22L br=3 calls=4
+- [fn] services/github_repo.py::tree — 25L br=4 calls=14
+- [fn] services/github_repo.py::head_commit — 27L br=4 calls=8
+- [fn] services/github_repo.py::readme — 22L br=3 calls=6
+- [fn] services/github_repo.py::_manifests_in — 16L br=5 calls=8
+- [fn] services/github_repo.py::_lang_of — 3L br=0 calls=3
+- [fn] services/github_repo.py::scan_projects — 77L br=12 calls=19
+- [fn] services/github_repo.py::describe_scan — 12L br=2 calls=5
+- [fn] services/telegram_admin_ext.py::is_banned — 10L br=1 calls=5
+- [fn] services/telegram_admin_ext.py::ban_telegram_id — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::unban_telegram_id — 8L br=0 calls=4
+- [fn] services/telegram_admin_ext.py::list_banned — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::set_job_limit_override — 9L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::all_linked_telegram_ids — 9L br=0 calls=4
+- [fn] services/telegram_admin_ext.py::admin_find_job — 7L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::admin_restart_job — 5L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::admin_stop_job — 5L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::admin_delete_job — 5L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::jobs_for_user — 32L br=1 calls=20
+- [fn] services/telegram_admin_ext.py::job_full_detail_with_code — 25L br=2 calls=17
+- [fn] services/telegram_admin_ext.py::search_users — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::search_jobs — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::recent_signups — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::export_users_csv — 18L br=1 calls=9
+- [fn] services/telegram_admin_ext.py::export_jobs_csv — 16L br=1 calls=9
+- [fn] services/telegram_admin_ext.py::delete_runner — 11L br=1 calls=6
+- [fn] services/telegram_admin_ext.py::_notify_state_get — 8L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::_notify_state_set — 8L br=0 calls=4
+- [fn] services/telegram_admin_ext.py::check_new_signups_and_reports — 21L br=2 calls=14
+- [fn] services/telegram_admin_ext.py::get_maintenance_mode — 8L br=0 calls=6
+- [fn] services/telegram_admin_ext.py::set_maintenance_mode — 2L br=0 calls=1
+- [fn] services/telegram_admin_ext.py::terms_status_summary — 9L br=0 calls=8
+- [fn] services/telegram_admin_ext.py::users_without_terms — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::last_seen_for_user — 9L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::bulk_suspend — 10L br=2 calls=4
+- [fn] services/telegram_admin_ext.py::store_pending — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::store_set_status — 12L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::job_revisions — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::rollback_job — 14L br=1 calls=8
+- [fn] services/telegram_admin_ext.py::fingerprint_clusters — 19L br=1 calls=11
+- [fn] services/telegram_admin_ext.py::rotate_runner_secret — 9L br=1 calls=5
+- [fn] services/telegram_admin_ext.py::audit_log_by_admin — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::list_admins — 7L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::runners_health_now — 2L br=0 calls=1
+- [fn] services/telegram_admin_ext.py::runners_overview — 21L br=3 calls=19
+- [fn] services/telegram_admin_ext.py::add_runner — 46L br=6 calls=12
+- [fn] services/telegram_admin_ext.py::toggle_runner — 13L br=1 calls=6
+- [fn] services/telegram_admin_ext.py::jobs_recent — 19L br=1 calls=13
+- [fn] services/telegram_admin_ext.py::job_detail — 64L br=4 calls=41
+- [fn] services/telegram_admin_ext.py::job_source — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::admin_update_code — 6L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::admin_set_env — 5L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::admin_logs — 5L br=1 calls=3
+- [fn] services/telegram_admin_ext.py::audit_log_recent — 11L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::abuse_reports_open — 10L br=0 calls=5
+- [fn] services/telegram_admin_ext.py::resolve_abuse_report — 8L br=0 calls=4
+- [fn] services/telegram_admin_ext.py::security_clusters_summary — 10L br=0 calls=6
+- [fn] services/telegram_admin_ext.py::_table_has_column — 6L br=1 calls=2
+- [fn] services/telegram_link.py::_now — 2L br=0 calls=1
+- [fn] services/telegram_link.py::issue_code — 18L br=0 calls=13
+- [fn] services/telegram_link.py::deep_link — 26L br=1 calls=1
+- [fn] services/telegram_link.py::BOT_USERNAME — 6L br=0 calls=1
+- [fn] services/telegram_link.py::redeem_code — 69L br=7 calls=29
+- [fn] services/telegram_link.py::note_failed_attempt — 14L br=1 calls=6
+- [fn] services/telegram_link.py::user_for_chat — 27L br=3 calls=6
+- [fn] services/telegram_link.py::chat_profile — 17L br=1 calls=7
+- [fn] services/telegram_link.py::unlink — 11L br=0 calls=6
+- [fn] services/telegram_link.py::resolve_user_ref — 28L br=4 calls=13
+- [fn] services/telegram_link.py::set_admin — 8L br=0 calls=5
+- [fn] services/telegram_link.py::set_zip_permission — 8L br=0 calls=5
+- [fn] services/telegram_link.py::set_unlimited_permission — 11L br=0 calls=5
+- [fn] services/telegram_link.py::list_admin_overview — 14L br=0 calls=5
+- [fn] services/telegram_link.py::list_queens — 11L br=0 calls=5
+- [fn] services/telegram_link.py::admin_overview_stats — 18L br=0 calls=12
+- [fn] services/telegram_link.py::get_user_by_id — 11L br=0 calls=5
+- [fn] services/telegram_link.py::set_suspended — 23L br=3 calls=11
+- [class] routes/runspace.py::JobCreateRequest
+- [class] routes/runspace.py::JobUpdateRequest
+- [class] routes/runspace.py::EntryPinPayload
+- [class] routes/runspace.py::GithubImportRequest
+- [class] routes/runspace.py::ExecuteCodeRequest
+- [class] routes/runspace.py::TelegramTokenVerify
+- [class] routes/runspace.py::TelegramCodeAnalyze
+- [fn] routes/runspace.py::telegram_bot_templates — 3L br=0 calls=4
+- [fn] routes/runspace.py::telegram_bot_template — 6L br=1 calls=5
+- [fn] routes/runspace.py::analyze_telegram_bot — 7L br=1 calls=7
+- [fn] routes/runspace.py::verify_telegram_bot — 16L br=3 calls=15
+- [fn] routes/runspace.py::execute_code — 49L br=6 calls=14
+- [fn] routes/runspace.py::_get_own_job — 10L br=1 calls=6
+- [fn] routes/runspace.py::_worker_of — 11L br=1 calls=2
+- [fn] routes/runspace.py::_remember_worker — 13L br=2 calls=6
+- [fn] routes/runspace.py::_row_env — 36L br=5 calls=5
+- [fn] routes/runspace.py::_account_flags — 15L br=1 calls=1
+- [fn] routes/runspace.py::_job_limit_for — 14L br=1 calls=1
+- [fn] routes/runspace.py::_mem_limit_for — 15L br=1 calls=1
+- [fn] routes/runspace.py::_restore_then_restart — 28L br=4 calls=7
+- [fn] routes/runspace.py::_telegram_columns — 3L br=0 calls=5
+- [fn] routes/runspace.py::_reject_duplicate_bot_token — 23L br=3 calls=11
+- [fn] routes/runspace.py::_create_revision — 10L br=0 calls=6
+- [fn] routes/runspace.py::_finish_revision — 12L br=0 calls=7
+- [fn] routes/runspace.py::_record_deploy_event — 8L br=0 calls=5
+- [fn] routes/runspace.py::_attach_telegram_public — 10L br=0 calls=9
+- [fn] routes/runspace.py::_public_env — 3L br=0 calls=3
+- [fn] routes/runspace.py::_restore_masked_env — 6L br=2 calls=3
+- [fn] routes/runspace.py::_clean_env_map — 13L br=4 calls=8
+- [fn] routes/runspace.py::create_job — 150L br=14 calls=76
+- [fn] routes/runspace.py::list_jobs — 35L br=1 calls=17
+- [fn] routes/runspace.py::get_job — 9L br=0 calls=9
+- [fn] routes/runspace.py::telegram_job_health — 34L br=7 calls=23
+- [fn] routes/runspace.py::list_bot_revisions — 19L br=0 calls=12
+- [fn] routes/runspace.py::rollback_bot_revision — 75L br=7 calls=48
+- [fn] routes/runspace.py::job_files — 14L br=3 calls=9
+- [fn] routes/runspace.py::job_file_read — 19L br=3 calls=13
+- [fn] routes/runspace.py::job_set_entry — 17L br=3 calls=12
+- [fn] routes/runspace.py::job_logs — 13L br=3 calls=13
+- [fn] routes/runspace.py::job_logs_stream — 112L br=20 calls=48
+- [fn] routes/runspace.py::list_job_files — 36L br=9 calls=22
+- [fn] routes/runspace.py::download_job_file — 26L br=4 calls=25
+- [fn] routes/runspace.py::get_job_snapshot_status — 11L br=0 calls=5
+- [fn] routes/runspace.py::create_job_snapshot — 15L br=2 calls=11
+- [fn] routes/runspace.py::restore_job_snapshot — 23L br=4 calls=16
+- [fn] routes/runspace.py::download_job_workspace — 42L br=8 calls=20
+- [fn] routes/runspace.py::stop_job — 23L br=3 calls=16
+- [fn] routes/runspace.py::restart_job — 69L br=5 calls=42
+- [class] routes/runspace.py::JobAccessToggle
+- [fn] routes/runspace.py::update_job — 206L br=22 calls=104
+- [fn] routes/runspace.py::delete_job — 17L br=2 calls=11
+- [fn] routes/runspace.py::toggle_job_access — 16L br=3 calls=14
+- [fn] routes/runspace.py::_http_get_text — 17L br=3 calls=8
+- [fn] routes/runspace.py::import_github — 94L br=17 calls=45
+- [fn] routes/admin.py::require_admin — 15L br=2 calls=4
+- [fn] routes/admin.py::_admin_audit — 5L br=0 calls=2
+- [fn] routes/admin.py::_stop_user_jobs_best_effort — 20L br=3 calls=9
+- [class] routes/admin.py::AdminSuspend
+- [class] routes/admin.py::AbuseReportIn
+- [class] routes/admin.py::AdminBlockIn
+- [class] routes/admin.py::AdminBlockRemove
+- [class] routes/admin.py::AdminRunnerIn
+- [class] routes/admin.py::AdminRunnerToggle
+- [fn] routes/admin.py::admin_panel_html — 16L br=1 calls=9
+- [fn] routes/admin.py::admin_runners — 36L br=4 calls=34
+- [fn] routes/admin.py::admin_runner_secret — 4L br=0 calls=4
+- [fn] routes/admin.py::admin_add_runner — 93L br=21 calls=46
+- [fn] routes/admin.py::admin_toggle_runner — 34L br=2 calls=14
+- [fn] routes/admin.py::admin_recover_now — 25L br=2 calls=12
+- [fn] routes/admin.py::admin_delete_runner — 20L br=2 calls=16
+- [fn] routes/admin.py::admin_telegram_diagnostic — 40L br=2 calls=17
+- [fn] routes/admin.py::admin_bot_usage — 5L br=0 calls=4
+- [fn] routes/admin.py::admin_bot_usage_csv — 9L br=0 calls=7
+- [fn] routes/admin.py::admin_overview_route — 131L br=8 calls=95
+- [fn] routes/admin.py::admin_users_route — 15L br=0 calls=8
+- [fn] routes/admin.py::admin_user_detail_route — 102L br=6 calls=54
+- [fn] routes/admin.py::admin_telegram_jobs — 39L br=2 calls=21
+- [fn] routes/admin.py::admin_jobs_route — 56L br=1 calls=25
+- [fn] routes/admin.py::admin_job_detail_route — 99L br=8 calls=33
+- [fn] routes/admin.py::admin_libraries_route — 82L br=4 calls=32
+- [fn] routes/admin.py::admin_set_suspended — 25L br=4 calls=15
+- [fn] routes/admin.py::admin_audit_route — 14L br=0 calls=8
+- [fn] routes/admin.py::admin_abuse_route — 10L br=0 calls=8
+- [fn] routes/admin.py::report_abuse_page — 40L br=0 calls=2
+- [fn] routes/admin.py::report_abuse_submit — 18L br=1 calls=13
+- [fn] routes/admin.py::admin_blocks — 19L br=1 calls=13
+- [fn] routes/admin.py::admin_create_block — 43L br=8 calls=31
+- [fn] routes/admin.py::admin_remove_block — 18L br=2 calls=12
+- [fn] routes/admin.py::get_fingerprint_clusters — 52L br=2 calls=22
+- [fn] routes/admin.py::get_ip_clusters — 40L br=2 calls=19
+- [fn] routes/admin.py::get_signup_flags — 30L br=2 calls=13
+- [fn] routes/ping.py::default_target — 15L br=2 calls=2
+- [fn] routes/ping.py::_normalise — 7L br=2 calls=3
+- [fn] routes/ping.py::_ping — 49L br=8 calls=14
+- [fn] routes/ping.py::api_ping — 2L br=0 calls=4
+- [fn] routes/ping.py::ping_page — 2L br=0 calls=2
+- [fn] runner/app.py::_normalize_lang — 6L br=1 calls=3
+- [class] runner/app.py::ExecuteRequest
+- [fn] runner/app.py::_check_secret — 10L br=3 calls=6
+- [fn] runner/app.py::_set_limits — 16L br=2 calls=1
+- [fn] runner/app.py::_run_subprocess — 20L br=2 calls=3
+- [fn] runner/app.py::root — 10L br=0 calls=1
+- [fn] runner/app.py::health — 53L br=4 calls=16
+- [fn] runner/app.py::runtimes — 7L br=1 calls=6
+- [fn] runner/app.py::execute — 106L br=8 calls=49
+- [fn] runner/app.py::execute_piston — 4L br=0 calls=4
+- [fn] runner/app.py::_container_total_mb — 27L br=9 calls=14
+- [fn] runner/app.py::_used_mem_mb — 18L br=4 calls=5
+- [fn] runner/app.py::_admission — 19L br=1 calls=8
+- [fn] runner/app.py::_job_dir — 7L br=0 calls=2
+- [fn] runner/app.py::_purge_orphan_jobs — 29L br=8 calls=18
+- [fn] runner/app.py::_clean_env — 17L br=5 calls=12
+- [fn] runner/app.py::_alloc_port — 8L br=2 calls=4
+- [fn] runner/app.py::_slugify — 3L br=0 calls=5
+- [fn] runner/app.py::_live_page — 21L br=0 calls=4
+- [fn] runner/app.py::_find_job_by_slug — 6L br=2 calls=2
+- [fn] runner/app.py::_job_running — 3L br=0 calls=3
+- [fn] runner/app.py::_live_rate_ok — 14L br=3 calls=6
+- [fn] runner/app.py::_web_watch — 34L br=7 calls=12
+- [class] runner/app.py::JobStartRequest
+- [class] runner/app.py::JobAccessRequest
+- [fn] runner/app.py::_parse_requirements — 13L br=2 calls=6
+- [fn] runner/app.py::_detect_imports — 11L br=3 calls=9
+- [fn] runner/app.py::_zip_limits — 21L br=2 calls=6
+- [fn] runner/app.py::_extract_zip_bundle — 57L br=8 calls=29
+- [fn] runner/app.py::_repo_clone_target — 32L br=2 calls=9
+- [fn] runner/app.py::_branch_candidates — 24L br=3 calls=7
+- [fn] runner/app.py::_clone_repo — 92L br=16 calls=35
+- [fn] runner/app.py::_repo_head — 18L br=3 calls=4
+- [fn] runner/app.py::_detect_entry — 75L br=9 calls=38
+- [fn] runner/app.py::_install_repo_deps — 48L br=15 calls=31
+- [fn] runner/app.py::_pkg_display_name — 3L br=0 calls=2
+- [fn] runner/app.py::_installed_version — 15L br=1 calls=3
+- [fn] runner/app.py::_resolve_entry_now — 69L br=11 calls=25
+- [fn] runner/app.py::_install_named_deps — 57L br=12 calls=26
+- [fn] runner/app.py::_named_deps — 2L br=0 calls=1
+- [fn] runner/app.py::_install_and_spawn — 23L br=3 calls=8
+- [fn] runner/app.py::_prepare_and_run — 85L br=16 calls=48
+- [fn] runner/app.py::_proc_stats — 33L br=5 calls=21
+- [fn] runner/app.py::_manifest_path — 2L br=0 calls=2
+- [fn] runner/app.py::_save_manifest — 30L br=1 calls=23
+- [fn] runner/app.py::_is_code_file — 11L br=4 calls=5
+- [fn] runner/app.py::_snapshot_files — 27L br=8 calls=16
+- [fn] runner/app.py::_pack_workspace — 31L br=6 calls=15
+- [fn] runner/app.py::_unpack_workspace — 53L br=10 calls=24
+- [fn] runner/app.py::_pid_alive — 19L br=3 calls=4
+- [class] runner/app.py::_AdoptedProc
+- [fn] runner/app.py::_recover_jobs — 108L br=12 calls=57
+- [fn] runner/app.py::_track_peak — 14L br=2 calls=4
+- [fn] runner/app.py::_job_public — 46L br=0 calls=32
+- [fn] runner/app.py::_clear_manifest_pid — 13L br=2 calls=6
+- [fn] runner/app.py::_kill_job_tree — 52L br=8 calls=16
+- [fn] runner/app.py::_stop_job_with_reason — 26L br=4 calls=7
+- [fn] runner/app.py::_job_ceiling_mb — 8L br=2 calls=2
+- [fn] runner/app.py::_isolation_tick — 84L br=16 calls=41
+- [fn] runner/app.py::_isolation_loop — 8L br=2 calls=4
+- [fn] runner/app.py::_spawn — 233L br=32 calls=88
+- [fn] runner/app.py::job_start — 217L br=29 calls=107
+- [fn] runner/app.py::job_list — 4L br=0 calls=5
+- [fn] runner/app.py::_fb_safe_join — 16L br=2 calls=8
+- [fn] runner/app.py::_fb_is_texty — 10L br=2 calls=2
+- [fn] runner/app.py::job_files — 38L br=8 calls=25
+- [fn] runner/app.py::job_file_read — 15L br=4 calls=15
+- [class] runner/app.py::EntryPinRequest
+- [fn] runner/app.py::job_set_entry — 21L br=4 calls=18
+- [fn] runner/app.py::job_detail — 8L br=1 calls=7
+- [fn] runner/app.py::job_stop — 20L br=1 calls=11
+- [fn] runner/app.py::job_access — 9L br=1 calls=8
+- [fn] runner/app.py::job_delete — 17L br=2 calls=10
+- [class] runner/app.py::JobUpdateRequest
+- [fn] runner/app.py::job_update — 163L br=26 calls=90
+- [class] runner/app.py::SnapshotRestoreRequest
+- [fn] runner/app.py::job_snapshot — 18L br=3 calls=8
+- [fn] runner/app.py::job_snapshot_restore — 9L br=2 calls=7
+- [fn] runner/app.py::job_restart — 41L br=4 calls=21
+- [fn] runner/app.py::_live_gate — 40L br=6 calls=17
+- [fn] runner/app.py::live_http — 73L br=10 calls=27
+- [fn] runner/app.py::live_ws — 67L br=18 calls=31
+- [class] runner/app.py::TerminalCreateRequest
+- [class] runner/app.py::TerminalListRequest
+- [fn] runner/app.py::terminal_create — 18L br=2 calls=10
+- [fn] runner/app.py::terminal_list — 7L br=1 calls=7
+- [fn] runner/app.py::terminal_ws — 48L br=11 calls=19
+- [fn] runner/app.py::_ws_inbound_loop — 26L br=9 calls=14
+- [fn] runner/app.py::_startup_recover_jobs — 20L br=2 calls=8
+- [fn] database.py::_validate_database_url — 47L br=7 calls=13
+- [fn] database.py::_load_psycopg2 — 17L br=1 calls=0
+- [fn] database.py::_translate_sql — 51L br=5 calls=17
+- [fn] database.py::_translate_ddl — 23L br=3 calls=8
+- [fn] database.py::_tables_without_id — 12L br=3 calls=8
+- [class] database.py::_Cursor
+- [class] database.py::_Connection
+- [fn] database.py::_get_pool — 32L br=4 calls=3
+- [fn] database.py::_reset_pool — 10L br=2 calls=1
+- [fn] database.py::_checkout_pg — 36L br=5 calls=18
+- [fn] database.py::_return_to_pool — 9L br=2 calls=3
+- [fn] database.py::get_db_connection — 8L br=1 calls=5
+- [fn] database.py::_column_exists — 11L br=1 calls=6
+- [fn] database.py::init_db — 183L br=28 calls=68
+- [fn] app.py::_self_ping_loop — 29L br=3 calls=16
+- [fn] app.py::_env_rescue_boot — 18L br=2 calls=5
+- [fn] app.py::startup_event — 64L br=8 calls=22
+- [fn] app.py::_enable_embedded_runner — 32L br=2 calls=13
+- [fn] app.py::guides_page — 60L br=2 calls=7
+- [fn] app.py::_asset_version — 14L br=4 calls=22
+- [fn] app.py::_is_admin_request — 17L br=2 calls=3
+- [fn] app.py::_index_html — 7L br=1 calls=6
+- [fn] app.py::read_index — 9L br=1 calls=5
+- [fn] app.py::_spa_negotiator — 13L br=3 calls=10
+- [fn] app.py::read_admin — 8L br=1 calls=6
+- [fn] app.py::read_bot_job — 4L br=1 calls=5
+- [fn] app.py::read_bot_deep — 4L br=1 calls=5
+- [fn] app.py::redirect_old_bots_root — 2L br=0 calls=3
+- [fn] app.py::redirect_runspace_job — 2L br=0 calls=2
+- [fn] app.py::redirect_runspace_deep — 2L br=0 calls=2
+- [fn] app.py::code_share_redirect — 3L br=0 calls=2
+- [fn] app.py::public_config — 29L br=0 calls=5
+- [fn] app.py::_miniapp_bot_id — 12L br=3 calls=4
+- [fn] app.py::_bot_identity — 27L br=3 calls=8
+- [fn] app.py::_token_fingerprint — 7L br=1 calls=1
+- [fn] app.py::_token_live — 7L br=1 calls=1
+- [fn] app.py::_token_sources — 13L br=1 calls=1
+- [fn] app.py::_miniapp_url — 15L br=3 calls=1
+- [fn] app.py::health — 59L br=0 calls=23
+- [fn] app.py::terms_page — 4L br=1 calls=4
+- [guides] guide_admin.png — 20531b
+- [guides] guide_apps.png — 21388b
+- [guides] guide_backup.png — 21720b
+- [guides] guide_code.png — 22137b
+- [guides] guide_delete.png — 21032b
+- [guides] guide_env.png — 22593b
+- [guides] guide_history.png — 21827b
+- [guides] guide_id.png — 22424b
+- [guides] guide_import.png — 21006b
+- [guides] guide_latest.png — 21406b
+- [guides] guide_link.png — 21311b
+- [guides] guide_logs.png — 20877b
+- [guides] guide_projects.png — 20192b
+- [guides] guide_rename.png — 19376b
+- [guides] guide_restart.png — 21488b
+- [guides] guide_source.png — 21630b
+- [guides] guide_start.png — 22928b
+- [guides] guide_status.png — 20464b
+- [guides] guide_stop.png — 19569b
+- [guides] guide_token.png — 23796b
+- [guides] guide_update.png — 23226b
+- [test-style] test_admin_abuse_controls.py=pytest — t=3 c=0
+- [test-style] test_admin_progress.py=pytest — t=9 c=0
+- [test-style] test_bot_analytics.py=pytest — t=4 c=0
+- [test-style] test_bot_dispatch_analytics.py=pytest — t=3 c=0
+- [test-style] test_bot_list_fast.py=pytest — t=2 c=0
+- [test-style] test_bot_ops_multirunner.py=pytest — t=3 c=0
+- [test-style] test_bot_templates.py=pytest — t=9 c=0
+- [test-style] test_cmd_id_plain.py=pytest — t=5 c=0
+- [test-style] test_command_guides_privacy.py=pytest — t=6 c=0
+- [test-style] test_env_rescue.py=pytest — t=10 c=0
+- [test-style] test_job_recovery.py=pytest — t=14 c=0
+- [test-style] test_job_url_routes.py=pytest — t=2 c=0
+- [test-style] test_new_bot_commands.py=pytest — t=3 c=0
+- [test-style] test_overview_analytics.py=pytest — t=10 c=0
+- [test-style] test_ping_and_queen.py=pytest — t=59 c=0
+- [test-style] test_runner_isolation.py=pytest — t=6 c=0
+- [test-style] test_runner_registry.py=pytest — t=2 c=0
+- [test-style] test_runspace_token_from_code.py=pytest — t=2 c=0
+- [test-style] test_save_only.py=pytest — t=4 c=0
+- [test-style] test_secrets_plain.py=pytest — t=7 c=0
+- [test-style] test_store.py=pytest — t=17 c=0
+- [test-style] test_telegram_job_detection.py=pytest — t=5 c=0
+- [test-style] test_token_in_code.py=pytest — t=4 c=0
+- [pro.js] "admin" x225
+- [pro.js] "runner" x115
+- [pro.js] "job" x1222
+- [pro.js] "bot" x566
+- [pro.js] "token" x191
+- [pro.js] "env" x100
+- [pro.js] "recover" x14
+- [pro.js] "toast" x258
+- [pro.js] "fetch" x35
+- [pro.js] "auth" x161
+- [pro.js] "telegram" x302
+- [pro.js] "overview" x27
+- [pro.js] "deploy" x118
+- [route] ping.py GET /api/ping
+- [route] ping.py GET /ping
+- [route] auth.py POST /auth/check-availability
+- [route] auth.py POST /signup
+- [route] auth.py POST /resend-otp
+- [route] auth.py POST /verify
+- [route] auth.py POST /login
+- [route] auth.py POST /logout
+- [route] auth.py POST /forgot-password
+- [route] auth.py POST /verify-reset-otp
+- [route] auth.py POST /reset-password
+- [route] auth.py GET /2fa/status
+- [route] auth.py POST /2fa/setup
+- [route] auth.py POST /2fa/disable
+- [route] auth.py POST /2fa/backup-codes
+- [route] auth.py POST /2fa/verify-setup
+- [route] auth.py POST /2fa/verify-login
+- [route] auth.py POST /auth/telegram/miniapp
+- [route] auth.py POST /auth/telegram
+- [route] code_editor.py GET /snippets
+- [route] code_editor.py POST /snippets
+- [route] code_editor.py PUT /snippets
+- [route] code_editor.py DELETE /snippets
+- [route] code_editor.py POST /snippets/share
+- [route] code_editor.py GET /s/{token}
+- [route] code_editor.py GET /@{username}/{filename}
+- [route] dashboard.py GET /search
+- [route] dashboard.py GET /stats
+- [route] dashboard.py GET /api/analytics/overview
+- [route] admin.py GET /admin/panel-html
+- [route] admin.py GET /admin/runners
+- [route] admin.py POST /admin/runners/generate-secret
+- [route] admin.py POST /admin/runners
+- [route] admin.py POST /admin/runners/{node_id}/toggle
+- [route] admin.py POST /admin/recover
+- [route] admin.py DELETE /admin/runners/{node_id}
+- [route] admin.py GET /admin/telegram-diagnostic
+- [route] admin.py GET /admin/bot-usage
+- [route] admin.py GET /admin/bot-usage.csv
+- [route] admin.py GET /admin/overview
+- [route] admin.py GET /admin/users
+- [route] admin.py GET /admin/users/{user_id}
+- [route] admin.py GET /admin/telegram-jobs
+- [route] admin.py GET /admin/jobs
+- [route] admin.py GET /admin/jobs/{job_id}
+- [route] admin.py GET /admin/libraries
+- [route] admin.py POST /admin/users/set-suspended
+- [route] admin.py GET /admin/audit-log
+- [route] admin.py GET /admin/abuse-reports
+- [route] admin.py GET /report-abuse
+- [route] admin.py POST /report-abuse
+- [route] admin.py GET /admin/blocks
+- [route] admin.py POST /admin/blocks
+- [route] admin.py POST /admin/blocks/{block_id}/remove
+- [route] admin.py GET /admin/fingerprint-clusters
+- [route] admin.py GET /admin/ip-clusters
+- [route] admin.py GET /admin/signup-flags
+- [route] profile.py GET /profile
+- [route] profile.py POST /profile/update
+- [route] profile.py POST /account/delete
+- [route] profile.py POST /account/change-password
+- [route] profile.py GET /sessions
+- [route] profile.py POST /sessions/revoke
+- [route] profile.py GET /login-history
+- [route] profile.py GET /preferences
+- [route] profile.py PUT /preferences
+- [route] profile.py GET /activity-log
+- [route] profile.py POST /activity-log
+- [route] profile.py GET /profile/telegram
+- [route] profile.py POST /profile/telegram/code
+- [route] profile.py POST /profile/telegram/unlink
+- [route] runspace.py GET /api/telegram-bot/templates
+- [route] runspace.py GET /api/telegram-bot/templates/{template_id}
+- [route] runspace.py POST /api/telegram-bot/analyze
+- [route] runspace.py POST /api/telegram-bot/verify
+- [route] runspace.py POST /api/execute
+- [route] runspace.py POST /api/jobs
+- [route] runspace.py GET /api/jobs
+- [route] runspace.py GET /api/jobs/{job_id}
+- [route] runspace.py GET /api/jobs/{job_id}/telegram-health
+- [route] runspace.py GET /api/jobs/{job_id}/revisions
+- [route] runspace.py POST /api/jobs/{job_id}/revisions/{revision_id}/rollback
+- [route] runspace.py GET /api/jobs/{job_id}/files
+- [route] runspace.py GET /api/jobs/{job_id}/file
+- [route] runspace.py POST /api/jobs/{job_id}/entry
+- [route] runspace.py GET /api/jobs/{job_id}/logs
+- [route] runspace.py GET /api/jobs/{job_id}/logs/stream
+- [route] runspace.py GET /api/jobs/{job_id}/files
+- [route] runspace.py GET /api/jobs/{job_id}/files/{file_path:path}
+- [route] runspace.py GET /api/jobs/{job_id}/snapshot
+- [route] runspace.py POST /api/jobs/{job_id}/snapshot
+- [route] runspace.py POST /api/jobs/{job_id}/snapshot/restore
+- [route] runspace.py GET /api/jobs/{job_id}/download
+- [route] runspace.py POST /api/jobs/{job_id}/stop
+- [route] runspace.py POST /api/jobs/{job_id}/restart
+- [route] runspace.py PATCH /api/jobs/{job_id}
+- [route] runspace.py DELETE /api/jobs/{job_id}
+- [route] runspace.py POST /api/jobs/{job_id}/access
+- [route] runspace.py POST /api/import/github
+- [route] store.py GET /api/store
+- [route] store.py GET /api/store/categories
+- [route] store.py GET /api/store/mine/library
+- [route] store.py GET /api/store/{slug}
+- [route] store.py POST /api/store/{slug}/install
+- [route] store.py POST /api/store/{slug}/rate
+- [route] store.py POST /api/store/{slug}/favorite
+- [route] store.py DELETE /api/store/{slug}/favorite
+- [route] store.py POST /api/store/items
+- [route] store.py PATCH /api/store/items/{slug}
+- [route] store.py GET /api/store/admin/queue
+- [route] store.py POST /api/store/admin/{slug}/{action}
+- [route] store.py GET /api/store/admin/stats
+- [callbacks] admin handled
+- [callbacks] apps handled
+- [callbacks] autodep handled
+- [callbacks] db handled
+- [callbacks] delcancel handled
+- [callbacks] delconfirm handled
+- [callbacks] help handled
+- [callbacks] latest handled
+- [callbacks] logs handled
+- [callbacks] pick handled
+- [callbacks] ping handled
+- [callbacks] qproj handled
+- [callbacks] queen handled
+- [callbacks] restart handled
+- [callbacks] stat handled
+- [callbacks] stop handled
+- [admin] menu buttons=19 — ['📊 Overview', '👥 Users', '🩺 Health & how it works', '🖥 Runners', '📦 Jobs', '📝 Audit log', '🚩 Abuse 
+- [admin] menu → admin:overview
+- [admin] menu → admin:users:0
+- [admin] menu → admin:health
+- [admin] menu → admin:runners
+- [admin] menu → admin:jobs:0
+- [admin] menu → admin:audit
+- [admin] menu → admin:abuse
+- [admin] menu → admin:security
+- [admin] menu → admin:clusters
+- [admin] menu → admin:bans
+- [admin] menu → admin:broadcast
+- [admin] menu → admin:searchflow
+- [admin] menu → admin:signups
+- [admin] menu → admin:exportmenu
+- [admin] menu → admin:store
+- [admin] menu → admin:terms
+- [admin] menu → admin:auditadmins
+- [admin] menu → admin:queens
+- [admin] menu → admin:recovernow
+- [admin] menu → admin:togmaint
+- [not-dropped] env_rescue
+- [not-dropped] github_repo
+- [not-dropped] plain secrets
+- [not-dropped] job recovery
+- [not-dropped] guides
+- [not-dropped] admin panel
+- [not-dropped] token test
+- [not-dropped] secrets test
+- [not-dropped] isolation test
+- [docs] AUTH_ABUSE_PLAN.md — 90L
+- [docs] BOT_TEMPLATE_GUIDE.md — 37L
+- [docs] JOB_URLS_AND_BOT_ANALYTICS.md — 47L
+- [docs] MINIAPP_NOTHING_HAPPENS.md — 138L
+- [docs] ROADMAP.md — 76L
+- [docs] STORE.md — 135L
+- [docs] README.md — 291L
+- [docs] TEMPLATE_RESEARCH.md — 44L
+- [docs] UI_AUDIT.md — 158L
+- [docs] TELEGRAM_JOB_DETECTION.md — 49L
+- [docs] BOT_FEATURE_REVIEW.md — 315L
+- [samples] ping_bot.py
+- [samples] README.md
+- [region] IDENTITY
+- [region] APP
+- [region] ADMIN
+- [region] QUEEN
+- [region] CALLBACK
+- [region] PING
+- [region] CODE
+- [region] GUIDES
+- [region] RECOVERY_hint
+- [bug] double-escaped n=0
+- [matrix] database.py · exists
+- [matrix] database.py · nonempty
+- [matrix] database.py · parses
+- [matrix] database.py · has_module_doc
+- [matrix] database.py · no_tabs
+- [matrix] database.py · no_crlf
+- [matrix] database.py · no_pdb
+- [matrix] database.py · no_breakpoint
+- [matrix] database.py · no_hardcoded_sk
+- [matrix] database.py · no_hardcoded_bot_token
+- [matrix] database.py · no_aws_key
+- [matrix] app.py · exists
+- [matrix] app.py · nonempty
+- [matrix] app.py · parses
+- [matrix] app.py · has_module_doc
+- [matrix] app.py · no_tabs
+- [matrix] app.py · no_crlf
+- [matrix] app.py · no_pdb
+- [matrix] app.py · no_breakpoint
+- [matrix] app.py · no_hardcoded_sk
+- [matrix] app.py · no_hardcoded_bot_token
+- [matrix] app.py · no_aws_key
+- [matrix] migrate_to_supabase.py · exists
+- [matrix] migrate_to_supabase.py · nonempty
+- [matrix] migrate_to_supabase.py · parses
+- [matrix] migrate_to_supabase.py · no_tabs
+- [matrix] migrate_to_supabase.py · no_crlf
+- [matrix] migrate_to_supabase.py · no_pdb
+- [matrix] migrate_to_supabase.py · no_breakpoint
+- [matrix] migrate_to_supabase.py · no_hardcoded_sk
+- [matrix] migrate_to_supabase.py · no_hardcoded_bot_token
+- [matrix] migrate_to_supabase.py · no_aws_key
+- [matrix] snippet_page.py · exists
+- [matrix] snippet_page.py · nonempty
+- [matrix] snippet_page.py · parses
+- [matrix] snippet_page.py · has_module_doc
+- [matrix] snippet_page.py · no_tabs
+- [matrix] snippet_page.py · no_crlf
+- [matrix] snippet_page.py · no_pdb
+- [matrix] snippet_page.py · no_breakpoint
+- [matrix] snippet_page.py · no_hardcoded_sk
+- [matrix] snippet_page.py · no_hardcoded_bot_token
+- [matrix] snippet_page.py · no_aws_key
+- [matrix] bot/app.py · exists
+- [matrix] bot/app.py · nonempty
+- [matrix] bot/app.py · parses
+- [matrix] bot/app.py · has_module_doc
+- [matrix] bot/app.py · no_tabs
+- [matrix] bot/app.py · no_crlf
+- [matrix] bot/app.py · no_pdb
+- [matrix] bot/app.py · no_breakpoint
+- [matrix] bot/app.py · no_hardcoded_sk
+- [matrix] bot/app.py · no_hardcoded_bot_token
+- [matrix] bot/app.py · no_aws_key
+- [matrix] routes/__init__.py · exists
+- [matrix] routes/__init__.py · nonempty
+- [matrix] routes/__init__.py · parses
+- [matrix] routes/__init__.py · has_module_doc
+- [matrix] routes/__init__.py · no_tabs
+- [matrix] routes/__init__.py · no_crlf
+- [matrix] routes/__init__.py · no_pdb
+- [matrix] routes/__init__.py · no_breakpoint
+- [matrix] routes/__init__.py · no_hardcoded_sk
+- [matrix] routes/__init__.py · no_hardcoded_bot_token
+- [matrix] routes/__init__.py · no_aws_key
+- [matrix] routes/ping.py · exists
+- [matrix] routes/ping.py · nonempty
+- [matrix] routes/ping.py · parses
+- [matrix] routes/ping.py · has_module_doc
+- [matrix] routes/ping.py · no_tabs
+- [matrix] routes/ping.py · no_crlf
+- [matrix] routes/ping.py · no_pdb
+- [matrix] routes/ping.py · no_breakpoint
+- [matrix] routes/ping.py · no_hardcoded_sk
+- [matrix] routes/ping.py · no_hardcoded_bot_token
+- [matrix] routes/ping.py · no_aws_key
+- [matrix] routes/auth.py · exists
+- [matrix] routes/auth.py · nonempty
+- [matrix] routes/auth.py · parses
+- [matrix] routes/auth.py · has_module_doc
+- [matrix] routes/auth.py · no_tabs
+- [matrix] routes/auth.py · no_crlf
+- [matrix] routes/auth.py · no_pdb
+- [matrix] routes/auth.py · no_breakpoint
+- [matrix] routes/auth.py · no_hardcoded_sk
+- [matrix] routes/auth.py · no_hardcoded_bot_token
+- [matrix] routes/auth.py · no_aws_key
+- [matrix] routes/code_editor.py · exists
+- [matrix] routes/code_editor.py · nonempty
+- [matrix] routes/code_editor.py · parses
+- [matrix] routes/code_editor.py · has_module_doc
+- [matrix] routes/code_editor.py · no_tabs
+- [matrix] routes/code_editor.py · no_crlf
+- [matrix] routes/code_editor.py · no_pdb
+- [matrix] routes/code_editor.py · no_breakpoint
+- [matrix] routes/code_editor.py · no_hardcoded_sk
+- [matrix] routes/code_editor.py · no_hardcoded_bot_token
+- [matrix] routes/code_editor.py · no_aws_key
+- [matrix] routes/dashboard.py · exists
+- [matrix] routes/dashboard.py · nonempty
+- [matrix] routes/dashboard.py · parses
+- [matrix] routes/dashboard.py · has_module_doc
+- [matrix] routes/dashboard.py · no_tabs
+- [matrix] routes/dashboard.py · no_crlf
+- [matrix] routes/dashboard.py · no_pdb
+- [matrix] routes/dashboard.py · no_breakpoint
+- [matrix] routes/dashboard.py · no_hardcoded_sk
+- [matrix] routes/dashboard.py · no_hardcoded_bot_token
+- [matrix] routes/dashboard.py · no_aws_key
+- [matrix] routes/deps.py · exists
+- [matrix] routes/deps.py · nonempty
+- [matrix] routes/deps.py · parses
+- [matrix] routes/deps.py · has_module_doc
+- [matrix] routes/deps.py · no_tabs
+- [matrix] routes/deps.py · no_crlf
+- [matrix] routes/deps.py · no_pdb
+- [matrix] routes/deps.py · no_breakpoint
+- [matrix] routes/deps.py · no_hardcoded_sk
+- [matrix] routes/deps.py · no_hardcoded_bot_token
+- [matrix] routes/deps.py · no_aws_key
+- [matrix] routes/admin.py · exists
+- [matrix] routes/admin.py · nonempty
+- [matrix] routes/admin.py · parses
+- [matrix] routes/admin.py · has_module_doc
+- [matrix] routes/admin.py · no_tabs
+- [matrix] routes/admin.py · no_crlf
+- [matrix] routes/admin.py · no_pdb
+- [matrix] routes/admin.py · no_breakpoint
+- [matrix] routes/admin.py · no_hardcoded_sk
+- [matrix] routes/admin.py · no_hardcoded_bot_token
+- [matrix] routes/admin.py · no_aws_key
+- [matrix] routes/profile.py · exists
+- [matrix] routes/profile.py · nonempty
+- [matrix] routes/profile.py · parses
+- [matrix] routes/profile.py · has_module_doc
+- [matrix] routes/profile.py · no_tabs
+- [matrix] routes/profile.py · no_crlf
+- [matrix] routes/profile.py · no_pdb
+- [matrix] routes/profile.py · no_breakpoint
+- [matrix] routes/profile.py · no_hardcoded_sk
+- [matrix] routes/profile.py · no_hardcoded_bot_token
+- [matrix] routes/profile.py · no_aws_key
+- [matrix] routes/runspace.py · exists
+- [matrix] routes/runspace.py · nonempty
+- [matrix] routes/runspace.py · parses
+- [matrix] routes/runspace.py · has_module_doc
+- [matrix] routes/runspace.py · no_tabs
+- [matrix] routes/runspace.py · no_crlf
+- [matrix] routes/runspace.py · no_pdb
+- [matrix] routes/runspace.py · no_breakpoint
+- [matrix] routes/runspace.py · no_hardcoded_sk
+- [matrix] routes/runspace.py · no_hardcoded_bot_token
+- [matrix] routes/runspace.py · no_aws_key
+- [matrix] routes/store.py · exists
+- [matrix] routes/store.py · nonempty
+- [matrix] routes/store.py · parses
+- [matrix] routes/store.py · has_module_doc
+- [matrix] routes/store.py · no_tabs
+- [matrix] routes/store.py · no_crlf
+- [matrix] routes/store.py · no_pdb
+- [matrix] routes/store.py · no_breakpoint
+- [matrix] routes/store.py · no_hardcoded_sk
+- [matrix] routes/store.py · no_hardcoded_bot_token
+- [matrix] routes/store.py · no_aws_key
+- [matrix] runner/app.py · exists
+- [matrix] runner/app.py · nonempty
+- [matrix] runner/app.py · parses
+- [matrix] runner/app.py · has_module_doc
+- [matrix] runner/app.py · no_tabs
+- [matrix] runner/app.py · no_crlf
+- [matrix] runner/app.py · no_pdb
+- [matrix] runner/app.py · no_breakpoint
+- [matrix] runner/app.py · no_hardcoded_sk
+- [matrix] runner/app.py · no_hardcoded_bot_token
+- [matrix] runner/app.py · no_aws_key
+- [matrix] runner/__init__.py · exists
+- [matrix] runner/__init__.py · parses
+- [matrix] runner/__init__.py · no_tabs
+- [matrix] runner/__init__.py · no_crlf
+- [matrix] runner/__init__.py · no_pdb
+- [matrix] runner/__init__.py · no_breakpoint
+- [matrix] runner/__init__.py · no_hardcoded_sk
+- [matrix] runner/__init__.py · no_hardcoded_bot_token
+- [matrix] runner/__init__.py · no_aws_key
+- [matrix] runner/terminal.py · exists
+- [matrix] runner/terminal.py · nonempty
+- [matrix] runner/terminal.py · parses
+- [matrix] runner/terminal.py · has_module_doc
+- [matrix] runner/terminal.py · no_tabs
+- [matrix] runner/terminal.py · no_crlf
+- [matrix] runner/terminal.py · no_pdb
+- [matrix] runner/terminal.py · no_breakpoint
+- [matrix] runner/terminal.py · no_hardcoded_sk
+- [matrix] runner/terminal.py · no_hardcoded_bot_token
+- [matrix] runner/terminal.py · no_aws_key
+- [matrix] runner/test_live_gateway.py · exists
+- [matrix] runner/test_live_gateway.py · nonempty
+- [matrix] runner/test_live_gateway.py · parses
+- [matrix] runner/test_live_gateway.py · has_module_doc
+- [matrix] runner/test_live_gateway.py · no_tabs
+- [matrix] runner/test_live_gateway.py · no_crlf
+- [matrix] runner/test_live_gateway.py · no_pdb
+- [matrix] runner/test_live_gateway.py · no_breakpoint
+- [matrix] runner/test_live_gateway.py · no_hardcoded_sk
+- [matrix] runner/test_live_gateway.py · no_hardcoded_bot_token
+- [matrix] runner/test_live_gateway.py · no_aws_key
+- [matrix] runner/test_runner.py · exists
+- [matrix] runner/test_runner.py · nonempty
+- [matrix] runner/test_runner.py · parses
+- [matrix] runner/test_runner.py · has_module_doc
+- [matrix] runner/test_runner.py · no_tabs
+- [matrix] runner/test_runner.py · no_crlf
+- [matrix] runner/test_runner.py · no_pdb
+- [matrix] runner/test_runner.py · no_breakpoint
+- [matrix] runner/test_runner.py · no_hardcoded_sk
+- [matrix] runner/test_runner.py · no_hardcoded_bot_token
+- [matrix] runner/test_runner.py · no_aws_key
+- [matrix] samples/ping_bot.py · exists
+- [matrix] samples/ping_bot.py · nonempty
+- [matrix] samples/ping_bot.py · parses
+- [matrix] samples/ping_bot.py · no_tabs
+- [matrix] samples/ping_bot.py · no_crlf
+- [matrix] samples/ping_bot.py · no_pdb
+- [matrix] samples/ping_bot.py · no_breakpoint
+- [matrix] samples/ping_bot.py · no_hardcoded_sk
+- [matrix] samples/ping_bot.py · no_hardcoded_bot_token
+- [matrix] samples/ping_bot.py · no_aws_key
+- [matrix] services/__init__.py · exists
+- [matrix] services/__init__.py · nonempty
+- [matrix] services/__init__.py · parses
+- [matrix] services/__init__.py · has_module_doc
+- [matrix] services/__init__.py · no_tabs
+- [matrix] services/__init__.py · no_crlf
+- [matrix] services/__init__.py · no_pdb
+- [matrix] services/__init__.py · no_breakpoint
+- [matrix] services/__init__.py · no_hardcoded_sk
+- [matrix] services/__init__.py · no_hardcoded_bot_token
+- [matrix] services/__init__.py · no_aws_key
+- [matrix] services/email.py · exists
+- [matrix] services/email.py · nonempty
+- [matrix] services/email.py · parses
+- [matrix] services/email.py · has_module_doc
+- [matrix] services/email.py · no_tabs
+- [matrix] services/email.py · no_crlf
+- [matrix] services/email.py · no_pdb
+- [matrix] services/email.py · no_breakpoint
+- [matrix] services/email.py · no_hardcoded_sk
+- [matrix] services/email.py · no_hardcoded_bot_token
+- [matrix] services/email.py · no_aws_key
+- [matrix] services/abuse_control.py · exists
+- [matrix] services/abuse_control.py · nonempty
+- [matrix] services/abuse_control.py · parses
+- [matrix] services/abuse_control.py · has_module_doc
+- [matrix] services/abuse_control.py · no_tabs
+- [matrix] services/abuse_control.py · no_crlf
+- [matrix] services/abuse_control.py · no_pdb
+- [matrix] services/abuse_control.py · no_breakpoint
+- [matrix] services/abuse_control.py · no_hardcoded_sk
+- [matrix] services/abuse_control.py · no_hardcoded_bot_token
+- [matrix] services/abuse_control.py · no_aws_key
+- [matrix] services/bot_analytics.py · exists
+- [matrix] services/bot_analytics.py · nonempty
+- [matrix] services/bot_analytics.py · parses
+- [matrix] services/bot_analytics.py · has_module_doc
+- [matrix] services/bot_analytics.py · no_tabs
+- [matrix] services/bot_analytics.py · no_crlf
+- [matrix] services/bot_analytics.py · no_pdb
+- [matrix] services/bot_analytics.py · no_breakpoint
+- [matrix] services/bot_analytics.py · no_hardcoded_sk
+- [matrix] services/bot_analytics.py · no_hardcoded_bot_token
+- [matrix] services/bot_analytics.py · no_aws_key
+- [matrix] services/telegram_link.py · exists
+- [matrix] services/telegram_link.py · nonempty
+- [matrix] services/telegram_link.py · parses
+- [matrix] services/telegram_link.py · has_module_doc
+- [matrix] services/telegram_link.py · no_tabs
+- [matrix] services/telegram_link.py · no_crlf
+- [matrix] services/telegram_link.py · no_pdb
+- [matrix] services/telegram_link.py · no_breakpoint
+- [matrix] services/telegram_link.py · no_hardcoded_sk
+- [matrix] services/telegram_link.py · no_hardcoded_bot_token
+- [matrix] services/telegram_link.py · no_aws_key
+- [matrix] services/bot_ops.py · exists
+- [matrix] services/bot_ops.py · nonempty
+- [matrix] services/bot_ops.py · parses
+- [matrix] services/bot_ops.py · has_module_doc
+- [matrix] services/bot_ops.py · no_tabs
+- [matrix] services/bot_ops.py · no_crlf
+- [matrix] services/bot_ops.py · no_pdb
+- [matrix] services/bot_ops.py · no_breakpoint
+- [matrix] services/bot_ops.py · no_hardcoded_sk
+- [matrix] services/bot_ops.py · no_hardcoded_bot_token
+- [matrix] services/bot_ops.py · no_aws_key
+- [matrix] services/bot_templates.py · exists
+- [matrix] services/bot_templates.py · nonempty
+- [matrix] services/bot_templates.py · parses
+- [matrix] services/bot_templates.py · has_module_doc
+- [matrix] services/bot_templates.py · no_tabs
+- [matrix] services/bot_templates.py · no_crlf
+- [matrix] services/bot_templates.py · no_pdb
+- [matrix] services/bot_templates.py · no_breakpoint
+- [matrix] services/bot_templates.py · no_hardcoded_sk
+- [matrix] services/bot_templates.py · no_hardcoded_bot_token
+- [matrix] services/bot_templates.py · no_aws_key
+- [matrix] services/captcha.py · exists
+- [matrix] services/captcha.py · nonempty
+- [matrix] services/captcha.py · parses
+- [matrix] services/captcha.py · has_module_doc
+- [matrix] services/captcha.py · no_tabs
+- [matrix] services/captcha.py · no_crlf
+- [matrix] services/captcha.py · no_pdb
+- [matrix] services/captcha.py · no_breakpoint
+- [matrix] services/captcha.py · no_hardcoded_sk
+- [matrix] services/captcha.py · no_hardcoded_bot_token
+- [matrix] services/captcha.py · no_aws_key
+- [matrix] services/flagship_templates.py · exists
+- [matrix] services/flagship_templates.py · nonempty
+- [matrix] services/flagship_templates.py · parses
+- [matrix] services/flagship_templates.py · has_module_doc
+- [matrix] services/flagship_templates.py · no_tabs
+- [matrix] services/flagship_templates.py · no_crlf
+- [matrix] services/flagship_templates.py · no_pdb
+- [matrix] services/flagship_templates.py · no_breakpoint
+- [matrix] services/flagship_templates.py · no_hardcoded_sk
+- [matrix] services/flagship_templates.py · no_hardcoded_bot_token
+- [matrix] services/flagship_templates.py · no_aws_key
+- [matrix] services/secrets_store.py · exists
+- [matrix] services/secrets_store.py · nonempty
+- [matrix] services/secrets_store.py · parses
+- [matrix] services/secrets_store.py · has_module_doc
+- [matrix] services/secrets_store.py · no_tabs
+- [matrix] services/secrets_store.py · no_crlf
+- [matrix] services/secrets_store.py · no_pdb
+- [matrix] services/secrets_store.py · no_breakpoint
+- [matrix] services/secrets_store.py · no_hardcoded_sk
+- [matrix] services/secrets_store.py · no_hardcoded_bot_token
+- [matrix] services/secrets_store.py · no_aws_key
+- [matrix] services/limits.py · exists
+- [matrix] services/limits.py · nonempty
+- [matrix] services/limits.py · parses
+- [matrix] services/limits.py · has_module_doc
+- [matrix] services/limits.py · no_tabs
+- [matrix] services/limits.py · no_crlf
+- [matrix] services/limits.py · no_pdb
+- [matrix] services/limits.py · no_breakpoint
+- [matrix] services/limits.py · no_hardcoded_sk
+- [matrix] services/limits.py · no_hardcoded_bot_token
+- [matrix] services/limits.py · no_aws_key
+- [matrix] services/miniapp_auth.py · exists
+- [matrix] services/miniapp_auth.py · nonempty
+- [matrix] services/miniapp_auth.py · parses
+- [matrix] services/miniapp_auth.py · has_module_doc
+- [matrix] services/miniapp_auth.py · no_tabs
+- [matrix] services/miniapp_auth.py · no_crlf
+- [matrix] services/miniapp_auth.py · no_pdb
+- [matrix] services/miniapp_auth.py · no_breakpoint
+- [matrix] services/miniapp_auth.py · no_hardcoded_sk
+- [matrix] services/miniapp_auth.py · no_hardcoded_bot_token
+- [matrix] services/miniapp_auth.py · no_aws_key
+- [matrix] services/pingbot.py · exists
+- [matrix] services/pingbot.py · nonempty
+- [matrix] services/pingbot.py · parses
+- [matrix] services/pingbot.py · has_module_doc
+- [matrix] services/pingbot.py · no_tabs
+- [matrix] services/pingbot.py · no_crlf
+- [matrix] services/pingbot.py · no_pdb
+- [matrix] services/pingbot.py · no_breakpoint
+- [matrix] services/pingbot.py · no_hardcoded_sk
+- [matrix] services/pingbot.py · no_hardcoded_bot_token
+- [matrix] services/pingbot.py · no_aws_key
+- [matrix] services/popular_tools.py · exists
+- [matrix] services/popular_tools.py · nonempty
+- [matrix] services/popular_tools.py · parses
+- [matrix] services/popular_tools.py · has_module_doc
+- [matrix] services/popular_tools.py · no_tabs
+- [matrix] services/popular_tools.py · no_crlf
+- [matrix] services/popular_tools.py · no_pdb
+- [matrix] services/popular_tools.py · no_breakpoint
+- [matrix] services/popular_tools.py · no_hardcoded_sk
+- [matrix] services/popular_tools.py · no_hardcoded_bot_token
+- [matrix] services/popular_tools.py · no_aws_key
+- [matrix] services/premium_templates.py · exists
+- [matrix] services/premium_templates.py · nonempty
+- [matrix] services/premium_templates.py · parses
+- [matrix] services/premium_templates.py · has_module_doc
+- [matrix] services/premium_templates.py · no_tabs
+- [matrix] services/premium_templates.py · no_crlf
+- [matrix] services/premium_templates.py · no_pdb
+- [matrix] services/premium_templates.py · no_breakpoint
+- [matrix] services/premium_templates.py · no_hardcoded_sk
+- [matrix] services/premium_templates.py · no_hardcoded_bot_token
+- [matrix] services/premium_templates.py · no_aws_key
+- [matrix] services/proxy.py · exists
+- [matrix] services/proxy.py · nonempty
+- [matrix] services/proxy.py · parses
+- [matrix] services/proxy.py · has_module_doc
+- [matrix] services/proxy.py · no_tabs
+- [matrix] services/proxy.py · no_crlf
+- [matrix] services/proxy.py · no_pdb
+- [matrix] services/proxy.py · no_breakpoint
+- [matrix] services/proxy.py · no_hardcoded_sk
+- [matrix] services/proxy.py · no_hardcoded_bot_token
+- [matrix] services/proxy.py · no_aws_key
+- [matrix] services/retention.py · exists
+- [matrix] services/retention.py · nonempty
+- [matrix] services/retention.py · parses
+- [matrix] services/retention.py · has_module_doc
+- [matrix] services/retention.py · no_tabs
+- [matrix] services/retention.py · no_crlf
+- [matrix] services/retention.py · no_pdb
+- [matrix] services/retention.py · no_breakpoint
+- [matrix] services/retention.py · no_hardcoded_sk
+- [matrix] services/retention.py · no_hardcoded_bot_token
+- [matrix] services/retention.py · no_aws_key
+- [matrix] services/runner_client.py · exists
+- [matrix] services/runner_client.py · nonempty
+- [matrix] services/runner_client.py · parses
+- [matrix] services/runner_client.py · has_module_doc
+- [matrix] services/runner_client.py · no_tabs
+- [matrix] services/runner_client.py · no_crlf
+- [matrix] services/runner_client.py · no_pdb
+- [matrix] services/runner_client.py · no_breakpoint
+- [matrix] services/runner_client.py · no_hardcoded_sk
+- [matrix] services/runner_client.py · no_hardcoded_bot_token
+- [matrix] services/runner_client.py · no_aws_key
+- [matrix] services/job_recovery.py · exists
+- [matrix] services/job_recovery.py · nonempty
+- [matrix] services/job_recovery.py · parses
+- [matrix] services/job_recovery.py · has_module_doc
+- [matrix] services/job_recovery.py · no_tabs
+- [matrix] services/job_recovery.py · no_crlf
+- [matrix] services/job_recovery.py · no_pdb
+- [matrix] services/job_recovery.py · no_breakpoint
+- [matrix] services/job_recovery.py · no_hardcoded_sk
+- [matrix] services/job_recovery.py · no_hardcoded_bot_token
+- [matrix] services/job_recovery.py · no_aws_key
+- [matrix] services/snapshots.py · exists
+- [matrix] services/snapshots.py · nonempty
+- [matrix] services/snapshots.py · parses
+- [matrix] services/snapshots.py · has_module_doc
+- [matrix] services/snapshots.py · no_tabs
+- [matrix] services/snapshots.py · no_crlf
+- [matrix] services/snapshots.py · no_pdb
+- [matrix] services/snapshots.py · no_breakpoint
+- [matrix] services/snapshots.py · no_hardcoded_sk
+- [matrix] services/snapshots.py · no_hardcoded_bot_token
+- [matrix] services/snapshots.py · no_aws_key
+- [matrix] services/store.py · exists
+- [matrix] services/store.py · nonempty
+- [matrix] services/store.py · parses
+- [matrix] services/store.py · has_module_doc
+- [matrix] services/store.py · no_tabs
+- [matrix] services/store.py · no_crlf
+- [matrix] services/store.py · no_pdb
+- [matrix] services/store.py · no_breakpoint
+- [matrix] services/store.py · no_hardcoded_sk
+- [matrix] services/store.py · no_hardcoded_bot_token
+- [matrix] services/store.py · no_aws_key
+- [matrix] services/telegram_admin_ext.py · exists
+- [matrix] services/telegram_admin_ext.py · nonempty
+- [matrix] services/telegram_admin_ext.py · parses
+- [matrix] services/telegram_admin_ext.py · has_module_doc
+- [matrix] services/telegram_admin_ext.py · no_tabs
+- [matrix] services/telegram_admin_ext.py · no_crlf
+- [matrix] services/telegram_admin_ext.py · no_pdb
+- [matrix] services/telegram_admin_ext.py · no_breakpoint
+- [matrix] services/telegram_admin_ext.py · no_hardcoded_sk
+- [matrix] services/telegram_admin_ext.py · no_hardcoded_bot_token
+- [matrix] services/telegram_admin_ext.py · no_aws_key
+- [matrix] services/telegram_detector.py · exists
+- [matrix] services/telegram_detector.py · nonempty
+- [matrix] services/telegram_detector.py · parses
+- [matrix] services/telegram_detector.py · has_module_doc
+- [matrix] services/telegram_detector.py · no_tabs
+- [matrix] services/telegram_detector.py · no_crlf
+- [matrix] services/telegram_detector.py · no_pdb
+- [matrix] services/telegram_detector.py · no_breakpoint
+- [matrix] services/telegram_detector.py · no_hardcoded_sk
+- [matrix] services/telegram_detector.py · no_hardcoded_bot_token
+- [matrix] services/telegram_detector.py · no_aws_key
+- [matrix] services/bot_notify.py · exists
+- [matrix] services/bot_notify.py · nonempty
+- [matrix] services/bot_notify.py · parses
+- [matrix] services/bot_notify.py · has_module_doc
+- [matrix] services/bot_notify.py · no_tabs
+- [matrix] services/bot_notify.py · no_crlf
+- [matrix] services/bot_notify.py · no_pdb
+- [matrix] services/bot_notify.py · no_breakpoint
+- [matrix] services/bot_notify.py · no_hardcoded_sk
+- [matrix] services/bot_notify.py · no_hardcoded_bot_token
+- [matrix] services/bot_notify.py · no_aws_key
+- [matrix] services/term_proxy.py · exists
+- [matrix] services/term_proxy.py · nonempty
+- [matrix] services/term_proxy.py · parses
+- [matrix] services/term_proxy.py · has_module_doc
+- [matrix] services/term_proxy.py · no_tabs
+- [matrix] services/term_proxy.py · no_crlf
+- [matrix] services/term_proxy.py · no_pdb
+- [matrix] services/term_proxy.py · no_breakpoint
+- [matrix] services/term_proxy.py · no_hardcoded_sk
+- [matrix] services/term_proxy.py · no_hardcoded_bot_token
+- [matrix] services/term_proxy.py · no_aws_key
+- [matrix] services/twofa.py · exists
+- [matrix] services/twofa.py · nonempty
+- [matrix] services/twofa.py · parses
+- [matrix] services/twofa.py · has_module_doc
+- [matrix] services/twofa.py · no_tabs
+- [matrix] services/twofa.py · no_crlf
+- [matrix] services/twofa.py · no_pdb
+- [matrix] services/twofa.py · no_breakpoint
+- [matrix] services/twofa.py · no_hardcoded_sk
+- [matrix] services/twofa.py · no_hardcoded_bot_token
+- [matrix] services/twofa.py · no_aws_key
+- [matrix] services/user_analytics.py · exists
+- [matrix] services/user_analytics.py · nonempty
+- [matrix] services/user_analytics.py · parses
+- [matrix] services/user_analytics.py · has_module_doc
+- [matrix] services/user_analytics.py · no_tabs
+- [matrix] services/user_analytics.py · no_crlf
+- [matrix] services/user_analytics.py · no_pdb
+- [matrix] services/user_analytics.py · no_breakpoint
+- [matrix] services/user_analytics.py · no_hardcoded_sk
+- [matrix] services/user_analytics.py · no_hardcoded_bot_token
+- [matrix] services/user_analytics.py · no_aws_key
+- [matrix] services/env_rescue.py · exists
+- [matrix] services/env_rescue.py · nonempty
+- [matrix] services/env_rescue.py · parses
+- [matrix] services/env_rescue.py · has_module_doc
+- [matrix] services/env_rescue.py · no_tabs
+- [matrix] services/env_rescue.py · no_crlf
+- [matrix] services/env_rescue.py · no_pdb
+- [matrix] services/env_rescue.py · no_breakpoint
+- [matrix] services/env_rescue.py · no_hardcoded_sk
+- [matrix] services/env_rescue.py · no_hardcoded_bot_token
+- [matrix] services/env_rescue.py · no_aws_key
+- [matrix] services/github_repo.py · exists
+- [matrix] services/github_repo.py · nonempty
+- [matrix] services/github_repo.py · parses
+- [matrix] services/github_repo.py · has_module_doc
+- [matrix] services/github_repo.py · no_tabs
+- [matrix] services/github_repo.py · no_crlf
+- [matrix] services/github_repo.py · no_pdb
+- [matrix] services/github_repo.py · no_breakpoint
+- [matrix] services/github_repo.py · no_hardcoded_sk
+- [matrix] services/github_repo.py · no_hardcoded_bot_token
+- [matrix] services/github_repo.py · no_aws_key
+- [matrix] tests/audit_sqlite_leftovers.py · exists
+- [matrix] tests/audit_sqlite_leftovers.py · nonempty
+- [matrix] tests/audit_sqlite_leftovers.py · parses
+- [matrix] tests/audit_sqlite_leftovers.py · no_tabs
+- [matrix] tests/audit_sqlite_leftovers.py · no_crlf
+- [matrix] tests/audit_sqlite_leftovers.py · no_pdb
+- [matrix] tests/audit_sqlite_leftovers.py · no_breakpoint
+- [matrix] tests/audit_sqlite_leftovers.py · no_hardcoded_sk
+- [matrix] tests/audit_sqlite_leftovers.py · no_hardcoded_bot_token
+- [matrix] tests/audit_sqlite_leftovers.py · no_aws_key
+- [matrix] tests/test_admin_abuse_controls.py · exists
+- [matrix] tests/test_admin_abuse_controls.py · nonempty
+- [matrix] tests/test_admin_abuse_controls.py · parses
+- [matrix] tests/test_admin_abuse_controls.py · no_tabs
+- [matrix] tests/test_admin_abuse_controls.py · no_crlf
+- [matrix] tests/test_admin_abuse_controls.py · no_pdb
+- [matrix] tests/test_admin_abuse_controls.py · no_breakpoint
+- [matrix] tests/test_admin_abuse_controls.py · no_hardcoded_sk
+- [matrix] tests/test_admin_abuse_controls.py · no_hardcoded_bot_token
+- [matrix] tests/test_admin_abuse_controls.py · no_aws_key
+- [matrix] tests/test_admin_batch.py · exists
+- [matrix] tests/test_admin_batch.py · nonempty
+- [matrix] tests/test_admin_batch.py · parses
+- [matrix] tests/test_admin_batch.py · no_tabs
+- [matrix] tests/test_admin_batch.py · no_crlf
+- [matrix] tests/test_admin_batch.py · no_pdb
+- [matrix] tests/test_admin_batch.py · no_breakpoint
+- [matrix] tests/test_admin_batch.py · no_hardcoded_sk
+- [matrix] tests/test_admin_batch.py · no_hardcoded_bot_token
+- [matrix] tests/test_admin_batch.py · no_aws_key
+- [matrix] tests/test_admin_dashboard.py · exists
+- [matrix] tests/test_admin_dashboard.py · nonempty
+- [matrix] tests/test_admin_dashboard.py · parses
+- [matrix] tests/test_admin_dashboard.py · has_module_doc
+- [matrix] tests/test_admin_dashboard.py · no_tabs
+- [matrix] tests/test_admin_dashboard.py · no_crlf
+- [matrix] tests/test_admin_dashboard.py · no_pdb
+- [matrix] tests/test_admin_dashboard.py · no_breakpoint
+- [matrix] tests/test_admin_dashboard.py · no_hardcoded_sk
+- [matrix] tests/test_admin_dashboard.py · no_hardcoded_bot_token
+- [matrix] tests/test_admin_dashboard.py · no_aws_key
+- [matrix] tests/test_admin_stealth.py · exists
+- [matrix] tests/test_admin_stealth.py · nonempty
+- [matrix] tests/test_admin_stealth.py · parses
+- [matrix] tests/test_admin_stealth.py · has_module_doc
+- [matrix] tests/test_admin_stealth.py · no_tabs
+- [matrix] tests/test_admin_stealth.py · no_crlf
+- [matrix] tests/test_admin_stealth.py · no_pdb
+- [matrix] tests/test_admin_stealth.py · no_breakpoint
+- [matrix] tests/test_admin_stealth.py · no_hardcoded_sk
+- [matrix] tests/test_admin_stealth.py · no_hardcoded_bot_token
+- [matrix] tests/test_admin_stealth.py · no_aws_key
+- [matrix] tests/test_job_recovery.py · exists
+- [matrix] tests/test_job_recovery.py · nonempty
+- [matrix] tests/test_job_recovery.py · parses
+- [matrix] tests/test_job_recovery.py · has_module_doc
+- [matrix] tests/test_job_recovery.py · no_tabs
+- [matrix] tests/test_job_recovery.py · no_crlf
+- [matrix] tests/test_job_recovery.py · no_pdb
+- [matrix] tests/test_job_recovery.py · no_breakpoint
+- [matrix] tests/test_job_recovery.py · no_hardcoded_sk
+- [matrix] tests/test_job_recovery.py · no_aws_key
+- [matrix] tests/test_auth_abuse_system.py · exists
+- [matrix] tests/test_auth_abuse_system.py · nonempty
+- [matrix] tests/test_auth_abuse_system.py · parses
+- [matrix] tests/test_auth_abuse_system.py · no_tabs
+- [matrix] tests/test_auth_abuse_system.py · no_crlf
+- [matrix] tests/test_auth_abuse_system.py · no_pdb
+- [matrix] tests/test_auth_abuse_system.py · no_breakpoint
+- [matrix] tests/test_auth_abuse_system.py · no_hardcoded_sk
+- [matrix] tests/test_auth_abuse_system.py · no_hardcoded_bot_token
+- [matrix] tests/test_auth_abuse_system.py · no_aws_key
+- [matrix] tests/test_badhash_evidence.py · exists
+- [matrix] tests/test_badhash_evidence.py · nonempty
+- [matrix] tests/test_badhash_evidence.py · parses
+- [matrix] tests/test_badhash_evidence.py · has_module_doc
+- [matrix] tests/test_badhash_evidence.py · no_tabs
+- [matrix] tests/test_badhash_evidence.py · no_crlf
+- [matrix] tests/test_badhash_evidence.py · no_pdb
+- [matrix] tests/test_badhash_evidence.py · no_breakpoint
+- [matrix] tests/test_badhash_evidence.py · no_hardcoded_sk
+- [matrix] tests/test_badhash_evidence.py · no_aws_key
+- [matrix] tests/test_badhash_verdict.py · exists
+- [matrix] tests/test_badhash_verdict.py · nonempty
+- [matrix] tests/test_badhash_verdict.py · parses
+- [matrix] tests/test_badhash_verdict.py · has_module_doc
+- [matrix] tests/test_badhash_verdict.py · no_tabs
+- [matrix] tests/test_badhash_verdict.py · no_crlf
+- [matrix] tests/test_badhash_verdict.py · no_pdb
+- [matrix] tests/test_badhash_verdict.py · no_breakpoint
+- [matrix] tests/test_badhash_verdict.py · no_hardcoded_sk
+- [matrix] tests/test_badhash_verdict.py · no_aws_key
+- [matrix] tests/test_bot_analytics.py · exists
+- [matrix] tests/test_bot_analytics.py · nonempty
+- [matrix] tests/test_bot_analytics.py · parses
+- [matrix] tests/test_bot_analytics.py · has_module_doc
+- [matrix] tests/test_bot_analytics.py · no_tabs
+- [matrix] tests/test_bot_analytics.py · no_crlf
+- [matrix] tests/test_bot_analytics.py · no_pdb
+- [matrix] tests/test_bot_analytics.py · no_breakpoint
+- [matrix] tests/test_bot_analytics.py · no_hardcoded_sk
+- [matrix] tests/test_bot_analytics.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_analytics.py · no_aws_key
+- [matrix] tests/test_bot_critical.py · exists
+- [matrix] tests/test_bot_critical.py · nonempty
+- [matrix] tests/test_bot_critical.py · parses
+- [matrix] tests/test_bot_critical.py · no_tabs
+- [matrix] tests/test_bot_critical.py · no_crlf
+- [matrix] tests/test_bot_critical.py · no_pdb
+- [matrix] tests/test_bot_critical.py · no_breakpoint
+- [matrix] tests/test_bot_critical.py · no_hardcoded_sk
+- [matrix] tests/test_bot_critical.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_critical.py · no_aws_key
+- [matrix] tests/test_bot_dispatch_analytics.py · exists
+- [matrix] tests/test_bot_dispatch_analytics.py · nonempty
+- [matrix] tests/test_bot_dispatch_analytics.py · parses
+- [matrix] tests/test_bot_dispatch_analytics.py · no_tabs
+- [matrix] tests/test_bot_dispatch_analytics.py · no_crlf
+- [matrix] tests/test_bot_dispatch_analytics.py · no_pdb
+- [matrix] tests/test_bot_dispatch_analytics.py · no_breakpoint
+- [matrix] tests/test_bot_dispatch_analytics.py · no_hardcoded_sk
+- [matrix] tests/test_bot_dispatch_analytics.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_dispatch_analytics.py · no_aws_key
+- [matrix] tests/test_admin_progress.py · exists
+- [matrix] tests/test_admin_progress.py · nonempty
+- [matrix] tests/test_admin_progress.py · parses
+- [matrix] tests/test_admin_progress.py · has_module_doc
+- [matrix] tests/test_admin_progress.py · no_tabs
+- [matrix] tests/test_admin_progress.py · no_crlf
+- [matrix] tests/test_admin_progress.py · no_pdb
+- [matrix] tests/test_admin_progress.py · no_breakpoint
+- [matrix] tests/test_admin_progress.py · no_hardcoded_sk
+- [matrix] tests/test_admin_progress.py · no_hardcoded_bot_token
+- [matrix] tests/test_admin_progress.py · no_aws_key
+- [matrix] tests/test_bot_ops.py · exists
+- [matrix] tests/test_bot_ops.py · nonempty
+- [matrix] tests/test_bot_ops.py · parses
+- [matrix] tests/test_bot_ops.py · has_module_doc
+- [matrix] tests/test_bot_ops.py · no_tabs
+- [matrix] tests/test_bot_ops.py · no_crlf
+- [matrix] tests/test_bot_ops.py · no_pdb
+- [matrix] tests/test_bot_ops.py · no_breakpoint
+- [matrix] tests/test_bot_ops.py · no_hardcoded_sk
+- [matrix] tests/test_bot_ops.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_ops.py · no_aws_key
+- [matrix] tests/test_bot_ops_multirunner.py · exists
+- [matrix] tests/test_bot_ops_multirunner.py · nonempty
+- [matrix] tests/test_bot_ops_multirunner.py · parses
+- [matrix] tests/test_bot_ops_multirunner.py · no_tabs
+- [matrix] tests/test_bot_ops_multirunner.py · no_crlf
+- [matrix] tests/test_bot_ops_multirunner.py · no_pdb
+- [matrix] tests/test_bot_ops_multirunner.py · no_breakpoint
+- [matrix] tests/test_bot_ops_multirunner.py · no_hardcoded_sk
+- [matrix] tests/test_bot_ops_multirunner.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_ops_multirunner.py · no_aws_key
+- [matrix] tests/test_bot_templates.py · exists
+- [matrix] tests/test_bot_templates.py · nonempty
+- [matrix] tests/test_bot_templates.py · parses
+- [matrix] tests/test_bot_templates.py · no_tabs
+- [matrix] tests/test_bot_templates.py · no_crlf
+- [matrix] tests/test_bot_templates.py · no_pdb
+- [matrix] tests/test_bot_templates.py · no_breakpoint
+- [matrix] tests/test_bot_templates.py · no_hardcoded_sk
+- [matrix] tests/test_bot_templates.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_templates.py · no_aws_key
+- [matrix] tests/test_embedded_single_service.py · exists
+- [matrix] tests/test_embedded_single_service.py · nonempty
+- [matrix] tests/test_embedded_single_service.py · parses
+- [matrix] tests/test_embedded_single_service.py · has_module_doc
+- [matrix] tests/test_embedded_single_service.py · no_tabs
+- [matrix] tests/test_embedded_single_service.py · no_crlf
+- [matrix] tests/test_embedded_single_service.py · no_pdb
+- [matrix] tests/test_embedded_single_service.py · no_breakpoint
+- [matrix] tests/test_embedded_single_service.py · no_hardcoded_sk
+- [matrix] tests/test_embedded_single_service.py · no_hardcoded_bot_token
+- [matrix] tests/test_embedded_single_service.py · no_aws_key
+- [matrix] tests/test_env_and_stats.py · exists
+- [matrix] tests/test_env_and_stats.py · nonempty
+- [matrix] tests/test_env_and_stats.py · parses
+- [matrix] tests/test_env_and_stats.py · no_tabs
+- [matrix] tests/test_env_and_stats.py · no_crlf
+- [matrix] tests/test_env_and_stats.py · no_pdb
+- [matrix] tests/test_env_and_stats.py · no_breakpoint
+- [matrix] tests/test_env_and_stats.py · no_hardcoded_sk
+- [matrix] tests/test_env_and_stats.py · no_hardcoded_bot_token
+- [matrix] tests/test_env_and_stats.py · no_aws_key
+- [matrix] tests/test_job_data_persistence.py · exists
+- [matrix] tests/test_job_data_persistence.py · nonempty
+- [matrix] tests/test_job_data_persistence.py · parses
+- [matrix] tests/test_job_data_persistence.py · has_module_doc
+- [matrix] tests/test_job_data_persistence.py · no_tabs
+- [matrix] tests/test_job_data_persistence.py · no_crlf
+- [matrix] tests/test_job_data_persistence.py · no_pdb
+- [matrix] tests/test_job_data_persistence.py · no_breakpoint
+- [matrix] tests/test_job_data_persistence.py · no_hardcoded_sk
+- [matrix] tests/test_job_data_persistence.py · no_hardcoded_bot_token
+- [matrix] tests/test_job_data_persistence.py · no_aws_key
+- [matrix] tests/test_runner_registry.py · exists
+- [matrix] tests/test_runner_registry.py · nonempty
+- [matrix] tests/test_runner_registry.py · parses
+- [matrix] tests/test_runner_registry.py · no_tabs
+- [matrix] tests/test_runner_registry.py · no_crlf
+- [matrix] tests/test_runner_registry.py · no_pdb
+- [matrix] tests/test_runner_registry.py · no_breakpoint
+- [matrix] tests/test_runner_registry.py · no_hardcoded_sk
+- [matrix] tests/test_runner_registry.py · no_hardcoded_bot_token
+- [matrix] tests/test_runner_registry.py · no_aws_key
+- [matrix] tests/test_job_url_routes.py · exists
+- [matrix] tests/test_job_url_routes.py · nonempty
+- [matrix] tests/test_job_url_routes.py · parses
+- [matrix] tests/test_job_url_routes.py · no_tabs
+- [matrix] tests/test_job_url_routes.py · no_crlf
+- [matrix] tests/test_job_url_routes.py · no_pdb
+- [matrix] tests/test_job_url_routes.py · no_breakpoint
+- [matrix] tests/test_job_url_routes.py · no_hardcoded_sk
+- [matrix] tests/test_job_url_routes.py · no_hardcoded_bot_token
+- [matrix] tests/test_job_url_routes.py · no_aws_key
+- [matrix] tests/test_legacy_db_migration.py · exists
+- [matrix] tests/test_legacy_db_migration.py · nonempty
+- [matrix] tests/test_legacy_db_migration.py · parses
+- [matrix] tests/test_legacy_db_migration.py · no_tabs
+- [matrix] tests/test_legacy_db_migration.py · no_crlf
+- [matrix] tests/test_legacy_db_migration.py · no_pdb
+- [matrix] tests/test_legacy_db_migration.py · no_breakpoint
+- [matrix] tests/test_legacy_db_migration.py · no_hardcoded_sk
+- [matrix] tests/test_legacy_db_migration.py · no_hardcoded_bot_token
+- [matrix] tests/test_legacy_db_migration.py · no_aws_key
+- [matrix] tests/test_memory_admission.py · exists
+- [matrix] tests/test_memory_admission.py · nonempty
+- [matrix] tests/test_memory_admission.py · parses
+- [matrix] tests/test_memory_admission.py · has_module_doc
+- [matrix] tests/test_memory_admission.py · no_tabs
+- [matrix] tests/test_memory_admission.py · no_crlf
+- [matrix] tests/test_memory_admission.py · no_pdb
+- [matrix] tests/test_memory_admission.py · no_breakpoint
+- [matrix] tests/test_memory_admission.py · no_hardcoded_sk
+- [matrix] tests/test_memory_admission.py · no_hardcoded_bot_token
+- [matrix] tests/test_memory_admission.py · no_aws_key
+- [matrix] tests/test_miniapp_auth.py · exists
+- [matrix] tests/test_miniapp_auth.py · nonempty
+- [matrix] tests/test_miniapp_auth.py · parses
+- [matrix] tests/test_miniapp_auth.py · has_module_doc
+- [matrix] tests/test_miniapp_auth.py · no_tabs
+- [matrix] tests/test_miniapp_auth.py · no_crlf
+- [matrix] tests/test_miniapp_auth.py · no_pdb
+- [matrix] tests/test_miniapp_auth.py · no_breakpoint
+- [matrix] tests/test_miniapp_auth.py · no_hardcoded_sk
+- [matrix] tests/test_miniapp_auth.py · no_aws_key
+- [matrix] tests/test_miniapp_opens.py · exists
+- [matrix] tests/test_miniapp_opens.py · nonempty
+- [matrix] tests/test_miniapp_opens.py · parses
+- [matrix] tests/test_miniapp_opens.py · has_module_doc
+- [matrix] tests/test_miniapp_opens.py · no_tabs
+- [matrix] tests/test_miniapp_opens.py · no_crlf
+- [matrix] tests/test_miniapp_opens.py · no_pdb
+- [matrix] tests/test_miniapp_opens.py · no_breakpoint
+- [matrix] tests/test_miniapp_opens.py · no_hardcoded_sk
+- [matrix] tests/test_miniapp_opens.py · no_hardcoded_bot_token
+- [matrix] tests/test_miniapp_opens.py · no_aws_key
+- [matrix] tests/test_multi_worker.py · exists
+- [matrix] tests/test_multi_worker.py · nonempty
+- [matrix] tests/test_multi_worker.py · parses
+- [matrix] tests/test_multi_worker.py · has_module_doc
+- [matrix] tests/test_multi_worker.py · no_tabs
+- [matrix] tests/test_multi_worker.py · no_crlf
+- [matrix] tests/test_multi_worker.py · no_pdb
+- [matrix] tests/test_multi_worker.py · no_breakpoint
+- [matrix] tests/test_multi_worker.py · no_hardcoded_sk
+- [matrix] tests/test_multi_worker.py · no_hardcoded_bot_token
+- [matrix] tests/test_multi_worker.py · no_aws_key
+- [matrix] tests/test_overview_analytics.py · exists
+- [matrix] tests/test_overview_analytics.py · nonempty
+- [matrix] tests/test_overview_analytics.py · parses
+- [matrix] tests/test_overview_analytics.py · has_module_doc
+- [matrix] tests/test_overview_analytics.py · no_tabs
+- [matrix] tests/test_overview_analytics.py · no_crlf
+- [matrix] tests/test_overview_analytics.py · no_pdb
+- [matrix] tests/test_overview_analytics.py · no_breakpoint
+- [matrix] tests/test_overview_analytics.py · no_hardcoded_sk
+- [matrix] tests/test_overview_analytics.py · no_hardcoded_bot_token
+- [matrix] tests/test_overview_analytics.py · no_aws_key
+- [matrix] tests/test_pg_returning_id.py · exists
+- [matrix] tests/test_pg_returning_id.py · nonempty
+- [matrix] tests/test_pg_returning_id.py · parses
+- [matrix] tests/test_pg_returning_id.py · has_module_doc
+- [matrix] tests/test_pg_returning_id.py · no_tabs
+- [matrix] tests/test_pg_returning_id.py · no_crlf
+- [matrix] tests/test_pg_returning_id.py · no_pdb
+- [matrix] tests/test_pg_returning_id.py · no_breakpoint
+- [matrix] tests/test_pg_returning_id.py · no_hardcoded_sk
+- [matrix] tests/test_pg_returning_id.py · no_hardcoded_bot_token
+- [matrix] tests/test_pg_returning_id.py · no_aws_key
+- [matrix] tests/test_pool_resilience.py · exists
+- [matrix] tests/test_pool_resilience.py · nonempty
+- [matrix] tests/test_pool_resilience.py · parses
+- [matrix] tests/test_pool_resilience.py · no_tabs
+- [matrix] tests/test_pool_resilience.py · no_crlf
+- [matrix] tests/test_pool_resilience.py · no_pdb
+- [matrix] tests/test_pool_resilience.py · no_breakpoint
+- [matrix] tests/test_pool_resilience.py · no_hardcoded_sk
+- [matrix] tests/test_pool_resilience.py · no_hardcoded_bot_token
+- [matrix] tests/test_pool_resilience.py · no_aws_key
+- [matrix] tests/test_cmd_id_plain.py · exists
+- [matrix] tests/test_cmd_id_plain.py · nonempty
+- [matrix] tests/test_cmd_id_plain.py · parses
+- [matrix] tests/test_cmd_id_plain.py · has_module_doc
+- [matrix] tests/test_cmd_id_plain.py · no_tabs
+- [matrix] tests/test_cmd_id_plain.py · no_crlf
+- [matrix] tests/test_cmd_id_plain.py · no_pdb
+- [matrix] tests/test_cmd_id_plain.py · no_breakpoint
+- [matrix] tests/test_cmd_id_plain.py · no_hardcoded_sk
+- [matrix] tests/test_cmd_id_plain.py · no_hardcoded_bot_token
+- [matrix] tests/test_cmd_id_plain.py · no_aws_key
+- [matrix] tests/test_routing.py · exists
+- [matrix] tests/test_routing.py · nonempty
+- [matrix] tests/test_routing.py · parses
+- [matrix] tests/test_routing.py · no_tabs
+- [matrix] tests/test_routing.py · no_crlf
+- [matrix] tests/test_routing.py · no_pdb
+- [matrix] tests/test_routing.py · no_breakpoint
+- [matrix] tests/test_routing.py · no_hardcoded_sk
+- [matrix] tests/test_routing.py · no_hardcoded_bot_token
+- [matrix] tests/test_routing.py · no_aws_key
+- [matrix] tests/test_runner_capacity.py · exists
+- [matrix] tests/test_runner_capacity.py · nonempty
+- [matrix] tests/test_runner_capacity.py · parses
+- [matrix] tests/test_runner_capacity.py · has_module_doc
+- [matrix] tests/test_runner_capacity.py · no_tabs
+- [matrix] tests/test_runner_capacity.py · no_crlf
+- [matrix] tests/test_runner_capacity.py · no_pdb
+- [matrix] tests/test_runner_capacity.py · no_breakpoint
+- [matrix] tests/test_runner_capacity.py · no_hardcoded_sk
+- [matrix] tests/test_runner_capacity.py · no_hardcoded_bot_token
+- [matrix] tests/test_runner_capacity.py · no_aws_key
+- [matrix] tests/test_job_liveness.py · exists
+- [matrix] tests/test_job_liveness.py · nonempty
+- [matrix] tests/test_job_liveness.py · parses
+- [matrix] tests/test_job_liveness.py · no_tabs
+- [matrix] tests/test_job_liveness.py · no_crlf
+- [matrix] tests/test_job_liveness.py · no_pdb
+- [matrix] tests/test_job_liveness.py · no_breakpoint
+- [matrix] tests/test_job_liveness.py · no_hardcoded_sk
+- [matrix] tests/test_job_liveness.py · no_hardcoded_bot_token
+- [matrix] tests/test_job_liveness.py · no_aws_key
+- [matrix] tests/test_runner_standalone_boot.py · exists
+- [matrix] tests/test_runner_standalone_boot.py · nonempty
+- [matrix] tests/test_runner_standalone_boot.py · parses
+- [matrix] tests/test_runner_standalone_boot.py · no_tabs
+- [matrix] tests/test_runner_standalone_boot.py · no_crlf
+- [matrix] tests/test_runner_standalone_boot.py · no_pdb
+- [matrix] tests/test_runner_standalone_boot.py · no_breakpoint
+- [matrix] tests/test_runner_standalone_boot.py · no_hardcoded_sk
+- [matrix] tests/test_runner_standalone_boot.py · no_hardcoded_bot_token
+- [matrix] tests/test_runner_standalone_boot.py · no_aws_key
+- [matrix] tests/test_runspace_fixes.py · exists
+- [matrix] tests/test_runspace_fixes.py · nonempty
+- [matrix] tests/test_runspace_fixes.py · parses
+- [matrix] tests/test_runspace_fixes.py · no_tabs
+- [matrix] tests/test_runspace_fixes.py · no_crlf
+- [matrix] tests/test_runspace_fixes.py · no_pdb
+- [matrix] tests/test_runspace_fixes.py · no_breakpoint
+- [matrix] tests/test_runspace_fixes.py · no_hardcoded_sk
+- [matrix] tests/test_runspace_fixes.py · no_hardcoded_bot_token
+- [matrix] tests/test_runspace_fixes.py · no_aws_key
+- [matrix] tests/test_save_only.py · exists
+- [matrix] tests/test_save_only.py · nonempty
+- [matrix] tests/test_save_only.py · parses
+- [matrix] tests/test_save_only.py · has_module_doc
+- [matrix] tests/test_save_only.py · no_tabs
+- [matrix] tests/test_save_only.py · no_crlf
+- [matrix] tests/test_save_only.py · no_pdb
+- [matrix] tests/test_save_only.py · no_breakpoint
+- [matrix] tests/test_save_only.py · no_hardcoded_sk
+- [matrix] tests/test_save_only.py · no_hardcoded_bot_token
+- [matrix] tests/test_save_only.py · no_aws_key
+- [matrix] tests/test_bot_list_fast.py · exists
+- [matrix] tests/test_bot_list_fast.py · nonempty
+- [matrix] tests/test_bot_list_fast.py · parses
+- [matrix] tests/test_bot_list_fast.py · no_tabs
+- [matrix] tests/test_bot_list_fast.py · no_crlf
+- [matrix] tests/test_bot_list_fast.py · no_pdb
+- [matrix] tests/test_bot_list_fast.py · no_breakpoint
+- [matrix] tests/test_bot_list_fast.py · no_hardcoded_sk
+- [matrix] tests/test_bot_list_fast.py · no_hardcoded_bot_token
+- [matrix] tests/test_bot_list_fast.py · no_aws_key
+- [matrix] tests/test_security_batch.py · exists
+- [matrix] tests/test_security_batch.py · nonempty
+- [matrix] tests/test_security_batch.py · parses
+- [matrix] tests/test_security_batch.py · no_tabs
+- [matrix] tests/test_security_batch.py · no_crlf
+- [matrix] tests/test_security_batch.py · no_pdb
+- [matrix] tests/test_security_batch.py · no_breakpoint
+- [matrix] tests/test_security_batch.py · no_hardcoded_sk
+- [matrix] tests/test_security_batch.py · no_hardcoded_bot_token
+- [matrix] tests/test_security_batch.py · no_aws_key
+- [matrix] tests/test_signature_field.py · exists
+- [matrix] tests/test_signature_field.py · nonempty
+- [matrix] tests/test_signature_field.py · parses
+- [matrix] tests/test_signature_field.py · has_module_doc
+- [matrix] tests/test_signature_field.py · no_tabs
+- [matrix] tests/test_signature_field.py · no_crlf
+- [matrix] tests/test_signature_field.py · no_pdb
+- [matrix] tests/test_signature_field.py · no_breakpoint
+- [matrix] tests/test_signature_field.py · no_hardcoded_sk
+- [matrix] tests/test_signature_field.py · no_aws_key
+- [matrix] tests/test_snapshot_routes.py · exists
+- [matrix] tests/test_snapshot_routes.py · nonempty
+- [matrix] tests/test_snapshot_routes.py · parses
+- [matrix] tests/test_snapshot_routes.py · has_module_doc
+- [matrix] tests/test_snapshot_routes.py · no_tabs
+- [matrix] tests/test_snapshot_routes.py · no_crlf
+- [matrix] tests/test_snapshot_routes.py · no_pdb
+- [matrix] tests/test_snapshot_routes.py · no_breakpoint
+- [matrix] tests/test_snapshot_routes.py · no_hardcoded_sk
+- [matrix] tests/test_snapshot_routes.py · no_hardcoded_bot_token
+- [matrix] tests/test_snapshot_routes.py · no_aws_key
+- [matrix] tests/test_sqlite_flow.py · exists
+- [matrix] tests/test_sqlite_flow.py · nonempty
+- [matrix] tests/test_sqlite_flow.py · parses
+- [matrix] tests/test_sqlite_flow.py · has_module_doc
+- [matrix] tests/test_sqlite_flow.py · no_tabs
+- [matrix] tests/test_sqlite_flow.py · no_crlf
+- [matrix] tests/test_sqlite_flow.py · no_pdb
+- [matrix] tests/test_sqlite_flow.py · no_breakpoint
+- [matrix] tests/test_sqlite_flow.py · no_hardcoded_sk
+- [matrix] tests/test_sqlite_flow.py · no_hardcoded_bot_token
+- [matrix] tests/test_sqlite_flow.py · no_aws_key
+- [matrix] tests/test_store.py · exists
+- [matrix] tests/test_store.py · nonempty
+- [matrix] tests/test_store.py · parses
+- [matrix] tests/test_store.py · has_module_doc
+- [matrix] tests/test_store.py · no_tabs
+- [matrix] tests/test_store.py · no_crlf
+- [matrix] tests/test_store.py · no_pdb
+- [matrix] tests/test_store.py · no_breakpoint
+- [matrix] tests/test_store.py · no_hardcoded_sk
+- [matrix] tests/test_store.py · no_aws_key
+- [matrix] tests/test_system_tools.py · exists
+- [matrix] tests/test_system_tools.py · nonempty
+- [matrix] tests/test_system_tools.py · parses
+- [matrix] tests/test_system_tools.py · has_module_doc
+- [matrix] tests/test_system_tools.py · no_tabs
+- [matrix] tests/test_system_tools.py · no_crlf
+- [matrix] tests/test_system_tools.py · no_pdb
+- [matrix] tests/test_system_tools.py · no_breakpoint
+- [matrix] tests/test_system_tools.py · no_hardcoded_sk
+- [matrix] tests/test_system_tools.py · no_hardcoded_bot_token
+- [matrix] tests/test_system_tools.py · no_aws_key
+- [matrix] tests/test_tab_status_sync.py · exists
+- [matrix] tests/test_tab_status_sync.py · nonempty
+- [matrix] tests/test_tab_status_sync.py · parses
+- [matrix] tests/test_tab_status_sync.py · no_tabs
+- [matrix] tests/test_tab_status_sync.py · no_crlf
+- [matrix] tests/test_tab_status_sync.py · no_pdb
+- [matrix] tests/test_tab_status_sync.py · no_breakpoint
+- [matrix] tests/test_tab_status_sync.py · no_hardcoded_sk
+- [matrix] tests/test_tab_status_sync.py · no_hardcoded_bot_token
+- [matrix] tests/test_tab_status_sync.py · no_aws_key
+- [matrix] tests/test_command_guides_privacy.py · exists
+- [matrix] tests/test_command_guides_privacy.py · nonempty
+- [matrix] tests/test_command_guides_privacy.py · parses
+- [matrix] tests/test_command_guides_privacy.py · has_module_doc
+- [matrix] tests/test_command_guides_privacy.py · no_tabs
+- [matrix] tests/test_command_guides_privacy.py · no_crlf
+- [matrix] tests/test_command_guides_privacy.py · no_pdb
+- [matrix] tests/test_command_guides_privacy.py · no_breakpoint
+- [matrix] tests/test_command_guides_privacy.py · no_hardcoded_sk
+- [matrix] tests/test_command_guides_privacy.py · no_hardcoded_bot_token
+- [matrix] tests/test_command_guides_privacy.py · no_aws_key
+- [matrix] tests/test_telegram_link.py · exists
+- [matrix] tests/test_telegram_link.py · nonempty
+- [matrix] tests/test_telegram_link.py · parses
+- [matrix] tests/test_telegram_link.py · has_module_doc
+- [matrix] tests/test_telegram_link.py · no_tabs
+- [matrix] tests/test_telegram_link.py · no_crlf
+- [matrix] tests/test_telegram_link.py · no_pdb
+- [matrix] tests/test_telegram_link.py · no_breakpoint
+- [matrix] tests/test_telegram_link.py · no_hardcoded_sk
+- [matrix] tests/test_telegram_link.py · no_hardcoded_bot_token
+- [matrix] tests/test_telegram_link.py · no_aws_key
+- [matrix] tests/test_token_mismatch.py · exists
+- [matrix] tests/test_token_mismatch.py · nonempty
+- [matrix] tests/test_token_mismatch.py · parses
+- [matrix] tests/test_token_mismatch.py · has_module_doc
+- [matrix] tests/test_token_mismatch.py · no_tabs
+- [matrix] tests/test_token_mismatch.py · no_crlf
+- [matrix] tests/test_token_mismatch.py · no_pdb
+- [matrix] tests/test_token_mismatch.py · no_breakpoint
+- [matrix] tests/test_token_mismatch.py · no_hardcoded_sk
+- [matrix] tests/test_token_mismatch.py · no_hardcoded_bot_token
+- [matrix] tests/test_token_mismatch.py · no_aws_key
+- [matrix] tests/test_web_batch.py · exists
+- [matrix] tests/test_web_batch.py · nonempty
+- [matrix] tests/test_web_batch.py · parses
+- [matrix] tests/test_web_batch.py · no_tabs
+- [matrix] tests/test_web_batch.py · no_crlf
+- [matrix] tests/test_web_batch.py · no_pdb
+- [matrix] tests/test_web_batch.py · no_breakpoint
+- [matrix] tests/test_web_batch.py · no_hardcoded_sk
+- [matrix] tests/test_web_batch.py · no_hardcoded_bot_token
+- [matrix] tests/test_web_batch.py · no_aws_key
+- [matrix] tests/validate_postgres_sql.py · exists
+- [matrix] tests/validate_postgres_sql.py · nonempty
+- [matrix] tests/validate_postgres_sql.py · parses
+- [matrix] tests/validate_postgres_sql.py · has_module_doc
+- [matrix] tests/validate_postgres_sql.py · no_tabs
+- [matrix] tests/validate_postgres_sql.py · no_crlf
+- [matrix] tests/validate_postgres_sql.py · no_pdb
+- [matrix] tests/validate_postgres_sql.py · no_breakpoint
+- [matrix] tests/validate_postgres_sql.py · no_hardcoded_sk
+- [matrix] tests/validate_postgres_sql.py · no_hardcoded_bot_token
+- [matrix] tests/validate_postgres_sql.py · no_aws_key
+- [matrix] tests/test_telegram_job_detection.py · exists
+- [matrix] tests/test_telegram_job_detection.py · nonempty
+- [matrix] tests/test_telegram_job_detection.py · parses
+- [matrix] tests/test_telegram_job_detection.py · no_tabs
+- [matrix] tests/test_telegram_job_detection.py · no_crlf
+- [matrix] tests/test_telegram_job_detection.py · no_pdb
+- [matrix] tests/test_telegram_job_detection.py · no_breakpoint
+- [matrix] tests/test_telegram_job_detection.py · no_hardcoded_sk
+- [matrix] tests/test_telegram_job_detection.py · no_hardcoded_bot_token
+- [matrix] tests/test_telegram_job_detection.py · no_aws_key
+- [matrix] tests/test_repo_deps_and_entry.py · exists
+- [matrix] tests/test_repo_deps_and_entry.py · nonempty
+- [matrix] tests/test_repo_deps_and_entry.py · parses
+- [matrix] tests/test_repo_deps_and_entry.py · has_module_doc
+- [matrix] tests/test_repo_deps_and_entry.py · no_tabs
+- [matrix] tests/test_repo_deps_and_entry.py · no_crlf
+- [matrix] tests/test_repo_deps_and_entry.py · no_pdb
+- [matrix] tests/test_repo_deps_and_entry.py · no_breakpoint
+- [matrix] tests/test_repo_deps_and_entry.py · no_hardcoded_sk
+- [matrix] tests/test_repo_deps_and_entry.py · no_hardcoded_bot_token
+- [matrix] tests/test_repo_deps_and_entry.py · no_aws_key
+- [matrix] tests/test_all_routes.py · exists
+- [matrix] tests/test_all_routes.py · nonempty
+- [matrix] tests/test_all_routes.py · parses
+- [matrix] tests/test_all_routes.py · no_tabs
+- [matrix] tests/test_all_routes.py · no_crlf
+- [matrix] tests/test_all_routes.py · no_pdb
+- [matrix] tests/test_all_routes.py · no_breakpoint
+- [matrix] tests/test_all_routes.py · no_hardcoded_sk
+- [matrix] tests/test_all_routes.py · no_hardcoded_bot_token
+- [matrix] tests/test_all_routes.py · no_aws_key
+- [matrix] tests/test_env_rescue.py · exists
+- [matrix] tests/test_env_rescue.py · nonempty
+- [matrix] tests/test_env_rescue.py · parses
+- [matrix] tests/test_env_rescue.py · has_module_doc
+- [matrix] tests/test_env_rescue.py · no_tabs
+- [matrix] tests/test_env_rescue.py · no_crlf
+- [matrix] tests/test_env_rescue.py · no_pdb
+- [matrix] tests/test_env_rescue.py · no_breakpoint
+- [matrix] tests/test_env_rescue.py · no_hardcoded_sk
+- [matrix] tests/test_env_rescue.py · no_hardcoded_bot_token
+- [matrix] tests/test_env_rescue.py · no_aws_key
+- [matrix] tests/test_new_bot_commands.py · exists
+- [matrix] tests/test_new_bot_commands.py · nonempty
+- [matrix] tests/test_new_bot_commands.py · parses
+- [matrix] tests/test_new_bot_commands.py · has_module_doc
+- [matrix] tests/test_new_bot_commands.py · no_tabs
+- [matrix] tests/test_new_bot_commands.py · no_crlf
+- [matrix] tests/test_new_bot_commands.py · no_pdb
+- [matrix] tests/test_new_bot_commands.py · no_breakpoint
+- [matrix] tests/test_new_bot_commands.py · no_hardcoded_sk
+- [matrix] tests/test_new_bot_commands.py · no_hardcoded_bot_token
+- [matrix] tests/test_new_bot_commands.py · no_aws_key
+- [matrix] tests/test_ping_and_queen.py · exists
+- [matrix] tests/test_ping_and_queen.py · nonempty
+- [matrix] tests/test_ping_and_queen.py · parses
+- [matrix] tests/test_ping_and_queen.py · has_module_doc
+- [matrix] tests/test_ping_and_queen.py · no_tabs
+- [matrix] tests/test_ping_and_queen.py · no_crlf
+- [matrix] tests/test_ping_and_queen.py · no_pdb
+- [matrix] tests/test_ping_and_queen.py · no_breakpoint
+- [matrix] tests/test_ping_and_queen.py · no_hardcoded_sk
+- [matrix] tests/test_ping_and_queen.py · no_hardcoded_bot_token
+- [matrix] tests/test_ping_and_queen.py · no_aws_key
+- [matrix] tests/test_queen_flag.py · exists
+- [matrix] tests/test_queen_flag.py · nonempty
+- [matrix] tests/test_queen_flag.py · parses
+- [matrix] tests/test_queen_flag.py · has_module_doc
+- [matrix] tests/test_queen_flag.py · no_tabs
+- [matrix] tests/test_queen_flag.py · no_crlf
+- [matrix] tests/test_queen_flag.py · no_pdb
+- [matrix] tests/test_queen_flag.py · no_breakpoint
+- [matrix] tests/test_queen_flag.py · no_hardcoded_sk
+- [matrix] tests/test_queen_flag.py · no_hardcoded_bot_token
+- [matrix] tests/test_queen_flag.py · no_aws_key
+- [matrix] tests/test_runner_isolation.py · exists
+- [matrix] tests/test_runner_isolation.py · nonempty
+- [matrix] tests/test_runner_isolation.py · parses
+- [matrix] tests/test_runner_isolation.py · has_module_doc
+- [matrix] tests/test_runner_isolation.py · no_tabs
+- [matrix] tests/test_runner_isolation.py · no_crlf
+- [matrix] tests/test_runner_isolation.py · no_pdb
+- [matrix] tests/test_runner_isolation.py · no_breakpoint
+- [matrix] tests/test_runner_isolation.py · no_hardcoded_sk
+- [matrix] tests/test_runner_isolation.py · no_hardcoded_bot_token
+- [matrix] tests/test_runner_isolation.py · no_aws_key
+- [matrix] tests/test_runspace_token_from_code.py · exists
+- [matrix] tests/test_runspace_token_from_code.py · nonempty
+- [matrix] tests/test_runspace_token_from_code.py · parses
+- [matrix] tests/test_runspace_token_from_code.py · has_module_doc
+- [matrix] tests/test_runspace_token_from_code.py · no_tabs
+- [matrix] tests/test_runspace_token_from_code.py · no_crlf
+- [matrix] tests/test_runspace_token_from_code.py · no_pdb
+- [matrix] tests/test_runspace_token_from_code.py · no_breakpoint
+- [matrix] tests/test_runspace_token_from_code.py · no_hardcoded_sk
+- [matrix] tests/test_runspace_token_from_code.py · no_aws_key
+- [matrix] tests/test_secrets_plain.py · exists
+- [matrix] tests/test_secrets_plain.py · nonempty
+- [matrix] tests/test_secrets_plain.py · parses
+- [matrix] tests/test_secrets_plain.py · has_module_doc
+- [matrix] tests/test_secrets_plain.py · no_tabs
+- [matrix] tests/test_secrets_plain.py · no_crlf
+- [matrix] tests/test_secrets_plain.py · no_pdb
+- [matrix] tests/test_secrets_plain.py · no_breakpoint
+- [matrix] tests/test_secrets_plain.py · no_hardcoded_sk
+- [matrix] tests/test_secrets_plain.py · no_hardcoded_bot_token
+- [matrix] tests/test_secrets_plain.py · no_aws_key
+- [matrix] tests/test_token_in_code.py · exists
+- [matrix] tests/test_token_in_code.py · nonempty
+- [matrix] tests/test_token_in_code.py · parses
+- [matrix] tests/test_token_in_code.py · has_module_doc
+- [matrix] tests/test_token_in_code.py · no_tabs
+- [matrix] tests/test_token_in_code.py · no_crlf
+- [matrix] tests/test_token_in_code.py · no_pdb
+- [matrix] tests/test_token_in_code.py · no_breakpoint
+- [matrix] tests/test_token_in_code.py · no_hardcoded_sk
+- [matrix] tests/test_token_in_code.py · no_aws_key
+- [matrix] tests/e2e/driver.py · exists
+- [matrix] tests/e2e/driver.py · nonempty
+- [matrix] tests/e2e/driver.py · parses
+- [matrix] tests/e2e/driver.py · has_module_doc
+- [matrix] tests/e2e/driver.py · no_tabs
+- [matrix] tests/e2e/driver.py · no_crlf
+- [matrix] tests/e2e/driver.py · no_pdb
+- [matrix] tests/e2e/driver.py · no_breakpoint
+- [matrix] tests/e2e/driver.py · no_hardcoded_sk
+- [matrix] tests/e2e/driver.py · no_hardcoded_bot_token
+- [matrix] tests/e2e/driver.py · no_aws_key
+- [frontend] static/pro.js size=470369
+- [frontend] static/cm6.bundle.js size=820280
+- [frontend] static/codenest-anim.svg size=8510
+- [frontend] static/codenest-mark.svg size=3960
+- [frontend] static/miniapp.js size=11863
+- [frontend] static/terminal.js size=33018
+- [frontend] static/app.css size=263727
+- [frontend] index.html size=135829
+- [req-line] fastapi
+- [req-line] uvicorn[standard]
+- [req-line] httpx
+- [req-line] bcrypt
+- [req-line] pydantic
+- [req-line] requests
+- [req-line] email-validator
+- [req-line] pyotp
+- [req-line] qrcode[pil]
+- [req-line] gunicorn
+- [req-line] psycopg2-binary
+- [req-line] cryptography
+- [guide-topic] guide_start.png
+- [guide-topic] guide_import.png
+- [guide-topic] guide_id.png
+- [guide-topic] guide_token.png
+- [guide-topic] guide_code.png
+- [guide-topic] guide_update.png
+- [guide-topic] guide_apps.png
+- [guide-topic] guide_logs.png
+- [guide-topic] guide_restart.png
+- [guide-topic] guide_stop.png
+- [guide-topic] guide_status.png
+- [guide-topic] guide_source.png
+- [guide-topic] guide_delete.png
+- [guide-topic] guide_rename.png
+- [guide-topic] guide_env.png
+- [guide-topic] guide_backup.png
+- [guide-topic] guide_history.png
+- [guide-topic] guide_link.png
+- [guide-topic] guide_projects.png
+- [guide-topic] guide_latest.png
+- [guide-topic] guide_admin.png
+- [doc-cmd] /admin
+- [doc-cmd] /apps
+- [doc-cmd] /autodeploy
+- [doc-cmd] /backup
+- [doc-cmd] /cancel
+- [doc-cmd] /code
+- [doc-cmd] /commands
+- [doc-cmd] /guide
+- [doc-cmd] /health
+- [doc-cmd] /help
+- [doc-cmd] /id
+- [doc-cmd] /import
+- [doc-cmd] /latest
+- [doc-cmd] /limits
+- [doc-cmd] /link
+- [doc-cmd] /ping
+- [doc-cmd] /projects
+- [doc-cmd] /queen
+- [doc-cmd] /recover
+- [doc-cmd] /runners
+- [doc-cmd] /skip
+- [doc-cmd] /start
+- [doc-cmd] /status
+- [doc-cmd] /token
+- [doc-cmd] /unlink
+- [doc-cmd] /update
+- [doc-cmd] /user
+- [doc-cmd] /web
+
+### INFO (59)
+
+- [constraint] README.md has 5 encrypt mentions
+- [commands] 29 cmd_* functions — cmd_admin_short_toggle, cmd_queen, cmd_user, cmd_see, cmd_admin, cmd_limits, cmd_commands, cmd_env, 
+- [tests] 58 test modules
+- [tests] hard breakers=['test_admin_dashboard.py', 'test_admin_stealth.py', 'test_all_routes.py', 'test_auth_abuse_system.py', 'test_badhash_evidence.py', 'test_badhash_verdict.py', 'test_bot_critical.py', 'test_bot_ops.py', 'test_embedded_single_service.py', 'test_env_and_stats.py', 'test_job_data_persistence.py', 'test_job_liveness.py', 'test_legacy_db_migration.py', 'test_memory_admission.py', 'test_miniapp_auth.py', 'test_miniapp_opens.py', 'test_multi_worker.py', 'test_pg_returning_id.py', 'test_pool_resilience.py', 'test_queen_flag.py', 'test_repo_deps_and_entry.py', 'test_routing.py', 'test_runner_capacity.py', 'test_runner_standalone_boot.py', 'test_runspace_fixes.py', 'test_security_batch.py', 'test_signature_field.py', 'test_snapshot_routes.py', 'test_system_tools.py', 'test_tab_status_sync.py', 'test_telegram_link.py', 'test_token_mismatch.py', 'test_web_batch.py']
+- [guides] README.md
+- [routes] __init__.py n=0 — []
+- [routes] ping.py n=2 — [('get', '/api/ping'), ('get', '/ping')]
+- [routes] auth.py n=17 — [('post', '/auth/check-availability'), ('post', '/signup'), ('post', '/resend-otp'), ('post', '/veri
+- [routes] code_editor.py n=7 — [('get', '/snippets'), ('post', '/snippets'), ('put', '/snippets'), ('delete', '/snippets'), ('post'
+- [routes] dashboard.py n=3 — [('get', '/search'), ('get', '/stats'), ('get', '/api/analytics/overview')]
+- [routes] deps.py n=0 — []
+- [routes] admin.py n=28 — [('get', '/admin/panel-html'), ('get', '/admin/runners'), ('post', '/admin/runners/generate-secret')
+- [routes] profile.py n=14 — [('get', '/profile'), ('post', '/profile/update'), ('post', '/account/delete'), ('post', '/account/c
+- [routes] runspace.py n=28 — [('get', '/api/telegram-bot/templates'), ('get', '/api/telegram-bot/templates/{template_id}'), ('pos
+- [routes] store.py n=13 — [('get', '/api/store'), ('get', '/api/store/categories'), ('get', '/api/store/mine/library'), ('get'
+- [callbacks] prefixes=['admin', 'apps', 'autodep', 'db', 'delcancel', 'delconfirm', 'help', 'latest', 'logs', 'pick', 'ping', 'qproj', 'queen', 'restart', 'stat', 'stop']
+- [hash] services/secrets_store.py=45d67354950f
+- [hash] services/job_recovery.py=8e76c0b83679
+- [hash] services/bot_ops.py=9b890c6843f7
+- [hash] runner/app.py=6075e7a6a226
+- [hash] static/pro.js=255beba86d1c
+- [hash] services/pingbot.py=0e70173d4fdd
+- [frontend] static/pro.js console.log x1
+- [frontend] static/cm6.bundle.js console.log x10
+- [env-key] BOT_EVENT_RETENTION_DAYS
+- [env-key] BOT_TOKEN
+- [env-key] BREVO_API_KEY
+- [env-key] CLUSTER_LIMITS_ENABLED
+- [env-key] DATABASE_URL
+- [env-key] DB_PATH
+- [env-key] DEPLOY_EVENT_RETENTION_DAYS
+- [env-key] FINGERPRINT_JOB_LIMIT
+- [env-key] IP_JOB_LIMIT
+- [env-key] JOB_RECOVERY_INTERVAL_S
+- [env-key] JOB_SECRETS_KEY
+- [env-key] JOB_TOKEN_HASH_KEY
+- [env-key] MAX_BG_JOBS
+- [env-key] MAX_JOBS_PER_USER
+- [env-key] OTP_EXPIRY_MINUTES
+- [env-key] PG_SSLMODE
+- [env-key] PING_DEFAULT_TARGET
+- [env-key] PING_TIMEOUT_S
+- [env-key] PYTHON_VERSION
+- [env-key] QUEEN_PROJECTS_BRANCH
+- [env-key] QUEEN_PROJECTS_NAME
+- [env-key] QUEEN_PROJECTS_REPO
+- [env-key] QUEEN_ZIP_MAX_FILES
+- [env-key] QUEEN_ZIP_MAX_MB
+- [env-key] RUNNER_SERVICE_SECRET
+- [env-key] RUNNER_SERVICE_URL
+- [env-key] RUNNER_SERVICE_URLS
+- [env-key] SENDER_EMAIL
+- [env-key] SENDER_NAME
+- [env-key] SITE_BASE_URL
+- [env-key] SSE_MAX_LIFETIME_S
+- [env-key] TELEGRAM_BOT_USERNAME
+- [env-key] TELEGRAM_ONLY_AUTH
+- [env-key] ZIP_MAX_FILES
+- [env-key] ZIP_MAX_MB

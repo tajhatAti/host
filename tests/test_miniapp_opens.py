@@ -204,4 +204,5 @@ check("and explains an unusable one", "not_https" in APP and "not_configured" in
 
 
 print(f"\ntest_miniapp_opens: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

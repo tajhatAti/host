@@ -140,4 +140,5 @@ check("verify-setup returns the backup codes once", len(v.json().get("backup_cod
 
 fails = [n for n, ok in results if not ok]
 print("\n================ %d pass, %d fail ================" % (len(results) - len(fails), len(fails)))
-sys.exit(1 if fails else 0)
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

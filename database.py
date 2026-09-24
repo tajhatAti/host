@@ -71,6 +71,15 @@ PG_SSLMODE = os.getenv("PG_SSLMODE", "prefer")
 # '@', spaces) that were not percent-encoded, so the URL parser glues password
 # fragments onto the hostname. Catch that HERE, at startup, and fail with an
 # actionable message instead of a 50-line stack trace.
+
+def _safe_ident(name: str) -> str:
+    """SQL identifier allowlist — letters, digits, underscore only."""
+    name = (name or "").strip()
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return name
+
+
 def _validate_database_url(url: str) -> None:
     from urllib.parse import urlparse
 
@@ -953,7 +962,7 @@ def _column_exists(conn: _Connection, table: str, column: str) -> bool:
             (table, column),
         ).fetchone()
         return bool(row)
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    rows = conn.execute(f"PRAGMA table_info({_safe_ident(table)})").fetchall()
     return any(r["name"] == column for r in rows)
 
 
@@ -983,7 +992,7 @@ def init_db():
             "user_servers", "user_recovery", "api_keys", "notifications",
         )
         for _t in _DROPPED_VAULT_TABLES:
-            conn.execute(f"DROP TABLE IF EXISTS {_t}")
+            conn.execute(f"DROP TABLE IF EXISTS {_safe_ident(_t)}")
 
         # Legacy-DB migration: ensure the `role` column exists on users.
         if not _column_exists(conn, "users", "role"):
@@ -1077,7 +1086,7 @@ def init_db():
             ("telegram_token_source", "TEXT"),
         ):
             if not _column_exists(conn, "jobs", _col):
-                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_ddl}")
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_safe_ident(_col)} {_ddl}")
 
         # GitHub-backed apps: what they were built from, and whether they follow
         # the branch by themselves. Existing rows stay NULL/0 — a job with no
@@ -1090,7 +1099,7 @@ def init_db():
             ("auto_deploy", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if not _column_exists(conn, "jobs", _col):
-                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_ddl}")
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_safe_ident(_col)} {_ddl}")
 
         # Same story for the sessions table.
         if not _column_exists(conn, "sessions", "fingerprint"):

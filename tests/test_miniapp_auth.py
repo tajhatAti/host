@@ -841,4 +841,5 @@ check("theme colours are validated before being injected into CSS",
       "/^#[0-9a-f]{3,8}$/i" in src_ma)
 
 print(f"\ntest_miniapp_auth: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

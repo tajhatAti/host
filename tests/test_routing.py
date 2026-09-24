@@ -74,4 +74,5 @@ for p in DEAD:
 
 fails = results.count(False)
 print(f"\n================ {len(results)-fails} pass, {fails} fail ================")
-sys.exit(1 if fails else 0)
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

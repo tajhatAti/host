@@ -229,4 +229,5 @@ finally:
     D.DIALECT = _saved_dialect
 
 print(f"\ntest_pg_returning_id: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

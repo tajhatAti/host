@@ -191,4 +191,5 @@ check("no YOUR_BOT_USERNAME placeholder left", "YOUR_BOT_USERNAME" not in _index
 _passed = sum(1 for _, ok in results if ok)
 _failed = len(results) - _passed
 print(f"\n================ {_passed} pass, {_failed} fail ================")
-sys.exit(1 if _failed else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _failed else 0)

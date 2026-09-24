@@ -130,4 +130,5 @@ finally:
 
 fails = [x for x in results if not x[1]]
 print(f"\n================ {len(results)-len(fails)} pass, {len(fails)} fail ================")
-sys.exit(1 if fails else 0)
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

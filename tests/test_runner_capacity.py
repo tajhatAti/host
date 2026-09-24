@@ -190,4 +190,5 @@ check("MAX_BG_JOBS documented", "MAX_BG_JOBS" in env_example)
 check("MAX_JOBS_PER_USER documented", "MAX_JOBS_PER_USER" in env_example)
 
 print(f"\ntest_runner_capacity: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

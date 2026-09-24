@@ -311,4 +311,5 @@ check("junk gets nothing useful",
 
 
 print(f"\ntest_badhash_evidence: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

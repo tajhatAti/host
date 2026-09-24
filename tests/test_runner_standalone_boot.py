@@ -64,4 +64,5 @@ check("embedded (package) import still works", "PKG_OK" in p2.stdout,
 passed = sum(1 for _, ok in results if ok)
 failed = len(results) - passed
 print(f"\n================ {passed} pass, {failed} fail ================")
-sys.exit(1 if failed else 0)
+if __name__ == "__main__":
+    sys.exit(1 if failed else 0)
