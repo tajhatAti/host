@@ -786,7 +786,12 @@ async function api(path, method = "POST", body = null, auth = false,
   // UI can be reviewed without the Python backend.
   if (_demo.on) return _demoApi(path, method, body);
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = {};
+  // Only set JSON content-type when we actually send a body. A bare POST/DELETE
+  // with Content-Type: application/json and no body made some gateways answer
+  // 422/400, which the UI turned into a useless "Something went wrong" toast
+  // on admin buttons (Online, Recover, Remove).
+  if (body != null) headers["Content-Type"] = "application/json";
   // Remember WHICH token this request went out with. A 401 only means "the
   // session is dead" if the token is still the current one — see below.
   const sentToken = authToken;
@@ -933,7 +938,7 @@ async function api(path, method = "POST", body = null, auth = false,
 function _fmtApiDetail(data, status) {
   const d = data && data.detail;
   if (d == null || d === "") {
-    if (status === 404) return "Not found (or you are not an admin).";
+    if (status === 404) return "Not found. Refresh the panel and try again.";
     if (status === 401) return "Session expired — sign in again.";
     if (status === 403) return "Not allowed.";
     if (status === 409) return "Conflict — try again.";
@@ -7234,6 +7239,17 @@ function renderAdminRunners(data) {
   if(!rows.length&&!envRows.length&&!embedded)list.appendChild(_botText("div","No runner engine is available.","adm-empty"));
 }
 
+function _admFriendlyErr(e, fallback) {
+  var msg = (e && e.message) ? String(e.message) : "";
+  if (!msg || msg === "Something went wrong" || /^Something went wrong/.test(msg)) {
+    return fallback + " — check you are signed in as admin, then ↻ Refresh.";
+  }
+  if (/Not found/i.test(msg)) {
+    return fallback + " — that item may be gone. Tap ↻ Refresh.";
+  }
+  return msg;
+}
+
 async function _admToggleRunner(id, enabled) {
   if (id == null || id === "" || id === "embedded") {
     toast("The embedded engine stays on with the website — add a remote runner to drain/enable.", "info");
@@ -7244,7 +7260,7 @@ async function _admToggleRunner(id, enabled) {
     toast((d && d.message) || (enabled ? "Runner online" : "Runner drained"), "success");
     await loadAdminPanel(true);
   } catch (e) {
-    toast((e && e.message) || "Could not update runner", "error");
+    toast(_admFriendlyErr(e, "Could not update runner"), "error");
   }
 }
 async function _admDeleteRunner(id) {
@@ -7258,7 +7274,7 @@ async function _admDeleteRunner(id) {
     toast("Runner removed", "success");
     await loadAdminPanel(true);
   } catch (e) {
-    toast((e && e.message) || "Could not remove runner", "error");
+    toast(_admFriendlyErr(e, "Could not remove runner"), "error");
   }
 }
 
@@ -7269,7 +7285,7 @@ async function _admRecoverNow(){
     const d=await api("/admin/recover","POST",{},true);
     toast((d&&d.message)||"Recovery done","success");
     await loadAdminPanel(true);
-  }catch(e){toast((e&&e.message)||"Recovery failed","error");}
+  }catch(e){toast(_admFriendlyErr(e,"Recovery failed"),"error");}
   finally{if(btn){btn.disabled=false;btn.textContent="♻️ Recover bots";}}
 }
 function _wireAdminRecover(){

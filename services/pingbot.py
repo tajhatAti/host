@@ -1003,10 +1003,35 @@ def _admin_health_kb():
 def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=None):
     """Every admin: callback lands here. Re-checks admin status on every
     single press — a button label is not a permission, whoever crafted the
-    tap is."""
+    tap is.
+
+    NEVER raises to the webhook/poller: a raised error becomes Telegram's
+    alert popup "Something went wrong" which looks like the whole admin
+    panel is broken. Failures stay as a normal chat reply instead.
+    """
+    try:
+        _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("admin callback %s/%s failed", action, ref)
+        try:
+            _edit_or_send(
+                chat_id, message_id,
+                f"⚠️ Could not complete that admin action "
+                f"({type(exc).__name__}). Try `/admin` again, or 🩺 Health.",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "🛠 Menu", "callback_data": "admin:menu"},
+                     {"text": "🩺 Health", "callback_data": "admin:health"}]]})
+        except Exception:
+            try:
+                _send(chat_id, "⚠️ Admin action failed — send `/admin` again.")
+            except Exception:
+                pass
+
+
+def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message_id=None):
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
-        _edit_or_send(chat_id, message_id, "🔒 Admin only.")
+        # Silent for non-admins — do not confirm the panel exists.
         return
 
     if action == "menu":
@@ -1688,6 +1713,10 @@ _CODE_EXT_LANG = {
 # whatever was waiting, so there is never a stale slot fighting a fresh one.
 _pending = {}
 _PENDING_TTL_S = 300
+
+# chat_id -> set of guide topics already shown this process (avoid spam)
+_guide_shown = {}
+
 
 # Parallel to _pending, but for multi-field ADMIN actions: bot asks one
 # field at a time ("URL?" -> user answers -> "Secret?" -> user answers ->
@@ -2434,7 +2463,7 @@ def _main_kb(user=None):
     ])
     rows.append([
         {"text": "📦 My apps", "callback_data": "apps:list"},
-        {"text": "📡 Ping site", "callback_data": "ping:site"},
+        {"text": "📡 Ping", "callback_data": "ping:site"},
     ])
     if _user_is_queen(user):
         rows.insert(1 if btn else 0, [
@@ -2453,16 +2482,24 @@ def _main_kb(user=None):
     return {"inline_keyboard": rows} if rows else None
 
 
-def _help_guide_kb():
-    """Buttons under any how-to message — always command+button parity."""
-    return {"inline_keyboard": [
+def _help_guide_kb(user=None):
+    """Buttons under how-to messages. Admin guides only for admins."""
+    rows = [
         [{"text": "📖 Start", "callback_data": "help:start"},
          {"text": "🌿 Import", "callback_data": "help:import"}],
+        [{"text": "✍️ Code", "callback_data": "help:code"},
+         {"text": "♻️ Update", "callback_data": "help:update"}],
         [{"text": "🔢 Ids", "callback_data": "help:id"},
          {"text": "🔑 Token", "callback_data": "help:token"}],
-        [{"text": "🛠 Admin how-to", "callback_data": "help:admin"},
+        [{"text": "📦 Apps", "callback_data": "help:apps"},
          {"text": "🏠 Help home", "callback_data": "help:home"}],
-    ]}
+    ]
+    try:
+        if user and _is_admin(user, (user or {}).get("telegram_id")):
+            rows.append([{"text": "🛠 Admin how-to", "callback_data": "help:admin"}])
+    except Exception:
+        pass
+    return {"inline_keyboard": rows}
 
 
 def _queen_panel_kb():
@@ -2562,8 +2599,7 @@ def cmd_limits(chat_id, user):
         f"🗜 Zip upload — {priv.get('zip_max_mb')}MB / {priv.get('zip_max_files')} files",
         "🌿 GitHub — `/import owner/repo` works for everyone",
         "",
-        "👑 An admin can lift all of these with `/queen yourusername`: no "
-        "memory ceiling, big zip uploads, and auto-deploy on new commits.",
+        "Need more room? Ask the bot owner — they can raise limits for trusted accounts.",
     ]
     _send(chat_id, "\n".join(lines), reply_markup=_open_kb())
 
@@ -2644,9 +2680,11 @@ def _plain_help_text(user) -> str:
         "`/rename name newname`\n"
         "`/cancel` — stop a pending /code or /update\n"
         "`/projects` — your repo apps and whether a newer commit is waiting\n"
-        "`/ping [url]` — check a URL (no URL = this site)\n"
+        "`/ping [url]` — check a URL (no URL = platform health)\n"
         "`/health` — is the platform alive, asked from inside\n"
-        "`/id` — your Telegram id (what an admin needs for `/queen`)\n"
+        "`/id` — your Telegram id (long-press to copy)\n"
+        "`/guide` — picture how-tos for every command\n"
+        "`/token` — where BOT_TOKEN can live\n"
         "`/web` — open the site inside Telegram\n"
         "`/unlink` — disconnect this chat\n\n"
         "I message you if an app stops on its own — and I say *why* "
@@ -2695,12 +2733,13 @@ def cmd_commands(chat_id, user=None, telegram_user_id=None):
             ]
     else:
         lines += ["Link first: `/link` or tap Open CodeNest.", ""]
-    lines.append("Cartoon how-tos: `/guide start|import|id|token|admin`")
+    lines.append("Cartoon how-tos: `/guide` or `/guide code` · `/guide import` · …")
     _send(chat_id, "\n".join(lines), reply_markup=_main_kb(user))
 
 
 def cmd_env(chat_id, user, arg=""):
     """`/env name` list keys · `/env name KEY=value` set · `/env name del KEY`."""
+    _maybe_guide(chat_id, "env", user)
     parts = (arg or "").split(None, 1)
     if not parts:
         _send(chat_id, "Usage:\n`/env myapp` — list key names\n"
@@ -2744,6 +2783,7 @@ def cmd_env(chat_id, user, arg=""):
 
 def cmd_backup(chat_id, user, arg=""):
     """`/backup name` — snapshot workspace data into durable storage now."""
+    _maybe_guide(chat_id, "backup", user)
     name = (arg or "").strip()
     if not name:
         _send(chat_id, "Which app? `/backup myapp` — saves its data files "
@@ -2775,6 +2815,7 @@ def cmd_backup(chat_id, user, arg=""):
 
 def cmd_history(chat_id, user, arg=""):
     """`/history name` — recent code revisions (website deploys)."""
+    _maybe_guide(chat_id, "history", user)
     name = (arg or "").strip()
     if not name:
         _send(chat_id, "Which app? `/history myapp`")
@@ -2825,14 +2866,112 @@ def _cmd_health_smart(chat_id, telegram_user_id=None):
         cmd_health(chat_id, user or {})
 
 
+# command name -> (guide png stem without guide_, short caption, markdown steps)
+_COMMAND_GUIDES = {
+    "start": ("guide_start", "Start here",
+              "1. Tap *Open CodeNest* (or `/link`).\n"
+              "2. Deploy with `/code`, a template, or `/import`.\n"
+              "3. *Save & Run* — bots recover after runner restart."),
+    "code": ("guide_code", "/code — new app",
+             "`/code myapp` then paste code, send a file, or a `.zip`.\n"
+             "I deploy it and give you Logs / Restart / Stop buttons."),
+    "update": ("guide_update", "/update — replace code",
+               "`/update myapp` then paste or upload the new source.\n"
+               "Name stays; data files stay; only code changes."),
+    "import": ("guide_import", "/import — GitHub",
+               "`/import owner/repo [name]` — I show each runnable entry as a button.\n"
+               "Branch: `/import owner/repo/tree/branch myapp`."),
+    "apps": ("guide_apps", "/apps — your list",
+             "`/apps` lists every app.\n"
+             "Then `/logs name` · `/restart name` · `/stop name`."),
+    "logs": ("guide_logs", "/logs — output",
+             "`/logs myapp` — newest lines at the bottom."),
+    "restart": ("guide_restart", "/restart — wake it",
+                "`/restart myapp` brings a stopped or stuck app back."),
+    "stop": ("guide_stop", "/stop — pause",
+             "`/stop myapp` frees a running slot. Files stay yours."),
+    "status": ("guide_status", "/status — health",
+               "`/status` for the account · `/status myapp` for one app."),
+    "source": ("guide_source", "/source — download",
+               "`/source myapp` uploads the current code as a file."),
+    "delete": ("guide_delete", "/delete — remove",
+               "`/delete myapp` then confirm. Permanent."),
+    "rename": ("guide_rename", "/rename — new label",
+               "`/rename oldname newname` — data stays."),
+    "latest": ("guide_latest", "/latest — pull commit",
+               "`/latest myapp` for repo apps · bare `/latest` lists them."),
+    "env": ("guide_env", "/env — variables",
+            "`/env myapp` lists keys.\n"
+            "`/env myapp KEY=value` sets · `del KEY` removes.\n"
+            "Token may also live in the source file."),
+    "backup": ("guide_backup", "/backup — snapshot",
+               "`/backup myapp` saves data files so a rebuild cannot wipe them."),
+    "history": ("guide_history", "/history — revisions",
+                "`/history myapp` — recent deploys. Rollback on the website."),
+    "id": ("guide_id", "/id — your numbers",
+           "Long-press a number to copy. No broken markup."),
+    "token": ("guide_token", "BOT_TOKEN tips",
+              "Env tab *or* `BOT_TOKEN = '…'` in code — both work after restart."),
+    "link": ("guide_link", "/link — connect",
+             "Tap *Open CodeNest* or send `/link` so this chat can deploy."),
+    "projects": ("guide_projects", "/projects — repo apps",
+                 "`/projects` lists GitHub deploys · `/latest` pulls newest."),
+}
+
+
+def _show_command_guide(chat_id, topic: str, user=None):
+    """Picture first, then short steps — for one user-facing command."""
+    topic = (topic or "").strip().lower()
+    info = _COMMAND_GUIDES.get(topic)
+    if not info:
+        _send(chat_id, "Unknown guide — try `/guide` or `/commands`.",
+              reply_markup=_help_guide_kb(user))
+        return
+    png, caption, body = info
+    _send_guide(chat_id, png, caption)
+    _send(chat_id, f"*{caption}*\n\n{body}", reply_markup=_help_guide_kb(user))
+
+
 def _cmd_guide(chat_id, arg=""):
-    """`/guide [start|import|id|token|admin]` — cartoon how-tos + matching commands."""
-    topic = (arg or "home").strip().lower().split()[0] if (arg or "").strip() else "home"
-    alias = {"start": "start", "begin": "start", "import": "import", "repo": "import",
-             "id": "id", "ids": "id", "token": "token", "bot_token": "token", "env": "token",
-             "admin": "admin", "panel": "admin", "home": "home", "help": "home"}
-    ref = alias.get(topic, "home")
-    handle_callback(chat_id, f"help:{ref}", None)
+    """`/guide [code|import|…]` — cartoon first, then steps. No admin topics for public."""
+    topic = (arg or "").strip().lower().split()[0] if (arg or "").strip() else ""
+    alias = {
+        "start": "start", "begin": "start", "home": "home", "help": "home",
+        "import": "import", "repo": "import", "git": "import",
+        "id": "id", "ids": "id",
+        "token": "token", "bot_token": "token",
+        "code": "code", "new": "code", "create": "code",
+        "update": "update", "edit": "update",
+        "apps": "apps", "list": "apps", "jobs": "apps",
+        "logs": "logs", "log": "logs",
+        "restart": "restart", "stop": "stop", "status": "status",
+        "source": "source", "download": "source",
+        "delete": "delete", "remove": "delete",
+        "rename": "rename",
+        "latest": "latest", "pull": "latest",
+        "env": "env", "backup": "backup", "history": "history",
+        "link": "link", "connect": "link",
+        "projects": "projects", "project": "projects",
+        # admin is NOT in the public alias map — only /admin path shows it
+    }
+    user = telegram_link.user_for_chat(chat_id)
+    if not topic or topic in ("home", "help"):
+        handle_callback(chat_id, "help:home", None)
+        return
+    ref = alias.get(topic)
+    if ref is None:
+        # Unknown word: show the public catalogue, never invent admin topics.
+        lines = ["📖 *Guides* — send one of:",
+                 "`/guide code` · `/guide update` · `/guide import`",
+                 "`/guide apps` · `/guide logs` · `/guide restart` · `/guide stop`",
+                 "`/guide status` · `/guide env` · `/guide token` · `/guide id`",
+                 "`/guide backup` · `/guide history` · `/guide projects` · `/guide link`"]
+        _send(chat_id, "\n".join(lines), reply_markup=_help_guide_kb(user))
+        return
+    if ref in _COMMAND_GUIDES:
+        _show_command_guide(chat_id, ref, user)
+    else:
+        handle_callback(chat_id, f"help:{ref}", None)
 
 
 def handle_start(chat_id, first_name, payload=""):
@@ -3125,8 +3264,14 @@ def handle_ping(chat_id, text):
                 continue
             break
     except Exception as exc:                                   # noqa: BLE001
-        _send(chat_id, _ping_error_text(host, exc, budget, own_site=not given),
-              reply_markup=_ping_kb())
+        if not given:
+            # Own platform: no hostname in the reply.
+            msg = _ping_error_text("the platform", exc, budget, own_site=True)
+            msg = msg.replace("`the platform`", "the platform")
+            _send(chat_id, msg, reply_markup=_ping_kb())
+        else:
+            _send(chat_id, _ping_error_text(host, exc, budget, own_site=False),
+                  reply_markup=_ping_kb())
         return
 
     ms = round((time.time() - started) * 1000, 1)
@@ -3134,23 +3279,24 @@ def handle_ping(chat_id, text):
     final_host = urlparse(current).hostname or host
     icon = "🟢" if code < 400 else ("🟡" if code < 500 else "🔴")
     lines = []
+    # Bare /ping measures THIS platform. Never print the hostname — a normal
+    # user does not need the deploy URL, and it is not a public brand name.
     if not given:
-        lines.append(f"📡 Measuring this site — `{host}`. "
-                     f"`/ping url` checks any URL.")
-    lines.append(f"{icon} *{host}* — {ms}ms · HTTP {code}")
-    if final_host != host:
-        lines.append(f"↳ landed on `{final_host}` after {hops} redirect(s)")
+        lines.append(f"{icon} Platform is reachable — {ms}ms · HTTP {code}")
+        lines.append("`/ping example.com` checks any other URL.")
+    else:
+        lines.append(f"{icon} *{host}* — {ms}ms · HTTP {code}")
+        if final_host != host:
+            lines.append(f"↳ landed on `{final_host}` after {hops} redirect(s)")
     if code in (401, 403):
         lines.append("It answered, but refused the request — normal for a page "
                      "behind a login.")
-    elif code == 404:
+    elif code == 404 and given:
         lines.append("It answered, but that path doesn't exist.")
     elif code >= 500:
-        lines.append("It answered with a server error — the site itself is unhappy.")
+        lines.append("It answered with a server error.")
     elif ms > 5000:
-        lines.append("⏳ That was a cold start: the service had been asleep and woke "
-                     "up for this request. The next one is fast — on a free-tier "
-                     "host this is normal, not a fault.")
+        lines.append("⏳ Cold start — the service had been asleep. Next ping is fast.")
     _send(chat_id, "\n".join(lines), reply_markup=_ping_kb())
 
 
@@ -3163,6 +3309,7 @@ def cmd_id(chat_id, msg_from=None):
     press copies the number alone; the admin examples use a real sample id
     instead of angle brackets.
     """
+    _maybe_guide(chat_id, "id", telegram_link.user_for_chat(chat_id))
     frm = msg_from or {}
     tg_id = frm.get("id") or chat_id
     username = (frm.get("username") or "").strip()
@@ -3195,18 +3342,20 @@ def cmd_id(chat_id, msg_from=None):
     else:
         lines.append("CodeNest #:   not linked yet — send /link")
 
-    # Ready-to-paste admin commands using THIS person's real ids — no <placeholders>.
-    sample = account_id or tg_id
-    lines += [
-        "",
-        "Admin commands (copy-paste ready):",
-        f"/queen {sample}",
-        f"/admin limit {sample} 10",
-        f"/see {sample}",
-        f"/user {sample}",
-    ]
+    # Admin-only: ready-to-paste privileged commands. Never shown to others —
+    # leaking /queen /admin /see /user names teaches strangers the admin surface.
+    tg_uid = frm.get("id") or chat_id
+    if _is_admin(user, tg_uid):
+        sample = account_id or tg_id
+        lines += [
+            "",
+            "Admin (you only):",
+            f"/queen {sample}",
+            f"/admin limit {sample} 10",
+            f"/see {sample}",
+            f"/user {sample}",
+        ]
     _send_plain(chat_id, "\n".join(lines))
-    # Still offer the open button if we have a site URL.
     kb = _open_kb()
     if kb:
         _send(chat_id, "Open the site:", reply_markup=kb)
@@ -3297,10 +3446,9 @@ def cmd_health(chat_id, user):
                                      if str(hook.get("url") or "") else
                                      "long-polling (slower to wake on a free host)"))
     if SITE_BASE:
-        lines.append(f"🌐 Site — {SITE_BASE} (what *Open CodeNest* opens)")
+        lines.append("🌐 Mini App button — ready")
     else:
-        lines.append("⚠️ Site URL is not set (`SITE_BASE_URL`), so the Mini App "
-                     "button cannot open your own dashboard.")
+        lines.append("⚠️ Mini App button — site URL not configured yet")
     _send(chat_id, "\n".join(lines))
 
 
@@ -3384,6 +3532,7 @@ def _user_is_queen(user) -> bool:
 
 
 def cmd_apps(chat_id, user):
+    _maybe_guide(chat_id, "apps", user)
     apps = bot_ops.list_apps(user["id"])
     queen = _user_is_queen(user)
     if not apps:
@@ -3430,6 +3579,7 @@ def cmd_apps(chat_id, user):
 
 def cmd_status(chat_id, user, ref=""):
     """Whole-account summary, or one app in full."""
+    _maybe_guide(chat_id, "status", user)
     if ref:
         res = bot_ops.logs(user["id"], ref, lines=0)
         if not res.get("ok"):
@@ -3485,6 +3635,7 @@ def cmd_status(chat_id, user, ref=""):
 
 
 def cmd_logs(chat_id, user, ref):
+    _maybe_guide(chat_id, "logs", user)
     if not ref:
         _send(chat_id, "Which app? `/logs name` — /apps lists them.")
         return
@@ -3503,6 +3654,7 @@ def cmd_logs(chat_id, user, ref):
 
 
 def cmd_restart(chat_id, user, ref):
+    _maybe_guide(chat_id, "restart", user)
     if not ref:
         _send(chat_id, "Which app? `/restart name`")
         return
@@ -3512,6 +3664,7 @@ def cmd_restart(chat_id, user, ref):
 
 
 def cmd_stop(chat_id, user, ref):
+    _maybe_guide(chat_id, "stop", user)
     if not ref:
         _send(chat_id, "Which app? `/stop name`")
         return
@@ -3525,6 +3678,7 @@ def cmd_source(chat_id, user, ref):
     it can be edited locally and pushed back with /update. Owner-scoped
     like every other user command (find_app checks user_id) — this is NOT
     the admin /see tool, it only ever returns the caller's own code."""
+    _maybe_guide(chat_id, "source", user)
     if not ref:
         _send(chat_id, "Usage: `/source name`")
         return
@@ -3554,6 +3708,7 @@ def cmd_source(chat_id, user, ref):
 
 
 def cmd_delete(chat_id, user, ref):
+    _maybe_guide(chat_id, "delete", user)
     if not ref:
         _send(chat_id, "Which app? `/delete name` — this cannot be undone.")
         return
@@ -3575,6 +3730,7 @@ def _cmd_delete_confirmed(chat_id, user, ref):
 
 
 def cmd_rename(chat_id, user, args):
+    _maybe_guide(chat_id, "rename", user)
     parts = (args or "").split()
     if len(parts) < 2:
         _send(chat_id, "Usage: `/rename x x`")
@@ -3618,6 +3774,7 @@ def cmd_import(chat_id, user, arg):
     browser shows) or `owner/repo#<branch>` — and the runner clones exactly that
     branch. Without it a repo whose work lives off `main` deploys the wrong code.
     """
+    _maybe_guide(chat_id, "import", user)
     if not arg:
         ex_owner, ex_repo = _queen_repo_parts()
         example = f"github.com/{ex_owner}/{ex_repo}" if ex_owner else "github.com/user/repo"
@@ -3895,6 +4052,7 @@ def _update_one_app(chat_id, user, row, force=False):
 
 def cmd_latest(chat_id, user, ref=""):
     """`/latest [name]` — bring a repo app up to date with its branch."""
+    _maybe_guide(chat_id, "latest", user)
     apps = [a for a in bot_ops.list_apps(user["id"]) if (a.get("repo_url") or "").strip()]
     if not apps:
         _send(chat_id, "None of your apps came from a repo, so there is no commit to "
@@ -3922,9 +4080,8 @@ def cmd_latest(chat_id, user, ref=""):
 def cmd_autodeploy(chat_id, user, arg=""):
     """👑 `/autodeploy name on|off` — follow the branch without being asked."""
     if not _user_is_queen(user):
-        _send(chat_id, "👑 Auto-deploy is part of queen access — an admin grants it with "
-                       "`/queen yourusername`. Anyone can still pull an update by "
-                       "hand with `/latest name`.")
+        _send(chat_id, "👑 Auto-deploy is part of queen access — ask the bot owner if you need it. "
+                       "Anyone can still pull an update with `/latest name`.")
         return
     parts = (arg or "").split()
     states = ("on", "off", "yes", "no", "true", "false")
@@ -4052,6 +4209,7 @@ def cmd_projects(chat_id, user, arg=""):
     QUEEN_PROJECTS_REPO as a personal starter pack, that is offered too — but
     nothing depends on it.
     """
+    _maybe_guide(chat_id, "projects", user)
     sub = (arg or "").strip().lower()
     if sub in ("run", "deploy", "start", "install"):
         if not _user_is_queen(user):
@@ -4136,9 +4294,30 @@ def _send_project_readme(chat_id):
     _send_repo_readme(chat_id, owner, repo, QUEEN_PROJECTS_BRANCH or "")
 
 
+
+def _maybe_guide(chat_id, topic: str, user=None):
+    """Send the cartoon for a command at most once per chat per process.
+
+    First time someone runs /code (or /update, /import, …) they see the picture
+    then the normal flow. Repeat runs stay quiet — they already know the steps.
+    """
+    topic = (topic or "").strip().lower()
+    if topic not in _COMMAND_GUIDES:
+        return
+    seen = _guide_shown.setdefault(chat_id, set())
+    if topic in seen:
+        return
+    seen.add(topic)
+    try:
+        _show_command_guide(chat_id, topic, user)
+    except Exception:
+        logger.exception("guide %s failed", topic)
+
+
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
     app's source (text or a file)."""
+    _maybe_guide(chat_id, "code", user)
     if not name:
         _send(chat_id, "Usage: `/code myapp`, then send the source "
                        "as a message or upload a file.")
@@ -4165,6 +4344,7 @@ def cmd_code_start(chat_id, user, name):
 def cmd_update_start(chat_id, user, ref):
     """/update <existing app name> — the NEXT message becomes its new code,
     redeployed in place (workspace data preserved)."""
+    _maybe_guide(chat_id, "update", user)
     if not ref:
         _send(chat_id, "Usage: `/update myapp`, then send the new "
                        "source as a message or upload a file.")
@@ -4358,9 +4538,8 @@ def handle_pending_code(chat_id, msg, pending):
         queen = _user_is_queen(linked_user)
         if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")
                 or queen):
-            _send(chat_id, "🔒 .zip uploads need admin approval on this account. "
-                           "Ask an admin to run `/admin allowzip` for you, or send a "
-                           "single source file instead.")
+            _send(chat_id, "🔒 .zip uploads need approval on this account. "
+                           "Ask the bot owner, or send a single source file instead.")
             return
         # Multi-file path for BOTH create and update: hand the WHOLE zip to
         # the runner, which extracts it for real (see
@@ -4555,9 +4734,8 @@ def handle_callback(chat_id, data, message_id=None):
         if ref == "list":
             cmd_projects(chat_id, user)
         elif not _user_is_queen(user):
-            _send(chat_id, "👑 That's part of queen access — an admin grants it "
-                           "with `/queen yourusername`. `/import your/"
-                           "public repo>` works for anyone.")
+            _send(chat_id, "👑 That's part of queen access — ask the bot owner if you need it. "
+                           "`/import owner/repo` works for anyone.")
         elif ref == "readme":
             _send_project_readme(chat_id)
         else:
@@ -4612,24 +4790,27 @@ def handle_callback(chat_id, data, message_id=None):
                   "After a runner restart your bot comes back if the token is "
                   "in either place. You do *not* have to set it only in Env.",
                   reply_markup=_help_guide_kb())
+        elif ref in ("code", "update", "apps", "logs", "restart", "stop",
+                     "status", "source", "delete", "rename", "latest",
+                     "env", "backup", "history", "link", "projects"):
+            _show_command_guide(chat_id, ref, user)
         elif ref == "commands":
             cmd_commands(chat_id, user)
         elif ref == "admin":
-            _send_guide(chat_id, "guide_admin", "Admin — command + button")
-            _send(chat_id,
-                  "🛠 *Admin how-to*\n\n"
-                  "Every admin action has *both*:\n"
-                  "• a button under `/admin`\n"
-                  "• a matching typed command\n\n"
-                  "Examples:\n"
-                  "`/admin` — full menu\n"
-                  "`/admin runners` — fleet + Online/Drain\n"
-                  "`/user name` — one account card\n"
-                  "`/queen id` — unlimited memory\n"
-                  "`/admin limit id 10` — job cap\n\n"
-                  "Runner *Online* = taking new jobs. *Drain* = keep existing, "
-                  "stop new placements.",
-                  reply_markup=_help_guide_kb())
+            u = user or telegram_link.user_for_chat(chat_id)
+            if not _is_admin(u, chat_id):
+                # Silent for non-admins — do not advertise the admin surface.
+                _send(chat_id, "Unknown guide — try /help.",
+                      reply_markup=_help_guide_kb(u))
+            else:
+                _send_guide(chat_id, "guide_admin", "Admin — command + button")
+                _send(chat_id,
+                      "🛠 *Admin how-to*\n\n"
+                      "Every admin action has *both* a button under `/admin` "
+                      "and a matching typed command.\n\n"
+                      "`/admin` · `/runners` · `/recover` · `/user name`\n"
+                      "`/queen id` · `/admin limit id 10` · `/see id`",
+                      reply_markup=_help_guide_kb(u))
         else:
             _send(chat_id, "Unknown guide — try /help.", reply_markup=_help_guide_kb())
     elif action == "apps" and ref == "list":
@@ -4638,7 +4819,7 @@ def handle_callback(chat_id, data, message_id=None):
         # The 👑 panel: a queen's own limits and the buttons that use them.
         if not user or not _user_is_queen(user):
             _send(chat_id, "👑 That panel is part of queen access — an admin "
-                           "grants it with `/queen yourusername`. "
+                           "can turn it on for you. "
                            "`/limits` shows what your account can do now.")
         elif ref == "apps":
             cmd_apps(chat_id, user)
@@ -4671,9 +4852,8 @@ def handle_callback(chat_id, data, message_id=None):
         if not row:
             _send(chat_id, "❌ That app is not yours or no longer exists.")
         elif not _user_is_queen(user):
-            _send(chat_id, "👑 Auto-deploy is queen access — an admin grants it with "
-                           "`/queen yourusername`. `/latest name` updates any "
-                           "repo app by hand.")
+            _send(chat_id, "👑 Auto-deploy is queen access — ask the bot owner if you need it. "
+                           "`/latest name` updates any repo app by hand.")
         elif not (row.get("repo_url") or "").strip():
             _send(chat_id, f"❌ *{row['name']}* wasn't deployed from a repo, so there "
                            f"is no branch for it to follow.")
@@ -5005,12 +5185,24 @@ def handle_update(upd):
             except Exception as cb_exc:
                 event["outcome"] = "error"
                 event["error"] = f"{type(cb_exc).__name__}: {cb_exc}"
+                logger.exception("callback %s failed", data)
+                # answer quietly (no full-screen alert). A show_alert popup that
+                # says "Something went wrong" made every admin button look dead
+                # even when the real work partly succeeded or was a one-off blip.
                 try:
                     _tg("answerCallbackQuery", callback_query_id=cb["id"],
-                        text="Something went wrong — try again.", show_alert=True)
+                        text="Couldn't finish — try again.", show_alert=False)
                 except Exception:
                     logger.exception("Could not even answer the callback query")
-                raise
+                try:
+                    if chat_id is not None:
+                        _send(chat_id,
+                              "⚠️ That button didn't finish. "
+                              "Send the command again, or `/admin` if you were in the panel.")
+                except Exception:
+                    pass
+                # Do NOT re-raise: webhook must return 200 so Telegram stops retrying
+                # the same broken update in a loop.
     except Exception as exc:
         event["outcome"] = "error"
         event["error"] = f"{type(exc).__name__}: {exc}"

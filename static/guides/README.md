@@ -1,9 +1,13 @@
 # How-to guide cartoons
 
-PNGs shown by the Telegram bot (`/guide`, help buttons) and the public `/guides` page. Generated as simple step cards — keep filenames stable:
+PNGs shown by the Telegram bot (`/guide …`, and once on first use of each
+command) and the public `/guides` page.
 
-- guide_start.png
-- guide_import.png
-- guide_id.png
-- guide_token.png
-- guide_admin.png
+Public (everyone):
+guide_start, guide_code, guide_update, guide_import, guide_apps, guide_logs,
+guide_restart, guide_stop, guide_status, guide_source, guide_delete,
+guide_rename, guide_latest, guide_env, guide_backup, guide_history,
+guide_id, guide_token, guide_link, guide_projects
+
+Admin-only (never linked from public /help or /guides):
+guide_admin

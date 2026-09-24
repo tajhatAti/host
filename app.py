@@ -210,10 +210,25 @@ def guides_page():
     cards = []
     catalog = [
         ("guide_start.png", "Start here", "Three taps from zero to a running bot", "/guide start"),
-        ("guide_import.png", "Import a repo", "Public GitHub → live app", "/guide import"),
-        ("guide_id.png", "Your ids", "Copy-friendly numbers for admins", "/id"),
-        ("guide_token.png", "BOT_TOKEN tips", "Env tab or inside the code — both work", "/guide token"),
-        ("guide_admin.png", "Admin panel", "Every action = command + button", "/admin"),
+        ("guide_code.png", "/code", "Create an app from chat", "/guide code"),
+        ("guide_update.png", "/update", "Replace code, keep the name", "/guide update"),
+        ("guide_import.png", "/import", "Public GitHub → live app", "/guide import"),
+        ("guide_apps.png", "/apps", "Your deployed apps", "/guide apps"),
+        ("guide_logs.png", "/logs", "See what the app printed", "/guide logs"),
+        ("guide_restart.png", "/restart", "Wake a stopped app", "/guide restart"),
+        ("guide_stop.png", "/stop", "Pause and free a slot", "/guide stop"),
+        ("guide_status.png", "/status", "Health of one app or all", "/guide status"),
+        ("guide_env.png", "/env", "Variables like BOT_TOKEN", "/guide env"),
+        ("guide_token.png", "BOT_TOKEN tips", "Env tab or inside the code", "/guide token"),
+        ("guide_id.png", "/id", "Copy-friendly numbers", "/id"),
+        ("guide_backup.png", "/backup", "Snapshot data files", "/guide backup"),
+        ("guide_history.png", "/history", "Past deploys", "/guide history"),
+        ("guide_projects.png", "/projects", "Repo apps in one place", "/guide projects"),
+        ("guide_link.png", "/link", "Connect this chat", "/guide link"),
+        ("guide_source.png", "/source", "Download current code", "/guide source"),
+        ("guide_delete.png", "/delete", "Remove an app", "/guide delete"),
+        ("guide_rename.png", "/rename", "Change the label", "/guide rename"),
+        ("guide_latest.png", "/latest", "Pull newest commit", "/guide latest"),
     ]
     for fn, title, sub, cmd in catalog:
         if (gdir / fn).is_file():
@@ -244,7 +259,7 @@ a.home{{color:#a5b4fc;text-decoration:none;font-size:.9rem}}
 </style></head><body>
 <header><a class="home" href="/">← CodeNest</a>
 <h1>How-to guides</h1>
-<p>Same cartoons the Telegram bot sends for <code>/guide</code>. Long-press ids, import repos, keep tokens working after restart.</p>
+<p>Same cartoons the Telegram bot sends for <code>/guide</code>. Picture first, then the command.</p>
 </header><main>{body}</main></body></html>"""
     return HTMLResponse(html)
 

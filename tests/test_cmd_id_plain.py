@@ -18,8 +18,9 @@ def test_cmd_id_sends_plain_copyable_ids(monkeypatch):
     plain = "\n".join(t for k, t in sent if k == "plain")
     assert "42" in plain
     assert "<id>" not in plain and "&lt;" not in plain
-    assert "/queen 42" in plain or "/queen" in plain
-    assert "/admin limit 42" in plain
+    assert "/queen" not in plain
+    assert "/admin" not in plain
+    assert "Admin" not in plain
 
 
 def test_guide_pngs_exist():
