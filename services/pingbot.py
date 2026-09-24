@@ -2661,6 +2661,156 @@ def _help_text(user):
     return _plain_help_text(user)
 
 
+def cmd_commands(chat_id, user=None, telegram_user_id=None):
+    """`/commands` — every command this chat can use right now."""
+    user = user or telegram_link.user_for_chat(chat_id)
+    lines = [
+        "*Commands*",
+        "",
+        "Everyone:",
+        "`/start` `/help` `/guide` `/id` `/ping` `/token`",
+        "",
+    ]
+    if user:
+        lines += [
+            "Your apps:",
+            "`/apps` `/status` `/logs name` `/restart name` `/stop name`",
+            "`/code myapp` `/update myapp` `/import owner/repo`",
+            "`/source name` `/rename old new` `/delete name` `/latest name`",
+            "`/env name` `/backup name` `/history name`",
+            "",
+        ]
+        if _user_is_queen(user):
+            lines += [
+                "👑 Queen:",
+                "`/projects` `/autodeploy name on` · zip after `/code`",
+                "",
+            ]
+        if _is_admin(user, telegram_user_id or (user or {}).get("telegram_id")):
+            lines += [
+                "🛠 Admin (also buttons under `/admin`):",
+                "`/admin` `/runners` `/recover` `/health` `/user name`",
+                "`/queen id` `/admin limit id 10` `/see id`",
+                "",
+            ]
+    else:
+        lines += ["Link first: `/link` or tap Open CodeNest.", ""]
+    lines.append("Cartoon how-tos: `/guide start|import|id|token|admin`")
+    _send(chat_id, "\n".join(lines), reply_markup=_main_kb(user))
+
+
+def cmd_env(chat_id, user, arg=""):
+    """`/env name` list keys · `/env name KEY=value` set · `/env name del KEY`."""
+    parts = (arg or "").split(None, 1)
+    if not parts:
+        _send(chat_id, "Usage:\n`/env myapp` — list key names\n"
+                       "`/env myapp BOT_TOKEN=123:AA…` — set\n"
+                       "`/env myapp del BOT_TOKEN` — remove\n"
+                       "Token may also live in the code (`/guide token`).")
+        return
+    name = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”. `/apps` lists yours.")
+        return
+    if not rest:
+        env = bot_ops._row_env(row)
+        keys = sorted(env.keys())
+        tip = ""
+        if row.get("telegram_bot_detected") and "BOT_TOKEN" not in env:
+            tip = "\n\nNo BOT_TOKEN in Env — if it's in the source file, that's enough."
+        _send(chat_id,
+              f"🔑 *{row['name']}* env keys ({len(keys)}):\n"
+              + ("`" + "`, `".join(keys) + "`" if keys else "_(none)_")
+              + tip)
+        return
+    if rest.lower().startswith("del ") or rest.lower().startswith("delete "):
+        key = rest.split(None, 1)[1].strip()
+        res = bot_ops.set_env(user["id"], name, key, None)
+    elif "=" in rest:
+        key, _, val = rest.partition("=")
+        res = bot_ops.set_env(user["id"], name, key.strip(), val)
+    else:
+        _send(chat_id, "Send `KEY=value` or `del KEY`.")
+        return
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    act = "removed" if res.get("deleted") else "set"
+    extra = " · restarted" if res.get("restarted") else " · applies on next start"
+    _send(chat_id, f"✅ `{res['key']}` {act} on *{row['name']}*{extra}.")
+
+
+def cmd_backup(chat_id, user, arg=""):
+    """`/backup name` — snapshot workspace data into durable storage now."""
+    name = (arg or "").strip()
+    if not name:
+        _send(chat_id, "Which app? `/backup myapp` — saves its data files "
+                       "(database.db, sessions, …) so a runner rebuild can't wipe them.")
+        return
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”. `/apps` lists yours.")
+        return
+    rid = row.get("runner_job_id")
+    if not rid:
+        _send(chat_id, f"*{row['name']}* isn't on a runner right now. "
+                       f"`/restart {row['name']}` first, then `/backup` again.")
+        return
+    try:
+        from services import snapshots
+        from services import bot_ops as bo
+        out = snapshots.save_snapshot(row["id"], rid, worker=bo._worker_of(row))
+    except Exception as exc:  # noqa: BLE001
+        _send(chat_id, f"❌ Backup failed: {type(exc).__name__}: {exc}")
+        return
+    if out.get("saved"):
+        _send(chat_id, f"💾 Snapshot saved for *{row['name']}*. "
+                       "After a runner rebuild it will be restored automatically.")
+    else:
+        _send(chat_id, f"⚠️ Could not snapshot *{row['name']}*: "
+                       f"{out.get('reason') or 'unknown'}. Try again when the runner is awake.")
+
+
+def cmd_history(chat_id, user, arg=""):
+    """`/history name` — recent code revisions (website deploys)."""
+    name = (arg or "").strip()
+    if not name:
+        _send(chat_id, "Which app? `/history myapp`")
+        return
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”.")
+        return
+    from database import get_db_connection
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, version, action, status, created_at FROM bot_revisions "
+            "WHERE job_id=? AND user_id=? ORDER BY version DESC LIMIT 12",
+            (row["id"], user["id"]),
+        ).fetchall()
+        rows = [dict(r) for r in rows]
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    if not rows:
+        _send(chat_id, f"*{row['name']}* has no saved revisions yet. "
+                       "Website Save & Run creates them; chat `/update` does too.")
+        return
+    lines = [f"📜 *{row['name']}* revisions (newest first):"]
+    for r in rows:
+        lines.append(
+            f"v{r.get('version')} · {r.get('action') or '—'} · "
+            f"{r.get('status') or '—'} · {(r.get('created_at') or '')[:16]}"
+        )
+    lines.append("\nWebsite → bot details → Versions to roll back. "
+                 "Admins: `/user` → job → Revisions.")
+    _send(chat_id, "\n".join(lines))
+
+
 def cmd_token_tips(chat_id):
     """`/token` — where BOT_TOKEN can live (Env or source)."""
     handle_callback(chat_id, "help:token", None)
@@ -4462,6 +4612,8 @@ def handle_callback(chat_id, data, message_id=None):
                   "After a runner restart your bot comes back if the token is "
                   "in either place. You do *not* have to set it only in Env.",
                   reply_markup=_help_guide_kb())
+        elif ref == "commands":
+            cmd_commands(chat_id, user)
         elif ref == "admin":
             _send_guide(chat_id, "guide_admin", "Admin — command + button")
             _send(chat_id,
@@ -4722,6 +4874,9 @@ def handle_update(upd):
                 "/uptime": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
                 "/info": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
                 "/logs": lambda: gated(lambda u: cmd_logs(chat_id, u, arg)),
+                "/env": lambda: gated(lambda u: cmd_env(chat_id, u, arg)),
+                "/backup": lambda: gated(lambda u: cmd_backup(chat_id, u, arg)),
+                "/history": lambda: gated(lambda u: cmd_history(chat_id, u, arg)),
                 "/restart": lambda: gated(lambda u: cmd_restart(chat_id, u, arg)),
                 "/stop": lambda: gated(lambda u: cmd_stop(chat_id, u, arg)),
                 "/delete": lambda: gated(lambda u: cmd_delete(chat_id, u, arg)),
@@ -4768,6 +4923,10 @@ def handle_update(upd):
                                                 msg.get("from", {}).get("first_name", "user")),
                 "/guide": lambda: _cmd_guide(chat_id, arg),
                 "/token": lambda: cmd_token_tips(chat_id),
+                "/commands": lambda: cmd_commands(chat_id, telegram_link.user_for_chat(chat_id),
+                                                  msg.get("from", {}).get("id")),
+                "/cmds": lambda: cmd_commands(chat_id, telegram_link.user_for_chat(chat_id),
+                                              msg.get("from", {}).get("id")),
                 "/guides": lambda: _cmd_guide(chat_id, arg),
                 "/howto": lambda: _cmd_guide(chat_id, arg),
             }
