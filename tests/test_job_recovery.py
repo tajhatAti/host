@@ -19,11 +19,13 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DB_PATH", os.path.join(tempfile.mkdtemp(), "recovery.db"))
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
 
-from services import job_recovery, runner_client, secrets_store, snapshots  # noqa: E402
+from services import github_repo, job_recovery, runner_client, secrets_store, snapshots  # noqa: E402
 
 
 class Response:
@@ -159,3 +161,106 @@ def test_reconciler_is_started_once_and_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(job_recovery, "RECOVERY_INTERVAL_S", 0)
     job_recovery.start_reconciler()
     assert len(started) == 1                      # JOB_RECOVERY_INTERVAL_S=0 means off
+
+
+# --------------------------------------------------------------------------
+# auto-deploy: follow the branch, the way a platform does
+# --------------------------------------------------------------------------
+def _repo_row(**over):
+    row = {"id": 21, "user_id": 4, "name": "haven",
+           "repo_url": "https://github.com/tajhatAti/b",
+           "repo_entry": "bot.py", "repo_commit": "aaaaaaa1111",
+           "worker_url": "embedded", "runner_job_id": "rid-1"}
+    row.update(over)
+    return row
+
+
+def test_auto_deploy_sweep_redeploys_only_the_app_whose_commit_moved(monkeypatch):
+    """Two apps follow the same branch; only the one that is BEHIND is touched.
+
+    Redeploying both would restart a healthy bot for nothing — and restarting a
+    Telegram bot means a gap in service, so "did the commit change?" has to be
+    the only trigger.
+    """
+    from services import bot_ops
+    monkeypatch.setattr(job_recovery, "AUTO_DEPLOY_INTERVAL_S", 600)
+    monkeypatch.setattr(bot_ops, "auto_deploy_jobs",
+                        lambda: [_repo_row(), _repo_row(id=22, name="web", repo_commit="3272e0c88fb1")])
+    monkeypatch.setattr(job_recovery, "_auto_deploy_last", 0.0)
+    calls = []
+    monkeypatch.setattr(bot_ops, "update_from_repo",
+                        lambda uid, name, url: calls.append((uid, name, url)) or {"ok": True})
+    # one cached lookup per distinct repo, shared by both apps
+    monkeypatch.setattr(github_repo, "head_commit",
+                        lambda owner, repo, branch="": "3272e0c88fb1")
+
+    out = job_recovery.auto_deploy_sweep(force=True)
+    assert out["checked"] == 2 and out["updated"] == 1 and out["unchanged"] == 1, out
+    assert calls == [(4, "haven", "https://github.com/tajhatAti/b")], calls
+
+
+def test_auto_deploy_sweep_treats_a_silent_github_as_no_change(monkeypatch):
+    """A rate limit must never look like a new commit.
+
+    Guessing here would redeploy — and therefore restart — every following app
+    whenever GitHub stopped answering, which on a shared exit IP is often.
+    """
+    from services import bot_ops
+    monkeypatch.setattr(job_recovery, "AUTO_DEPLOY_INTERVAL_S", 600)
+    monkeypatch.setattr(bot_ops, "auto_deploy_jobs", lambda: [_repo_row()])
+    monkeypatch.setattr(job_recovery, "_auto_deploy_last", 0.0)
+    monkeypatch.setattr(bot_ops, "update_from_repo",
+                        lambda *a, **k: pytest.fail("must not redeploy without a commit"))
+    monkeypatch.setattr(github_repo, "head_commit", lambda *a, **k: "")
+
+    out = job_recovery.auto_deploy_sweep(force=True)
+    assert out["updated"] == 0 and out["unchanged"] == 1, out
+
+
+def test_auto_deploy_sweep_keeps_going_after_one_app_fails(monkeypatch):
+    """One unreachable runner must not stop the rest of the fleet updating."""
+    from services import bot_ops
+    monkeypatch.setattr(job_recovery, "AUTO_DEPLOY_INTERVAL_S", 600)
+    monkeypatch.setattr(bot_ops, "auto_deploy_jobs",
+                        lambda: [_repo_row(), _repo_row(id=22, name="web", repo_commit="old")])
+    monkeypatch.setattr(job_recovery, "_auto_deploy_last", 0.0)
+    done = []
+
+    def update(uid, name, url):
+        if name == "haven":
+            return {"ok": False, "error": "Runner rejected the update."}
+        done.append(name)
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_ops, "update_from_repo", update)
+    monkeypatch.setattr(github_repo, "head_commit", lambda *a, **k: "3272e0c88fb1")
+
+    out = job_recovery.auto_deploy_sweep(force=True)
+    assert out["failed"] == 1 and out["updated"] == 1, out
+    assert done == ["web"]
+    assert any("haven" in e for e in out["errors"]), out["errors"]
+
+
+def test_auto_deploy_sweep_can_be_switched_off_and_waits_between_runs(monkeypatch):
+    from services import bot_ops
+    monkeypatch.setattr(bot_ops, "auto_deploy_jobs",
+                        lambda: pytest.fail("must not read jobs when disabled"))
+    monkeypatch.setattr(job_recovery, "AUTO_DEPLOY_INTERVAL_S", 0)
+    assert job_recovery.auto_deploy_sweep(force=True) == {"disabled": True}
+
+    monkeypatch.setattr(job_recovery, "AUTO_DEPLOY_INTERVAL_S", 600)
+    monkeypatch.setattr(job_recovery, "_auto_deploy_last", job_recovery.time.time())
+    assert job_recovery.auto_deploy_sweep() == {"waiting": True}
+
+
+def test_the_reconciler_runs_the_sweep_after_recovery(monkeypatch):
+    """Order matters: a runner that just restarted has to get its jobs back
+    BEFORE any of them is redeployed, and the sweep keeps its own longer clock
+    so it does not run on every pass of the recovery loop."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "services", "job_recovery.py")).read()
+    loop = src[src.index("def _reconcile_loop():"):src.index("def start_reconciler():")]
+    assert "recover_once()" in loop and "auto_deploy_sweep()" in loop
+    assert loop.index("recover_once()") < loop.index("auto_deploy_sweep()")
+    st = job_recovery.auto_deploy_status()
+    assert set(st) >= {"enabled", "interval_s", "last"}

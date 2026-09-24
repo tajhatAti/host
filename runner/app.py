@@ -761,6 +761,12 @@ class JobStartRequest(BaseModel):
     # = the runner default; never honoured above ZIP_BUNDLE_CEILING_*.
     zip_max_mb: Optional[int] = 0
     zip_max_files: Optional[int] = 0
+    # Dependency manifests to install, as repo-relative paths
+    # ("requirements.txt", "requirements-web.txt"). The site scans the repo
+    # before deploying and knows which half of it is being run; naming them is
+    # more accurate than guessing from whatever sits at the root, and a repo
+    # with two runnable things (bot.py, web/dashboard.py) usually declares two.
+    deps: Optional[list] = None
 
 
 class JobAccessRequest(BaseModel):
@@ -1109,12 +1115,34 @@ def _clone_repo(repo_url: str, target_dir: str, log: deque) -> bool:
                 pass
         if restored:
             log.append(f"[system] ✓ kept {restored} existing data file(s)")
+        sha = _repo_head(target_dir)
         log.append("[system] ✓ repo cloned"
-                   + (f" (branch {used_ref})" if used_ref else ""))
+                   + (f" (branch {used_ref})" if used_ref else "")
+                   + (f" @ {sha[:7]}" if sha else ""))
         return True
     except Exception as e:
         log.append(f"[system] ✗ git clone error: {str(e)[:200]}")
         return False
+
+
+def _repo_head(target_dir: str) -> str:
+    """The commit SHA of a checkout, or "" when it cannot be read.
+
+    Recording what was actually built is what makes "is there a newer version?"
+    a comparison instead of a guess: the site stores this beside the job and
+    checks it against the branch's HEAD before offering an update. A shallow
+    clone still has a HEAD, so --depth 1 does not cost us this.
+    """
+    try:
+        out, _err, rc, _t = _run_subprocess(
+            ["git", "rev-parse", "HEAD"], target_dir, None, 15)
+        if rc == 0:
+            lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+            if lines:
+                return lines[-1][:40]
+    except Exception:                                              # noqa: BLE001
+        pass
+    return ""
 
 
 _ENTRY_CANDIDATES = [
@@ -1352,6 +1380,104 @@ def _resolve_entry_now(j: dict) -> Optional[str]:
     return None
 
 
+def _install_named_deps(jdir: str, deps: list, pylibs: Optional[str], log: deque) -> bool:
+    """Install dependency files BY PATH, with the tool each filename implies.
+
+    A repo with two runnable halves (`bot.py` at the root and
+    `web/dashboard.py` in a folder) usually declares two sets of requirements,
+    and installing only the root one leaves the half actually being run without
+    its imports — the deploy succeeds and the app dies on line one.
+    """
+    deadline = time.monotonic() + JOB_PIP_TIMEOUT_S
+
+    def _run(cmd, cwd):
+        remain = int(deadline - time.monotonic())
+        if remain <= 0:
+            log.append("[system] ✗ install budget exhausted")
+            return False
+        env = None
+        if pylibs:
+            env = dict(os.environ)
+            env["PYTHONPATH"] = pylibs + os.pathsep + env.get("PYTHONPATH", "")
+        o, e, rc, _ = _run_subprocess(cmd, cwd, None, remain, env=env)
+        if rc != 0:
+            lines = [ln for ln in ((e or "") + "\n" + (o or "")).splitlines() if ln.strip()]
+            log.append(f"[system] ✗ {' '.join(cmd[:3])}… failed: "
+                       f"{(lines[-1] if lines else 'unknown')[:200]}")
+            return False
+        return True
+
+    ok = True
+    for rel in deps or []:
+        path = os.path.join(jdir, rel)
+        if not os.path.isfile(path):
+            log.append(f"[system] ! {rel} is not in the checkout — skipped")
+            continue
+        base = os.path.basename(rel).lower()
+        here = os.path.dirname(path) or jdir
+        log.append(f"[system] installing {rel} …")
+        pip_cmd = ["python3", "-m", "pip", "install", "--quiet"]
+        if pylibs:
+            pip_cmd += ["--target", pylibs]
+        if base.endswith(".txt"):                      # requirements*.txt
+            done = _run(pip_cmd + ["-r", path], jdir)
+        elif base == "pyproject.toml":
+            done = _run(pip_cmd + [here], here)
+        elif base == "package.json":
+            done = _run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund",
+                         "--loglevel=error"], here)
+        elif base == "gemfile":
+            done = _run(["bundle", "install"], here)
+        elif base == "composer.json":
+            done = _run(["composer", "install", "--no-interaction"], here)
+        else:
+            log.append(f"[system] ! don't know how to install {rel} — skipped")
+            continue
+        ok = done and ok
+        if done:
+            log.append(f"[system] ✓ {rel} installed")
+    return ok
+
+
+# The manifests _install_repo_deps already handles by language. Anything else a
+# caller names (requirements-web.txt, requirements/bot.txt) goes through the
+# by-path installer instead, so no file is installed twice and none is skipped.
+# A tuple, not a set: the order decides which manifests survive the `deps[:4]`
+# cap and the order they appear in the log, and an arbitrary hash order would
+# make both vary between runs for no reason.
+_DEFAULT_MANIFESTS = ("requirements.txt", "pyproject.toml",
+                      "package.json", "Gemfile", "composer.json")
+
+
+def _named_deps(j: dict) -> list:
+    return [d for d in (j.get("deps") or []) if d not in _DEFAULT_MANIFESTS]
+
+
+def _install_and_spawn(j: dict) -> None:
+    """Install this job's dependency manifests, then start it.
+
+    The redeploy path (PATCH with a repo or a zip) used to spawn immediately, so
+    an update to a repo that had just added a library came back as an
+    ImportError: the new code was there and its dependencies were not. This is
+    the same install step a create runs, off the request thread because pip can
+    take minutes and an HTTP request should not.
+    """
+    log = j["log"]
+    ok = True
+    named = _named_deps(j)
+    if named:
+        ok = _install_named_deps(j["dir"], named, j.get("pylibs"), log)
+    if ok:
+        ok = _install_repo_deps(j["dir"], j.get("pylibs"), j["lang"], log)
+    if not ok:
+        j["status"] = "install_failed"
+        log.append("[system] Repo install failed — check logs and press Restart.")
+        _save_manifest(j)
+        return
+    j["status"] = "starting"
+    _spawn(j)
+
+
 def _prepare_and_run(j: dict, reqs: list, is_repo: bool = False) -> None:
     """Background worker: install deps (repo manifests first, then inline imports),
     then start the job."""
@@ -1365,7 +1491,15 @@ def _prepare_and_run(j: dict, reqs: list, is_repo: bool = False) -> None:
         pass
     # Repo-mode: install requirements.txt / package.json / Gemfile first
     if is_repo:
-        ok = _install_repo_deps(j["dir"], j.get("pylibs"), j["lang"], j["log"])
+        ok = True
+        # Sub-folder / non-default manifests the site named, before the root
+        # ones. The standard filenames are deliberately left to
+        # _install_repo_deps so nothing is installed twice.
+        named = _named_deps(j)
+        if named:
+            ok = _install_named_deps(j["dir"], named, j.get("pylibs"), j["log"])
+        if ok:
+            ok = _install_repo_deps(j["dir"], j.get("pylibs"), j["lang"], j["log"])
         if not ok:
             j["status"] = "install_failed"
             j["log"].append("[system] Repo install failed — check logs and press Restart.")
@@ -1502,6 +1636,12 @@ def _save_manifest(j: dict) -> None:
             # record, and its first crash-restart silently applied the
             # default cap again.
             "mem_limit_mb": j.get("mem_limit_mb"),
+            # Which revision this is, and which file inside it runs: a boot
+            # restart has to come back as the SAME app, and the site has to be
+            # able to tell whether the branch has moved on since.
+            "repo_entry": j.get("repo_entry"),
+            "repo_commit": j.get("repo_commit"),
+            "deps": list(j.get("deps") or []),
         }
         with open(_manifest_path(j["id"]), "w") as fh:
             json.dump(data, fh)
@@ -1721,12 +1861,27 @@ class _AdoptedProc:
 
 
 def _recover_jobs() -> None:
-    """On boot, re-adopt jobs whose processes outlived the previous runner."""
+    """On boot: re-adopt the jobs whose processes outlived the last runner, and
+    RESTART the ones that did not.
+
+    A redeploy or a container restart kills every child process, so "the pid is
+    dead" is the NORMAL case after a restart, not an odd one. Skipping those
+    jobs — which is what this used to do — brought the runner back with an empty
+    fleet, and every bot stayed down until the site noticed and re-created it
+    under a NEW id, which orphaned the old workspace: its database.db, its
+    sessions, everything it had ever written. Re-spawning from the manifest
+    keeps the id, the directory, the port, the slug and the env, so the bot
+    simply comes back where it left off.
+
+    The one thing that must NOT come back is a job its owner stopped, and that
+    case is already distinguishable: an intentional stop writes pid=None
+    (_clear_manifest_pid) precisely so boot recovery skips it.
+    """
     try:
         if not os.path.isdir(JOBS_DATA_DIR):
             return
-        adopted = 0
-        for job_id in os.listdir(JOBS_DATA_DIR):
+        adopted = respawned = 0
+        for job_id in sorted(os.listdir(JOBS_DATA_DIR)):
             mp = os.path.join(JOBS_DATA_DIR, job_id, _MANIFEST)
             if not os.path.isfile(mp):
                 continue
@@ -1736,41 +1891,81 @@ def _recover_jobs() -> None:
             except Exception:
                 continue
             pid = m.get("pid")
-            if not _pid_alive(pid, m.get("started_at") or 0):
-                continue
+            jdir = os.path.join(JOBS_DATA_DIR, job_id)
             j = {
                 "id": m["id"], "name": m.get("name") or "job",
                 "lang": m.get("lang") or "python",
-                "dir": os.path.join(JOBS_DATA_DIR, job_id),
-                "file": m.get("file"), "bin": m.get("bin"),
+                "dir": jdir,
+                "file": m.get("file"),
+                "bin": m.get("bin") or os.path.join(jdir, "main.bin"),
                 "pylibs": m.get("pylibs"),
-                "proc": _AdoptedProc(pid),
-                "status": "running",
+                "proc": None,
+                "status": "starting",
                 "log": deque(maxlen=JOB_LOG_LINES),
                 "restarts": 0,
                 "restart_enabled": bool(m.get("restart_enabled", True)),
                 "stop_requested": False,
                 "started_at": m.get("started_at") or time.time(),
                 "last_proxy_time": time.time(),
-                "port": m.get("port"),
+                # The port is part of the job's public address; losing it would
+                # hand the same bot a different /live/<slug>/ URL after a restart.
+                "port": m.get("port") or _alloc_port(),
                 "web": False,
                 "web_slug": m.get("web_slug") or _slugify(m.get("name") or job_id),
                 "web_public": bool(m.get("web_public", True)),
                 "access_key": m.get("access_key") or secrets.token_urlsafe(12),
                 "repo_url": m.get("repo_url"),
+                "repo_entry": m.get("repo_entry"),
+                "repo_commit": m.get("repo_commit"),
+                "deps": list(m.get("deps") or []),
                 "env": m.get("env") or {},
                 "mem_limit_mb": m.get("mem_limit_mb"),
-                "adopted": True,
             }
-            j["log"].append("[system] re-adopted after a runner restart (process still alive)")
+
+            if _pid_alive(pid, m.get("started_at") or 0):
+                j["proc"] = _AdoptedProc(pid)
+                j["status"] = "running"
+                j["adopted"] = True
+                j["log"].append("[system] re-adopted after a runner restart "
+                                "(process still alive)")
+                with _jobs_lock:
+                    _jobs[m["id"]] = j
+                if j.get("port"):
+                    threading.Thread(target=_web_watch, args=(j, j["proc"], j["port"]),
+                                     daemon=True).start()
+                adopted += 1
+                continue
+
+            if not pid:
+                continue          # stopped on purpose — leave it stopped
+            if j["lang"] not in LANGS or not j.get("file") or not os.path.isfile(j["file"]):
+                # No entry file means the workspace itself is gone (a container
+                # rebuild with no persistent disk). There is nothing to restart
+                # from; the site re-creates the job from its own copy of the
+                # code, which is exactly what job_recovery does.
+                logger.warning("Job %s not restarted at boot: entry %s is missing",
+                               m["id"], j.get("file"))
+                continue
+            if not _admission()["admit"]:
+                # Coming back with twenty bots at once must not OOM the box on
+                # the first second. Whatever does not fit stays recorded as
+                # stopped here, and the site's recovery loop re-creates it.
+                logger.warning("Job %s left stopped at boot: the runner is full", m["id"])
+                continue
             with _jobs_lock:
                 _jobs[m["id"]] = j
-            if j.get("port"):
-                threading.Thread(target=_web_watch, args=(j, j["proc"], j["port"]),
-                                 daemon=True).start()
-            adopted += 1
-        if adopted:
-            logger.info("Recovered %d still-running job(s) after restart", adopted)
+            try:
+                _spawn(j)
+                j["log"].append("[system] restarted after a runner restart — same id, "
+                                "same folder, same data, same address")
+                respawned += 1
+            except Exception as exc:                               # noqa: BLE001
+                j["status"] = "crashed"
+                j["log"].append(f"[system] ✗ could not restart at boot: {str(exc)[:200]}")
+                logger.warning("Job %s failed to respawn at boot: %s", m["id"], exc)
+        if adopted or respawned:
+            logger.info("Boot recovery: %d job(s) still running, %d restarted",
+                        adopted, respawned)
     except Exception as exc:  # noqa: BLE001
         logger.warning("job recovery failed: %s", exc)
 
@@ -1821,6 +2016,12 @@ def _job_public(j: dict) -> dict:
         # what turns "did /queen actually take effect?" from a guess into a
         # glance — the flag lives in the site's DB, the RLIMIT lives here.
         "mem_limit_mb": j.get("mem_limit_mb"),
+        # What this job was built from. The site stores the SHA beside its own
+        # row and compares it with the branch's HEAD to offer "deploy latest".
+        "repo_url": j.get("repo_url"),
+        "repo_entry": j.get("repo_entry"),
+        "repo_commit": j.get("repo_commit"),
+        "deps": list(j.get("deps") or []),
         "last_exit_reason": j.get("last_exit_reason"),
         "web_slug": j.get("web_slug"),
         "web_public": bool(j.get("web_public", True)),
@@ -1902,6 +2103,20 @@ def _kill_job_tree(j: dict) -> None:
 
 def _spawn(j: dict) -> None:
     """(Re)start the job process + reader thread + supervisor thread."""
+    if not os.path.isdir(j.get("dir") or "") or not os.path.isfile(j.get("file") or ""):
+        # The workspace is gone: the job was deleted, or the container was
+        # rebuilt without a persistent disk. Popen would raise FileNotFoundError
+        # from its cwd inside a daemon thread — a traceback nobody reads,
+        # repeated on every restart attempt, and the job silently stuck in
+        # "starting". Say it once, in the log the owner actually reads, and stop.
+        j["status"] = "crashed"
+        j["last_exit_reason"] = "workspace missing"
+        j.setdefault("log", deque(maxlen=JOB_LOG_LINES)).append(
+            "[system] not restarted: its workspace is gone (deleted, or the disk "
+            "was not persistent). Redeploy it to bring it back.")
+        logger.warning("Job %s not respawned: workspace %s is missing",
+                       j.get("id"), j.get("dir"))
+        return
     cfg = LANGS[j["lang"]]
     cmd = [c.replace("{file}", j["file"]).replace("{bin}", j["bin"]).replace("{dir}", j["dir"]) for c in cfg["run"]]
     # pip-installed packages (from the "# requirements:" header) live in the
@@ -2148,10 +2363,32 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
     # declares dependencies.
     reqs = []
     pylibs = None
-    repo_has_manifest = bool(repo_url) and any(
-        os.path.isfile(os.path.join(jdir, m)) for m in
-        ("requirements.txt", "pyproject.toml", "package.json", "Gemfile", "composer.json")
-    )
+    manifest_names = _DEFAULT_MANIFESTS
+    root_manifest = any(os.path.isfile(os.path.join(jdir, m)) for m in manifest_names)
+    # Extra manifests, as repo-relative paths: the ones the site named after
+    # scanning the repo (it knows which half of it is being run), plus anything
+    # sitting beside a sub-folder entry. Root-level files are NOT listed here —
+    # those are what _install_repo_deps has always handled.
+    extra_deps = []
+    for raw in list(req.deps or []):
+        rel = str(raw or "").strip().replace("\\", "/").lstrip("/")
+        if not rel or ".." in rel.split("/"):
+            continue                     # never install from outside the checkout
+        if os.path.isfile(os.path.join(jdir, rel)) and rel not in extra_deps:
+            extra_deps.append(rel)
+    entry_rel = os.path.relpath(src, jdir).replace("\\", "/") if detected_src else ""
+    if "/" in entry_rel:
+        folder = entry_rel.rsplit("/", 1)[0]
+        for m in manifest_names:
+            rel = f"{folder}/{m}"
+            if os.path.isfile(os.path.join(jdir, rel)) and rel not in extra_deps:
+                extra_deps.append(rel)
+    extra_deps = extra_deps[:4]
+
+    # A zip bundle is a project exactly like a clone is and can carry its own
+    # requirements.txt. Only repo_url used to count, so a 👑 account's 60MB zip
+    # installed nothing at all and the app died on its first import.
+    repo_has_manifest = bool(repo_url or zip_b64) and (root_manifest or bool(extra_deps))
     if repo_has_manifest:
         # Install from repo manifests first (requirements.txt / package.json / Gemfile)
         pylibs = os.path.join(jdir, "pylibs")
@@ -2184,6 +2421,11 @@ def job_start(req: JobStartRequest, authorization: Optional[str] = Header(None))
         "web_public": True,
         "access_key": secrets.token_urlsafe(12),
         "repo_url": repo_url or None,
+        # What was built, so the site can answer "is there a newer version?"
+        # with a comparison instead of a guess.
+        "repo_entry": entry_rel or None,
+        "repo_commit": _repo_head(jdir) if repo_url else None,
+        "deps": extra_deps,
         "env": _clean_env(req.env),
         "mem_limit_mb": req.mem_limit_mb,
     }
@@ -2430,6 +2672,8 @@ class JobUpdateRequest(BaseModel):
     # Same meaning as on create: a 👑 account may re-upload a bigger bundle.
     zip_max_mb: Optional[int] = 0
     zip_max_files: Optional[int] = 0
+    # Same meaning as on create: which manifests to install for this redeploy.
+    deps: Optional[list] = None
 
 
 @app.patch("/internal/jobs/{job_id}")
@@ -2487,6 +2731,16 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
             if not os.path.isfile(fp):
                 raise HTTPException(400, detail=f"Entry file '{user_entry}' not found.")
             detected_src = fp
+            # The entry's extension decides the language, exactly as it does on
+            # create: without this, pointing a python job at index.js re-cloned
+            # the repo and then ran the JavaScript with python.
+            ext = user_entry.rsplit(".", 1)[-1].lower()
+            ext_map = {"py": "python", "js": "javascript", "ts": "typescript",
+                       "rb": "ruby", "php": "php", "sh": "bash", "lua": "lua",
+                       "go": "go", "rs": "rust"}
+            if ext_map.get(ext) in LANGS:
+                j["lang"] = ext_map[ext]
+                cfg = LANGS[j["lang"]]
         else:
             _, detected_src = _detect_entry(jdir, False, update_log)
         if detected_src:
@@ -2504,11 +2758,46 @@ def job_update(job_id: str, req: JobUpdateRequest, authorization: Optional[str] 
                     expected = detected_src
             j["file"] = expected
             j["bin"] = os.path.join(jdir, "main.bin")
+        # What was built, recorded so the site can compare it with the branch's
+        # HEAD and offer "deploy the latest" instead of guessing from a date.
+        entry_rel = (os.path.relpath(detected_src, jdir).replace("\\", "/")
+                     if detected_src else "")
+        if repo_url:
+            j["repo_url"] = repo_url
+            j["repo_commit"] = _repo_head(jdir) or None
+        j["repo_entry"] = entry_rel or None
+        # Dependencies for the new revision. Re-cloning without installing is
+        # how an update to a repo that added a library comes back as an
+        # ImportError at 3am, so the same install step create uses runs here —
+        # in the background, because pip can take longer than an HTTP request
+        # should.
+        manifest_names = _DEFAULT_MANIFESTS
+        deps = []
+        for raw in list(req.deps or []):
+            rel = str(raw or "").strip().replace("\\", "/").lstrip("/")
+            if rel and ".." not in rel.split("/") and os.path.isfile(os.path.join(jdir, rel)):
+                deps.append(rel)
+        if "/" in entry_rel:
+            folder = entry_rel.rsplit("/", 1)[0]
+            for m in manifest_names:
+                rel = f"{folder}/{m}"
+                if os.path.isfile(os.path.join(jdir, rel)) and rel not in deps:
+                    deps.append(rel)
+        root_manifest = any(os.path.isfile(os.path.join(jdir, m)) for m in manifest_names)
+        deps = deps[:4]
+        j["deps"] = deps
         j["log"].append(f"[system] {'Repo' if repo_url else 'Zip'} updated — restarting")
         if not j.get("port"):
             j["port"] = _alloc_port()
-        j["status"] = "starting"
-        _spawn(j)
+        if deps or root_manifest:
+            if not j.get("pylibs"):
+                j["pylibs"] = os.path.join(jdir, "pylibs")
+            os.makedirs(j["pylibs"], exist_ok=True)
+            j["status"] = "installing"
+            threading.Thread(target=_install_and_spawn, args=(j,), daemon=True).start()
+        else:
+            j["status"] = "starting"
+            _spawn(j)
         logger.info("Job %s updated from %s (dir: %s)", job_id,
                     "repo" if repo_url else "zip", jdir)
         return _job_public(j)

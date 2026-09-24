@@ -70,22 +70,36 @@ print("[1] a manifest triggers the install regardless of entry detection")
 # the fix fails here.
 _APP_SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "runner", "app.py")).read()
-_m = None
-for _ln in _APP_SRC.splitlines():
-    _t = _ln.strip()
-    if _t.startswith("repo_has_manifest = "):
-        _m = _t
-        break
-if _m is None:
-    print("  FAIL the create path does not compute repo_has_manifest at all")
+import re as _re                                             # noqa: E402
+
+# The manifest list is read OUT OF THE SHIPPING SOURCE, exactly as this file has
+# always insisted -- but from the one place it now lives: `_DEFAULT_MANIFESTS`,
+# which both the create path and the redeploy path use. It used to be extracted
+# from a tuple pasted inside one function; when that copy was removed in favour
+# of the shared constant, the extraction silently matched some other tuple and
+# every case in this section failed. Reading the constant is what keeps the test
+# honest AND stable.
+_mdef = _re.search(r"_DEFAULT_MANIFESTS\s*=\s*\(([^)]*)\)", _APP_SRC)
+if _mdef is None:
+    print("  FAIL the runner no longer defines _DEFAULT_MANIFESTS")
     _fail += 1
     MANIFESTS = ()
 else:
-    # Pull the manifest tuple straight out of the source.
-    import re as _re
-    _blk = _APP_SRC[_APP_SRC.index("repo_has_manifest = "):]
-    _blk = _blk[:_blk.index(")\n", _blk.index("(\"")) + 1]
-    MANIFESTS = tuple(_re.findall(r'"([A-Za-z][\w.+-]*)"', _blk))
+    MANIFESTS = tuple(_re.findall(r'"([A-Za-z][\w.+-]*)"', _mdef.group(1)))
+
+# ...and the predicate itself, verbatim, so re-introducing the old gate (install
+# only if we managed to guess the entry file) fails here instead of in
+# production, where it looks like "requirements.txt was ignored".
+_pred = next((_ln.strip() for _ln in _APP_SRC.splitlines()
+              if _ln.strip().startswith("repo_has_manifest = ")), None)
+if _pred is None:
+    print("  FAIL the create path does not compute repo_has_manifest at all")
+    _fail += 1
+else:
+    ok("entry detection is not part of the install predicate",
+       "detected_src" not in _pred, _pred)
+    ok("a zip bundle counts as a project too, not only a repo clone",
+       "zip_b64" in _pred, _pred)
 
 
 def manifest_seen(jdir, repo_url="https://github.com/u/r"):

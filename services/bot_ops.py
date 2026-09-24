@@ -59,18 +59,35 @@ from services.runner_client import MAX_JOBS_PER_USER  # noqa: F401
 
 logger = logging.getLogger("codenest-app")
 
+# How many apps a 👑 account may run at once when no admin typed a specific
+# number for it. Deliberately generous but not unlimited: the runner's shared-box
+# admission check is what actually protects the machine, and a count that cannot
+# be reached is a promise the box may not keep.
+QUEEN_MAX_JOBS = int(os.getenv("QUEEN_MAX_JOBS", "10"))
+
 def _effective_job_limit(user_id: int) -> int:
-    """MAX_JOBS_PER_USER, unless an admin set a per-user override via
-    /admin limit in the Telegram bot — see database.py's job_limit_override
-    column. NULL means "use the global default"."""
+    """How many apps this account may have RUNNING at once.
+
+    Three sources, in the order they should win:
+      1. a per-user override an admin typed (`/admin limit <user> <n>`) — a
+         specific instruction beats a general one;
+      2. 👑 (users.mem_unlimited) — a queen account gets QUEEN_MAX_JOBS, because
+         "no memory ceiling, big uploads, any repo" that still stops at three
+         running apps reads as a privilege that was not actually granted;
+      3. the global MAX_JOBS_PER_USER.
+    NULL means "use the default that applies to this account".
+    """
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT job_limit_override FROM users WHERE id = ?",
-                            (user_id,)).fetchone()
+        row = conn.execute("SELECT job_limit_override, mem_unlimited FROM users WHERE id = ?",
+                           (user_id,)).fetchone()
     finally:
         conn.close()
-    override = row["job_limit_override"] if row else None
-    return override if override is not None else MAX_JOBS_PER_USER
+    if row and row["job_limit_override"] is not None:
+        return int(row["job_limit_override"])
+    if row and row["mem_unlimited"]:
+        return QUEEN_MAX_JOBS
+    return MAX_JOBS_PER_USER
 
 
 # Public aliases. The chat bot shows "x of y slots" and routes/runspace.py
@@ -206,7 +223,7 @@ def list_apps(user_id: int) -> list:
     try:
         rows = [dict(r) for r in conn.execute(
             "SELECT id, name, language, runner_job_id, worker_url, desired_state, created_at, "
-            "telegram_bot_username "
+            "telegram_bot_username, repo_url, repo_entry, repo_commit, auto_deploy "
             "FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,)
         ).fetchall()]
     finally:
@@ -672,7 +689,8 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
             "web": web.get("web") or web.get("web_url")}
 
 
-def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "") -> dict:
+def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "",
+                         entry: str = "", deps=None) -> dict:
     """GitHub-import variant of create_app, for /import in chat.
 
     Same uniqueness/cap rules as create_app. No inline code is sent — the
@@ -718,6 +736,14 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
     # that has not been redeployed yet, and costs nothing on one that has.
     body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
             "env": {}, "repo_url": repo_url, "mem_limit_mb": _mem_limit_for(user_id)}
+    # Which runnable thing inside the repo, and which manifests belong to it.
+    # The caller scanned the repo (services/github_repo.py) and knows; without
+    # this a repo holding two projects always deployed whichever file the
+    # runner's own guess found first.
+    if entry:
+        body["entry"] = entry
+    if deps:
+        body["deps"] = [str(d) for d in list(deps)[:4]]
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -732,10 +758,15 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
     try:
         cursor = conn.execute(
             "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,"
-            "created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,'running',?,?,?)",
+            "repo_url,repo_entry,repo_commit,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'running',?,?,?,?,?,?)",
             (user_id, clean, info.get("language") or language or "python", "",
-             info["id"], getattr(resp, "placed_on", None), None, now, now))
+             info["id"], getattr(resp, "placed_on", None), None,
+             # What it was built from, and which revision: the runner reports the
+             # commit it actually cloned, so "is there a newer one?" is a
+             # comparison later instead of a guess from a date.
+             repo_url, info.get("repo_entry") or entry or None,
+             info.get("repo_commit") or None, now, now))
         conn.commit()
         job_db_id = cursor.lastrowid
     finally:
@@ -743,7 +774,150 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
 
     web = runner_client._job_web_fields(info, getattr(resp, "placed_on", None))
     return {"ok": True, "name": clean, "job_db_id": job_db_id,
-            "web": web.get("web") or web.get("web_url")}
+            "web": web.get("web") or web.get("web_url"),
+            # Which revision was built, and which file inside it runs: the
+            # reply can name the commit, and "is there a newer one?" becomes a
+            # comparison instead of a guess from a date.
+            "commit": info.get("repo_commit") or "",
+            "entry": info.get("repo_entry") or entry or ""}
+
+
+def _runner_detail(resp, fallback: str) -> str:
+    """The runner's own explanation when it refuses, or a usable sentence."""
+    try:
+        detail = (resp.json() or {}).get("detail")
+    except Exception:                                              # noqa: BLE001
+        detail = None
+    return str(detail or fallback)
+
+
+def _record_repo_state(job_db_id: int, repo_url: str, entry, commit) -> None:
+    """Remember which revision an app is running, so an update can be offered."""
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET repo_url=?, repo_entry=?, repo_commit=?, updated_at=? "
+                     "WHERE id=?",
+                     (repo_url or None, entry or None, commit or None,
+                      now_utc_str(), job_db_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_from_repo(user_id: int, ref: str, repo_url: str = None, entry=None,
+                     deps=None) -> dict:
+    """Pull the newest revision of the repo this app was built from.
+
+    In place, the way a platform redeploy works: same job id, same folder — so
+    the bot's database and sessions survive — same public address, same env. The
+    runner re-clones, installs the manifests and restarts. The commit it built
+    comes back so the caller can say which version is now running.
+    """
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. `/apps` lists yours."}
+    url = (repo_url or row.get("repo_url") or "").strip()
+    if not url:
+        return {"ok": False,
+                "error": f"*{row['name']}* wasn't deployed from a repo, so there is "
+                         f"no newer version to pull. `/update {row['name']}` and send "
+                         f"the code or a `.zip` instead."}
+    if entry is None:
+        entry = row.get("repo_entry") or ""
+    env = _row_env(row)
+    rid = row.get("runner_job_id")
+
+    patch = {"name": row["name"], "env": env, "repo_url": url,
+             # Re-sync the 👑 flag on every redeploy: the runner stores the limit
+             # when a job is created, so a grant made afterwards only reaches a
+             # job that gets redeployed.
+             "mem_limit_mb": _mem_limit_for(user_id)}
+    if entry:
+        patch["entry"] = entry
+    if deps:
+        patch["deps"] = [str(d) for d in list(deps)[:4]]
+
+    if rid:
+        try:
+            from services import snapshots
+            snapshots.save_snapshot(row["id"], rid, worker=_worker_of(row))
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("update_from_repo: pre-update snapshot failed for job %s: %s",
+                           row["id"], exc)
+        resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch,
+                                          worker=_worker_of(row))
+        if resp.status_code == 200:
+            info = resp.json() or {}
+            commit = info.get("repo_commit") or ""
+            _set_assignment(row, rid, _worker_of(row), "running")
+            _record_repo_state(row["id"], url, info.get("repo_entry") or entry, commit)
+            return {"ok": True, "job": row, "commit": commit}
+        if resp.status_code != 404:
+            return {"ok": False, "error": _runner_detail(resp, "Runner rejected the update.")}
+        # 404: the runner no longer has it (redeployed, drained, moved). Fall
+        # through and create it again on whichever worker has room.
+
+    create = {"language": row.get("language") or "python", "code": "",
+              "name": f"u{user_id}-{row['name']}", "env": env, "repo_url": url,
+              "mem_limit_mb": _mem_limit_for(user_id)}
+    if entry:
+        create["entry"] = entry
+    if deps:
+        create["deps"] = [str(d) for d in list(deps)[:4]]
+    resp = runner_client._runner_http("POST", "/internal/jobs", create)
+    if resp.status_code != 201:
+        return {"ok": False, "error": _runner_detail(resp, "Runner rejected the update.")}
+    info = resp.json()
+    now = now_utc_str()
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET runner_job_id=?, worker_url=?, desired_state='running', "
+                     "repo_url=?, repo_entry=?, repo_commit=?, updated_at=? WHERE id=?",
+                     (info["id"], getattr(resp, "placed_on", None), url,
+                      info.get("repo_entry") or entry or None,
+                      info.get("repo_commit") or None, now, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "job": row, "commit": info.get("repo_commit") or "",
+            "recreated": True}
+
+
+def set_auto_deploy(user_id: int, ref: str, on: bool) -> dict:
+    """👑 Follow the branch: redeploy by itself when a new commit lands."""
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. `/apps` lists yours."}
+    if not (row.get("repo_url") or "").strip():
+        return {"ok": False,
+                "error": f"*{row['name']}* wasn't deployed from a repo, so there is "
+                         f"nothing to follow. `/import <github url>` creates one that can."}
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET auto_deploy=?, updated_at=? WHERE id=?",
+                     (1 if on else 0, now_utc_str(), row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    row["auto_deploy"] = 1 if on else 0
+    return {"ok": True, "job": row, "on": bool(on)}
+
+
+def auto_deploy_jobs() -> list:
+    """Every app that follows its branch, across all accounts.
+
+    Read by the recovery loop — the only thing here that runs on a schedule. The
+    sweep is one SELECT plus one cheap GitHub lookup per DISTINCT repo (cached),
+    so ten apps following one repo cost one request.
+    """
+    conn = get_db_connection()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, user_id, name, repo_url, repo_entry, repo_commit, worker_url, "
+            "runner_job_id FROM jobs WHERE auto_deploy = 1 AND repo_url IS NOT NULL "
+            "AND repo_url != '' ORDER BY id").fetchall()]
+    finally:
+        conn.close()
 
 
 def create_app(user_id: int, name: str, language: str, code: str) -> dict:

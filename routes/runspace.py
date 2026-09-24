@@ -564,13 +564,21 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
             INSERT INTO jobs (user_id, name, language, code, runner_job_id, env,
                 telegram_bot_detected,telegram_bot_username,telegram_bot_id,
                 telegram_check_status,telegram_verified_at,telegram_token_fingerprint,
-                telegram_framework,telegram_update_mode,telegram_token_source,created_at,updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                telegram_framework,telegram_update_mode,telegram_token_source,
+                repo_url,repo_entry,repo_commit,created_at,updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (user["id"], name, payload.language, canonical_code, info["id"],
              secrets_store.pack_env(env_map), *_telegram_columns(bot_meta), token_fingerprint,
              code_analysis["framework"], code_analysis["update_mode"],
-             code_analysis["token_source"], now, now),
+             code_analysis["token_source"],
+             # Which repo this was built from and the commit that was checked
+             # out. The runner reports both; storing them is what lets the chat
+             # offer ⬆️ "deploy latest" for a job created on the WEBSITE too, so
+             # there is one answer to "what is running?" whichever door it came
+             # through.
+             (repo_url or None), (info.get("repo_entry") or entry or None),
+             (info.get("repo_commit") or None), now, now),
         )
         revision_id, version = _create_revision(
             conn, user["id"], cursor.lastrowid, payload.language, canonical_code,
@@ -1430,6 +1438,16 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
              code_analysis["framework"], code_analysis["update_mode"],
              code_analysis["token_source"], now, job_id),
         )
+        if new_repo:
+            # Record which revision this redeploy built, and which file in it
+            # runs. Without this the chat's ⬆️ "deploy latest" button keeps
+            # offering an update the website already applied — one job, two
+            # different answers about what is running.
+            conn.execute(
+                "UPDATE jobs SET repo_url=?, repo_entry=?, repo_commit=? WHERE id=?",
+                (new_repo, info.get("repo_entry") or new_entry or None,
+                 info.get("repo_commit") or None, job_id),
+            )
         conn.execute("UPDATE bot_revisions SET status='healthy',error=NULL,promoted_at=? WHERE id=?",
                      (now, revision_id))
         _record_deploy_event(conn, user["id"], job_id, "update", new_name, bot_meta, now)

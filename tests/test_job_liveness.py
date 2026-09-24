@@ -52,6 +52,36 @@ otp = db.execute("SELECT otp FROM users WHERE username='liveness'").fetchone()["
 TOK = client.post("/verify", json={"username": "liveness", "otp": otp}).json()["token"]
 H = {"Authorization": "Bearer " + TOK}
 
+# The site requires a VERIFIED bot token before it will create a job at all —
+# even `print(1)` is refused without proof. That gate is the subject of
+# tests/test_telegram_job_detection.py; this suite is about process liveness and
+# re-adoption after the runner's registry is lost, so it satisfies the gate the
+# way the real flow does (an unconsumed verification whose token hash matches)
+# instead of tripping over a precondition it is not testing.
+from datetime import datetime, timedelta, timezone            # noqa: E402
+import services.telegram_detector as _td                       # noqa: E402
+
+USER_ID = db.execute("SELECT id FROM users WHERE username='liveness'").fetchone()["id"]
+_ver_n = 0
+
+
+def verification():
+    """(verification_id, token) for one fresh, unconsumed proof of a token."""
+    global _ver_n
+    _ver_n += 1
+    tok = f"1234567{_ver_n}0:AA" + "b" * 32
+    vid = f"liveness-ver-{_ver_n}"
+    created = datetime.now(timezone.utc)
+    db.execute(
+        "INSERT INTO telegram_token_verifications "
+        "(id,user_id,token_hash,bot_username,bot_id,created_at,expires_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (vid, USER_ID, _td._token_hash(tok), f"liveness{_ver_n}bot",
+         str(700000 + _ver_n), created.strftime("%Y-%m-%d %H:%M:%S"),
+         (created + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")))
+    db.commit()
+    return vid, tok
+
 # --- status must come from process liveness, not an HTTP ping --------------
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                         "runner", "app.py")).read()
@@ -61,8 +91,11 @@ check("status is computed from proc.poll(), not an HTTP probe",
 # =========================== NON-WEB JOB (Telegram bot) ====================
 print("\n--- job that binds NO port (Telegram-bot style) ---")
 BOT = "import time\nprint('polling', flush=True)\nwhile True:\n    time.sleep(1)\n"
+_vid, _tok = verification()
 jid = client.post("/api/jobs", json={"name": "tgbot", "language": "python",
-                                     "code": BOT}, headers=H).json()["job_db_id"]
+                                     "code": BOT, "env": {"BOT_TOKEN": _tok},
+                                     "telegram_verification_id": _vid},
+                  headers=H).json()["job_db_id"]
 time.sleep(6)
 check("bot with no port reports running",
       client.get(f"/api/jobs/{jid}", headers=H).json()["status"] == "running")
@@ -98,8 +131,11 @@ print("\n--- job that DOES bind a port (web server) ---")
 WEB = ("import os, http.server, socketserver\n"
        "P = int(os.environ.get('PORT', '8000'))\n"
        "socketserver.TCPServer(('', P), http.server.SimpleHTTPRequestHandler).serve_forever()\n")
+_vid2, _tok2 = verification()
 wid = client.post("/api/jobs", json={"name": "websrv", "language": "python",
-                                     "code": WEB}, headers=H).json()["job_db_id"]
+                                     "code": WEB, "env": {"BOT_TOKEN": _tok2},
+                                     "telegram_verification_id": _vid2},
+                  headers=H).json()["job_db_id"]
 time.sleep(8)
 w = client.get(f"/api/jobs/{wid}", headers=H).json()
 check("web job reports running", w["status"] == "running", w.get("status"))

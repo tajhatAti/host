@@ -11,8 +11,8 @@ re-created anything: the dashboard showed the bots as stopped, the owners' bots
 were dead, and they stayed dead until someone pressed Restart by hand. That is
 how a user's bot "just went away".
 
-TWO PARTS
----------
+THREE PARTS
+-----------
 1. recover_once() — for every desired-running job the fleet no longer has,
    re-create it from the code and env stored in the database, then restore the
    last workspace snapshot (database.db, session.json, data/) so the bot comes
@@ -21,6 +21,11 @@ TWO PARTS
 2. start_reconciler() — run that same pass forever, every
    JOB_RECOVERY_INTERVAL_S (default 300), instead of once at boot. A runner that
    restarts ten times a day is repaired ten times a day, with nobody involved.
+
+3. auto_deploy_sweep() — on the same thread but its own, longer clock
+   (AUTO_DEPLOY_INTERVAL_S, default 600): every 👑 app that follows its branch is
+   compared with the branch's current commit and redeployed in place when it has
+   moved. "I pushed, why didn't it update?" stops being a question.
 
 WHY IT CANNOT DUPLICATE A RUNNING BOT
 -------------------------------------
@@ -193,6 +198,105 @@ def recover_once():
     return unresolved
 
 
+AUTO_DEPLOY_INTERVAL_S = int(os.getenv("AUTO_DEPLOY_INTERVAL_S", "600") or "0")
+
+_auto_deploy_lock = threading.Lock()
+_auto_deploy_last = 0.0
+_auto_deploy_last_result = {"checked": 0, "updated": 0, "unchanged": 0, "failed": 0,
+                            "errors": []}
+
+
+def auto_deploy_status() -> dict:
+    """What the last sweep found — the admin 🩺 panel shows this verbatim."""
+    return {"enabled": AUTO_DEPLOY_INTERVAL_S > 0,
+            "interval_s": AUTO_DEPLOY_INTERVAL_S,
+            "last_run_s_ago": int(time.time() - _auto_deploy_last) if _auto_deploy_last else None,
+            "last": dict(_auto_deploy_last_result)}
+
+
+def auto_deploy_sweep(force: bool = False) -> dict:
+    """Redeploy every app that follows its branch and whose branch has moved.
+
+    The half of "deploy on a new commit, like Render" that runs with nobody
+    watching. The site stores which commit each app was built from, so this pass
+    compares it with the branch's current head and redeploys IN PLACE — same job
+    id, same folder (the bot's database and sessions survive), same public
+    address, same env. Only apps whose 👑 owner switched auto-deploy on are
+    touched, and only when the commit actually differs, so a sweep that finds
+    nothing is one SELECT plus one cached GitHub lookup per DISTINCT repo and no
+    runner traffic at all.
+
+    "GitHub did not answer" is deliberately NOT treated as a change: redeploying
+    on a guess would restart a healthy bot because of a rate limit.
+    """
+    global _auto_deploy_last, _auto_deploy_last_result
+    if AUTO_DEPLOY_INTERVAL_S <= 0:
+        return {"disabled": True}
+    with _auto_deploy_lock:
+        now = time.time()
+        if not force and _auto_deploy_last and now - _auto_deploy_last < AUTO_DEPLOY_INTERVAL_S:
+            return {"waiting": True}
+        _auto_deploy_last = now
+
+    out = {"checked": 0, "updated": 0, "unchanged": 0, "failed": 0, "errors": []}
+    try:
+        from services import bot_ops, github_repo
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("Auto-deploy sweep unavailable: %s", exc)
+        out["errors"].append(str(exc))
+        _auto_deploy_last_result = out
+        return out
+
+    try:
+        rows = bot_ops.auto_deploy_jobs()
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("Auto-deploy sweep could not read its job list: %s", exc)
+        out["errors"].append(str(exc))
+        _auto_deploy_last_result = out
+        return out
+
+    for row in rows:
+        name = row.get("name") or f"#{row.get('id')}"
+        out["checked"] += 1
+        url = (row.get("repo_url") or "").strip()
+        owner, repo, branch = github_repo.parse_repo(url)
+        if not owner:
+            out["failed"] += 1
+            out["errors"].append(f"{name}: repo url not understood")
+            continue
+        current = (row.get("repo_commit") or "").strip()
+        try:
+            head = github_repo.head_commit(owner, repo, branch)
+        except Exception as exc:                               # noqa: BLE001
+            head = ""
+            out["errors"].append(f"{name}: {type(exc).__name__}")
+        if not head:
+            out["unchanged"] += 1
+            continue
+        if head == current:
+            out["unchanged"] += 1
+            continue
+        try:
+            res = bot_ops.update_from_repo(row["user_id"], name, url)
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning("Auto-deploy of %s crashed: %s", name, exc)
+            out["failed"] += 1
+            out["errors"].append(f"{name}: {type(exc).__name__}")
+            continue
+        if res.get("ok"):
+            out["updated"] += 1
+            logger.info("Auto-deployed %s: %s -> %s", name, (current or "?")[:7],
+                        (res.get("commit") or head)[:7])
+        else:
+            out["failed"] += 1
+            out["errors"].append(f"{name}: {res.get('error')}")
+            logger.warning("Auto-deploy of %s failed: %s", name, res.get("error"))
+
+    out["errors"] = out["errors"][:5]
+    _auto_deploy_last_result = out
+    return out
+
+
 async def recover_background():
     """Runner services may also be waking; retry without blocking web startup."""
     await asyncio.sleep(5)
@@ -225,6 +329,14 @@ def _reconcile_loop():
             recover_once()
         except Exception as exc:  # a sweep must never kill its own thread
             logger.warning("Bot recovery sweep crashed: %s", exc)
+        try:
+            # AFTER recovery, never instead of it: a runner that just restarted
+            # has to get its jobs back before any of them is redeployed. The
+            # sweep keeps its own (longer) clock, so it runs at most once per
+            # AUTO_DEPLOY_INTERVAL_S however often this loop turns.
+            auto_deploy_sweep()
+        except Exception as exc:
+            logger.warning("Auto-deploy sweep crashed: %s", exc)
         time.sleep(RECOVERY_INTERVAL_S)
 
 

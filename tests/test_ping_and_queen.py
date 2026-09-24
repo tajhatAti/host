@@ -320,53 +320,109 @@ def test_projects_explains_itself_to_a_non_queen(monkeypatch, sent):
     assert not deployed
 
 
-def test_projects_lists_the_repo_and_how_to_run_it(monkeypatch, sent):
+TWO_PROJECTS = [
+    {"name": "b", "dir": "", "entry": "bot.py", "language": "python",
+     "kind": "worker", "manifests": ["requirements.txt"]},
+    {"name": "web", "dir": "web", "entry": "web/dashboard.py", "language": "python",
+     "kind": "web", "manifests": ["web/requirements.txt"]},
+]
+
+
+def test_projects_lists_what_can_run_as_buttons(monkeypatch, sent):
+    """/projects used to print a file list plus a paragraph of placeholders to
+    fill in by hand — the complaint was literally "it shows braces". Now every
+    runnable thing in the repo is a BUTTON, naming the file that will run and
+    the manifests that will be installed: nothing to type, nothing to guess."""
     monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/tajhatAti/b")
     monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "arena/01a0ba14-b")
-    tree = [{"path": "app", "type": "tree"}, {"path": "tests", "type": "tree"},
-            {"path": "bot.py", "type": "blob", "size": 5094},
-            {"path": "requirements.txt", "type": "blob", "size": 18},
-            {"path": "README.md", "type": "blob", "size": 11139}]
-    monkeypatch.setattr(pingbot, "_projects_fetch", lambda: tree)
+    monkeypatch.setattr(pingbot.github_repo, "scan_projects", lambda *a, **k: TWO_PROJECTS)
+    monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [])
     monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
 
     pingbot.cmd_projects(1, {"id": 2, "username": "bee", "is_queen": 1})
-    reply = last(sent)
+    catalogue = texts(sent)[0]
     for needle in ("tajhatAti/b", "arena/01a0ba14-b", "`bot.py`",
-                   "requirements.txt", "How to run it", "/import",
-                   "BOT_TOKEN", "/logs"):
-        assert needle in reply, needle
-    # The entry point is named, so nobody has to guess what will run.
-    assert "▶️ It will run `bot.py`" in reply
-    markup = [p for m, p in sent if p.get("reply_markup")]
-    assert markup and "qproj:run" in markup[-1]["reply_markup"]
+                   "requirements.txt", "web/dashboard.py"):
+        assert needle in catalogue, needle
+
+    markups = [p for _m, p in sent if p.get("reply_markup")]
+    flat = [b["callback_data"]
+            for b in json.loads(markups[0]["reply_markup"])["inline_keyboard"][0]]
+    all_data = [b["callback_data"]
+                for row in json.loads(markups[0]["reply_markup"])["inline_keyboard"]
+                for b in row]
+    assert "pick:0" in all_data and "pick:1" in all_data   # one button per project
+    assert "pick:all" in all_data                          # ...or the whole repo
+    assert "pick:readme" in all_data and "pick:no" in all_data
+    # A button carries an INDEX only. callback_data is 64 bytes and
+    # attacker-supplied, so a path or a URL in it is both a truncation risk and
+    # a way to make the bot clone something else.
+    assert flat == ["pick:0"]
+    for t in texts(sent):
+        assert "<name>" not in t and "{}" not in t and "<user>" not in t
 
 
-def test_projects_fetch_parses_the_github_tree(monkeypatch):
-    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/o/r")
+def test_pick_button_deploys_the_chosen_project(monkeypatch, sent):
+    """The tap resolves server-side against the list THIS chat was shown."""
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/tajhatAti/b")
     monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "arena/01a0ba14-b")
-    monkeypatch.setattr(pingbot, "_projects_cache", {"at": 0.0, "entries": None})
-    seen = {}
+    monkeypatch.setattr(pingbot.github_repo, "scan_projects", lambda *a, **k: TWO_PROJECTS)
+    monkeypatch.setattr(telegram_link, "user_for_chat",
+                        lambda cid: {"id": 2, "username": "bee", "is_queen": 1})
+    monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
+    created = {}
+    monkeypatch.setattr(
+        bot_ops, "create_app_from_repo",
+        lambda uid, name, url, **kw: created.update(name=name, url=url, **kw)
+        or {"ok": True, "name": name, "job_db_id": 7, "web": "", "commit": "3272e0c"})
 
-    def get(url, **kwargs):
-        seen.update(url=url)
-        return Resp(200, {"tree": [{"path": "bot.py", "type": "blob", "size": 10}]})
+    pingbot.cmd_import(1, {"id": 2, "username": "bee"}, "https://github.com/tajhatAti/b")
+    assert not created                      # nothing deployed before a choice
+    pingbot.handle_callback(1, "pick:1")    # the web/ dashboard, not the root bot
 
-    monkeypatch.setattr(pingbot.requests, "get", get)
-    entries = pingbot._projects_fetch()
-    assert entries == [{"path": "bot.py", "type": "blob", "size": 10}]
-    # The branch is URL-encoded into the API path, slashes and all.
-    assert "/git/trees/arena%2F01a0ba14-b" in seen["url"]
+    assert created["entry"] == "web/dashboard.py"
+    assert created["deps"] == ["web/requirements.txt"]
+    assert created["url"].startswith("https://github.com/tajhatAti/b")
+    reply = last(sent)
+    assert "deployed and running" in reply
+    assert "3272e0c" in reply               # which revision is now running
+    assert "/latest" in reply               # and how to get the next one
 
 
 def test_projects_survives_a_rate_limited_github(monkeypatch, sent):
-    monkeypatch.setattr(pingbot, "_projects_cache", {"at": 0.0, "entries": None})
-    monkeypatch.setattr(pingbot.requests, "get", lambda *a, **k: Resp(403, {}))
-    monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
+    """A shared Render exit IP runs out of anonymous GitHub calls. The catalogue
+    then says so and keeps the one-tap deploy and the steps: the privilege must
+    not become unusable because a listing could not be read."""
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_REPO", "https://github.com/tajhatAti/b")
+    monkeypatch.setattr(pingbot, "QUEEN_PROJECTS_BRANCH", "arena/01a0ba14-b")
+    monkeypatch.setattr(pingbot.github_repo, "scan_projects", lambda *a, **k: [])
+    monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [])
+
     pingbot.cmd_projects(1, {"id": 2, "username": "bee", "is_queen": 1})
     reply = last(sent)
-    assert "How to run it" in reply      # the instructions do not depend on GitHub
-    assert "/import" in reply
+    assert "Run it now" in reply
+    assert "/latest" in reply and "/logs" in reply
+    assert any("qproj:run" in p["reply_markup"] for _m, p in sent if p.get("reply_markup"))
+
+
+def test_repo_apps_show_whether_the_branch_moved(monkeypatch, sent):
+    """The Render-shaped question — "did my push deploy?" — answered on the same
+    screen as the button that fixes it."""
+    monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [
+        {"id": 11, "name": "haven", "repo_url": "https://github.com/tajhatAti/b",
+         "repo_commit": "aaaaaaa1111", "auto_deploy": 1},
+        {"id": 12, "name": "old", "repo_url": "https://github.com/tajhatAti/b",
+         "repo_commit": "3272e0c88fb1", "auto_deploy": 0},
+    ])
+    monkeypatch.setattr(pingbot.github_repo, "head_commit", lambda *a, **k: "3272e0c88fb1")
+
+    pingbot._send_repo_apps(1, {"id": 2, "username": "bee", "is_queen": 1})
+    reply = last(sent)
+    assert "newer commit waiting" in reply      # haven is behind
+    assert "up to date" in reply                # old is not
+    assert "auto-deploy on" in reply
+    markup = [p for _m, p in sent if p.get("reply_markup")][-1]["reply_markup"]
+    assert "latest:11" in markup and "autodep:11" in markup
 
 
 def test_run_button_deploys_the_branch(monkeypatch, sent):
@@ -376,16 +432,25 @@ def test_run_button_deploys_the_branch(monkeypatch, sent):
     monkeypatch.setattr(telegram_link, "user_for_chat",
                         lambda cid: {"id": 2, "username": "bee", "is_queen": 1})
     monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
+    monkeypatch.setattr(pingbot.github_repo, "scan_projects",
+                        lambda *a, **k: [TWO_PROJECTS[0]])
     created = {}
-    monkeypatch.setattr(bot_ops, "create_app_from_repo",
-                        lambda uid, name, url: created.update(uid=uid, name=name, url=url)
-                        or {"ok": True, "name": name, "job_db_id": 1, "web": ""})
+    monkeypatch.setattr(
+        bot_ops, "create_app_from_repo",
+        lambda uid, name, url, **kw: created.update(uid=uid, name=name, url=url, **kw)
+        or {"ok": True, "name": name, "job_db_id": 1, "web": "", "commit": "3272e0c88fb1"})
 
     pingbot.handle_callback(1, "qproj:run")
     assert created["url"] == "https://github.com/tajhatAti/b/tree/arena/01a0ba14-b"
     assert created["name"] == "haven"
-    assert "imported and running" in last(sent)
-    assert "arena/01a0ba14-b" in last(sent)     # the branch is named in the reply
+    # exactly one runnable thing in the repo, so the entry and its own manifest
+    # are named instead of being left to the runner's detection
+    assert created["entry"] == "bot.py"
+    assert created["deps"] == ["requirements.txt"]
+    reply = last(sent)
+    assert "deployed and running" in reply
+    assert "arena/01a0ba14-b" in reply          # the branch is named in the reply
+    assert "3272e0c" in reply                   # and the commit that was built
 
 
 def test_run_button_refuses_a_non_queen(monkeypatch, sent):
@@ -431,10 +496,12 @@ def test_branch_is_read_out_of_a_github_url():
 
 def test_import_passes_the_branch_through(monkeypatch, sent):
     monkeypatch.setattr(bot_ops, "find_app", lambda uid, name: None)
+    monkeypatch.setattr(pingbot.github_repo, "scan_projects", lambda *a, **k: [])
     created = {}
-    monkeypatch.setattr(bot_ops, "create_app_from_repo",
-                        lambda uid, name, url: created.update(name=name, url=url)
-                        or {"ok": True, "name": name, "job_db_id": 1, "web": ""})
+    monkeypatch.setattr(
+        bot_ops, "create_app_from_repo",
+        lambda uid, name, url, **kw: created.update(name=name, url=url, **kw)
+        or {"ok": True, "name": name, "job_db_id": 1, "web": ""})
     pingbot.cmd_import(1, {"id": 2, "username": "bee"},
                        "https://github.com/tajhatAti/b/tree/arena/01a0ba14-b haven")
     assert created["url"] == "https://github.com/tajhatAti/b/tree/arena/01a0ba14-b"
@@ -880,3 +947,167 @@ def test_connecting_a_queen_opens_on_the_queen_screen(monkeypatch, sent):
     assert "👑" in text and "/projects" in text
     assert "queen:menu" in _buttons(sent)
     assert any("Open dashboard" in b for b in _buttons(sent))
+
+
+# --------------------------------------------------------------------------
+# 🩺 admin health: the panel that answers "why doesn't anything work?"
+# --------------------------------------------------------------------------
+def _fake_tg(sent, webhook=None):
+    """A Telegram API that records calls and answers getWebhookInfo on demand."""
+    def tg(method, **params):
+        sent.append((method, params))
+        if method == "getWebhookInfo":
+            return {"ok": True, "result": webhook if webhook is not None else {}}
+        return {"ok": True, "result": {"message_id": len(sent)}}
+    return tg
+
+
+def _patch_health_sources(monkeypatch):
+    monkeypatch.setattr(pingbot.runner_client, "runner_pool", lambda: ["https://r.example"])
+    monkeypatch.setattr(pingbot.runner_client, "worker_health",
+                        lambda refresh=False, max_age_s=None: {
+                            "https://r.example": {"online": True, "jobs": 2, "free": 3,
+                                                  "free_mb": 300.0, "total_mb": 512.0,
+                                                  "full": False}})
+    monkeypatch.setattr(pingbot.telegram_link, "admin_overview_stats",
+                        lambda: {"jobs_total": 5, "jobs_deployed": 4, "users": 2,
+                                 "tg_linked": 1, "admins": 1, "zip_allowed": 0,
+                                 "suspended": 0})
+    # no project repo configured → the panel must not go looking for one
+    monkeypatch.setattr(pingbot, "_queen_repo_parts", lambda: ("", ""))
+
+
+def test_admin_health_names_a_webhook_that_silently_drops_buttons(monkeypatch):
+    """The one misconfiguration that looks exactly like "the buttons are broken":
+    a webhook registered without callback_query receives typed commands and
+    throws away every single button press. The panel has to say so in words."""
+    sent = []
+    monkeypatch.setattr(pingbot, "_tg", _fake_tg(sent, {
+        "url": "https://ahadrunspace.onrender.com/telegram/webhook",
+        "pending_update_count": 3,
+        "allowed_updates": ["message"],
+        "last_error_message": "",
+    }))
+    _patch_health_sources(monkeypatch)
+
+    text = pingbot._admin_health_text()
+    assert "callback_query" in text
+    assert "dropping every button press" in text
+    assert "Re-register webhook" in text
+    # the rest of the machinery is reported from itself, not from intent
+    assert "https://r.example" in text and "2 job(s)" in text
+    assert "Recovery runs every" in text
+    assert "How a deploy works now" in text
+
+    data = [b["callback_data"]
+            for row in pingbot._admin_health_kb()["inline_keyboard"] for b in row]
+    for needle in ("admin:fixwebhook", "admin:autodepnow", "admin:limitflow", "admin:health"):
+        assert needle in data, needle
+    assert all(len(d) <= 64 for d in data)      # Telegram's hard limit
+
+
+def test_admin_health_says_when_the_service_is_polling(monkeypatch):
+    sent = []
+    monkeypatch.setattr(pingbot, "_tg", _fake_tg(sent, {}))
+    _patch_health_sources(monkeypatch)
+    text = pingbot._admin_health_text()
+    assert "No webhook registered" in text and "long-polling" in text
+    # ...and the repair button explains a mode change is a restart, not a tap
+    assert "SITE_BASE" not in text or "restart" in text
+
+
+def test_fixwebhook_does_not_fight_a_running_poller(monkeypatch, sent):
+    """Registering a webhook over a live poller starts a fight the poller loses
+    silently (getUpdates 409 → it deletes the webhook once → then just logs).
+    With no webhook registered the button must explain instead of acting."""
+    monkeypatch.setattr(pingbot, "_tg", _fake_tg(sent, {}))
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
+                        lambda cid: {"id": 1, "username": "root", "is_admin": 1})
+    registered = []
+    monkeypatch.setattr(pingbot, "enable_webhook",
+                        lambda: registered.append(1) or True)
+    pingbot.handle_admin_callback(1, 1, "fixwebhook", "", None)
+    assert not registered
+    reply = last(sent)
+    assert "restart" in reply and "SITE_BASE" in reply
+
+
+def test_health_button_is_admin_only(monkeypatch, sent):
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat", lambda cid: None)
+    pingbot.handle_admin_callback(1, 1, "health", "", None)
+    assert "Admin only" in last(sent)
+
+
+# --------------------------------------------------------------------------
+# the buttons on a repo app: update it, or let it follow its branch
+# --------------------------------------------------------------------------
+def test_latest_button_with_no_ref_lists_the_repo_apps(monkeypatch, sent):
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
+                        lambda cid: {"id": 2, "username": "bee"})
+    monkeypatch.setattr(bot_ops, "list_apps", lambda uid: [
+        {"id": 31, "name": "haven", "repo_url": "https://github.com/o/r", "repo_commit": "a"},
+        {"id": 32, "name": "web", "repo_url": "https://github.com/o/r", "repo_commit": "b"}])
+    pingbot.handle_callback(1, "latest:")
+    assert "Which app should I update" in last(sent)
+    markup = [p for _m, p in sent if p.get("reply_markup")][-1]["reply_markup"]
+    assert "latest:31" in markup and "latest:32" in markup
+
+
+def test_autodeploy_button_is_queen_only(monkeypatch, sent):
+    """Advanced repo features stay 👑: a normal account is told what it is
+    missing and what it can still do, rather than getting the switch."""
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat",
+                        lambda cid: {"id": 3, "username": "ann", "is_queen": 0})
+    monkeypatch.setattr(bot_ops, "find_app", lambda uid, ref: {
+        "id": 31, "name": "haven", "repo_url": "https://github.com/o/r", "auto_deploy": 0})
+    monkeypatch.setattr(bot_ops, "set_auto_deploy",
+                        lambda *a, **k: pytest.fail("must not toggle for a non-queen"))
+    pingbot.handle_callback(1, "autodep:31")
+    reply = last(sent)
+    assert "queen access" in reply.lower()
+    assert "/latest" in reply                    # what they CAN still do
+
+
+def test_a_button_tap_with_no_message_is_answered_not_crashed(monkeypatch):
+    """Telegram keeps delivering taps for a message it has already dropped from
+    the chat, with no `message` object at all. Reading
+    cb["message"]["chat"]["id"] straight through raised a TypeError, the tap was
+    never answered, and the button looked dead — with nothing in the log but a
+    stack trace. The person who tapped is always known, so fall back to them."""
+    answered, events = [], []
+    monkeypatch.setattr(pingbot, "_tg",
+                        lambda method, **p: answered.append(method) or {"ok": True, "result": {}})
+    monkeypatch.setattr(pingbot.bot_analytics, "record", lambda **e: events.append(e))
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat", lambda cid: None)
+    monkeypatch.setattr(pingbot.telegram_admin_ext, "is_banned", lambda uid: False)
+
+    pingbot.handle_update({"update_id": 9, "callback_query": {
+        "id": "cb-1", "from": {"id": 77, "first_name": "Ada"}, "data": "admin:health"}})
+
+    assert "answerCallbackQuery" in answered
+    assert events and events[0]["event_type"] == "callback"
+    assert events[0]["chat_id"] == 77            # fell back to whoever tapped
+
+
+def test_a_button_from_an_unlinked_chat_says_why(monkeypatch):
+    """A job button pressed from a chat with no linked account used to be dropped
+    in silence (outcome="refused", nothing sent). Silence is indistinguishable
+    from a broken button, so the tap is answered AND the reason is stated."""
+    answered, sent, events = [], [], []
+    monkeypatch.setattr(pingbot, "_tg",
+                        lambda method, **p: (answered.append(method),
+                                             sent.append(p.get("text") or ""),
+                                             {"ok": True, "result": {}})[-1])
+    monkeypatch.setattr(pingbot.bot_analytics, "record", lambda **e: events.append(e))
+    monkeypatch.setattr(pingbot.telegram_link, "user_for_chat", lambda cid: None)
+    monkeypatch.setattr(pingbot.telegram_admin_ext, "is_banned", lambda uid: False)
+    monkeypatch.setattr(pingbot, "cmd_logs",
+                        lambda *a, **k: pytest.fail("must not run for an unlinked chat"))
+
+    pingbot.handle_update({"update_id": 10, "callback_query": {
+        "id": "cb-2", "from": {"id": 88}, "data": "logs:myapp",
+        "message": {"chat": {"id": 88}, "message_id": 5}}})
+
+    assert "answerCallbackQuery" in answered
+    assert any("/link" in t for t in sent), sent
+    assert events and events[0]["outcome"] == "refused"

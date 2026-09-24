@@ -601,6 +601,14 @@ _SCHEMA_TABLES = [
         telegram_framework TEXT,
         telegram_update_mode TEXT,
         telegram_token_source TEXT,
+        -- Where a deployed app came from, so "is there a newer version?" is a
+        -- comparison instead of an archaeology project. repo_commit is the SHA
+        -- the runner actually cloned; repo_entry is the file inside the repo
+        -- that runs, because one repo can hold more than one runnable thing.
+        repo_url TEXT,
+        repo_entry TEXT,
+        repo_commit TEXT,
+        auto_deploy INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -1041,6 +1049,19 @@ def init_db():
             ("telegram_framework", "TEXT"),
             ("telegram_update_mode", "TEXT"),
             ("telegram_token_source", "TEXT"),
+        ):
+            if not _column_exists(conn, "jobs", _col):
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_ddl}")
+
+        # GitHub-backed apps: what they were built from, and whether they follow
+        # the branch by themselves. Existing rows stay NULL/0 — a job with no
+        # repo_url is simply not a repo job, which is what every row was before
+        # this existed, so the migration cannot change how an old app behaves.
+        for _col, _ddl in (
+            ("repo_url", "TEXT"),
+            ("repo_entry", "TEXT"),
+            ("repo_commit", "TEXT"),
+            ("auto_deploy", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if not _column_exists(conn, "jobs", _col):
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_ddl}")
