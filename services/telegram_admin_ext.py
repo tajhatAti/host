@@ -140,11 +140,18 @@ def admin_delete_job(job_id: int) -> dict:
 
 
 def jobs_for_user(user_id: int) -> list:
+    """Every job this account owns, with live status + runner placement.
+
+    Used by the admin user card so a tap on a person shows their apps as
+    buttons, not a paragraph to retype into /see.
+    """
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT id, name, language, runner_job_id FROM jobs "
-            "WHERE user_id = ? ORDER BY id DESC", (user_id,)
+            "SELECT id, name, language, runner_job_id, worker_url, desired_state, "
+            "repo_url, repo_entry, repo_commit, created_at, updated_at, "
+            "telegram_bot_username "
+            "FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,)
         ).fetchall()
     finally:
         conn.close()
@@ -153,7 +160,15 @@ def jobs_for_user(user_id: int) -> list:
     for r in rows:
         d = dict(r)
         info = live.get(d.get("runner_job_id")) or {}
-        d["live_status"] = info.get("status") or "unknown"
+        d["live_status"] = info.get("status") or (
+            "stopped" if d.get("desired_state") == "stopped" else "unknown")
+        d["mem_mb"] = info.get("mem_mb")
+        d["uptime_s"] = info.get("uptime_s")
+        d["restarts"] = info.get("restarts")
+        d["last_exit_reason"] = info.get("last_exit_reason")
+        d["web"] = bool(info.get("web"))
+        d["port"] = info.get("port")
+        d["runner_url"] = info.get("worker_url") or d.get("worker_url") or ""
         out.append(d)
     return out
 
@@ -647,12 +662,24 @@ def jobs_recent(limit: int = 8, offset: int = 0) -> list:
 
 
 def job_detail(job_id: int) -> dict:
+    """Full admin view of one job — everything the card needs, NO source body.
+
+    Source is fetched on demand (admin:jobsource) so a list of ten jobs does not
+    pull ten copies of multi-megabyte code into one chat message. Env VALUES are
+    never returned — only the key names — because a bot token in an admin chat
+    is a permanent leak into Telegram's cloud history.
+    """
+    import re as _re
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT j.id, j.name, j.language, j.created_at, j.runner_job_id, j.worker_url, "
-            "j.telegram_bot_username, j.telegram_check_status, "
-            "u.username AS owner, u.id AS owner_id, u.is_suspended AS owner_suspended "
+            "SELECT j.id, j.name, j.language, j.created_at, j.updated_at, "
+            "j.runner_job_id, j.worker_url, j.desired_state, "
+            "j.telegram_bot_username, j.telegram_check_status, j.telegram_bot_id, "
+            "j.repo_url, j.repo_entry, j.repo_commit, j.auto_deploy, j.env, "
+            "j.code, "
+            "u.username AS owner, u.id AS owner_id, u.is_suspended AS owner_suspended, "
+            "u.telegram_id AS owner_telegram_id "
             "FROM jobs j JOIN users u ON u.id = j.user_id WHERE j.id = ?", (job_id,)
         ).fetchone()
     finally:
@@ -660,11 +687,79 @@ def job_detail(job_id: int) -> dict:
     if not row:
         return None
     d = dict(row)
+    try:
+        from services import secrets_store
+        env_vals, _ok = secrets_store.read_env(d.get("env"))
+        d["env_keys"] = sorted((env_vals or {}).keys())
+    except Exception:
+        d["env_keys"] = []
+    code = d.get("code") or ""
+    d["has_code"] = bool(code.strip())
+    d["code_bytes"] = len(code.encode("utf-8")) if code else 0
+    d["requirements"] = ""
+    for line in code.splitlines()[:30]:
+        m = _re.match(r"^#\s*requirements:\s*(.+)$", line, _re.I)
+        if m:
+            d["requirements"] = m.group(1).strip()
+            break
+    d.pop("code", None)
+    d.pop("env", None)
+
     live = runner_client.fleet_jobs()
     info = live.get(d.get("runner_job_id")) or {}
-    d.update(live_status=info.get("status"), uptime_s=info.get("uptime_s"),
-              mem_mb=info.get("mem_mb"), restarts=info.get("restarts"))
+    d.update(
+        live_status=info.get("status") or (
+            "stopped" if d.get("desired_state") == "stopped" else "unknown"),
+        uptime_s=info.get("uptime_s"),
+        mem_mb=info.get("mem_mb"),
+        peak_mem_mb=info.get("peak_mem_mb"),
+        restarts=info.get("restarts"),
+        last_exit_reason=info.get("last_exit_reason"),
+        last_exit_code=info.get("last_exit_code"),
+        libs=info.get("libs") or [],
+        web=bool(info.get("web")),
+        port=info.get("port"),
+        web_slug=info.get("web_slug"),
+        mem_limit_mb=info.get("mem_limit_mb"),
+        runner_url=(info.get("worker_url") or d.get("worker_url") or ""),
+        live_repo_commit=info.get("repo_commit"),
+    )
     return d
+
+
+def job_source(job_id: int) -> dict:
+    """The stored source for one job, for admin download. Body included."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, name, language, code, user_id, repo_url, repo_entry "
+            "FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def admin_update_code(job_id: int, code: str, language: str = None) -> dict:
+    """Admin rewrite of someone else's source — same rails as owner /update."""
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops.update_code(row["user_id"], str(row["id"]), code, language)
+
+
+def admin_set_env(job_id: int, key: str, value) -> dict:
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops.set_env(row["user_id"], str(row["id"]), key, value)
+
+
+def admin_logs(job_id: int, lines: int = 40) -> dict:
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops.logs(row["user_id"], str(row["id"]), lines=lines)
 
 
 # ── Audit log — mirrors GET /admin/audit-log ────────────────────────────
