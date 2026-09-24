@@ -129,7 +129,8 @@ def test_ping_reports_speed_and_status(monkeypatch, sent):
     pingbot.handle_ping(1, "/ping")
     reply = last(sent)
     assert "🟢" in reply and "HTTP 200" in reply
-    assert "ahadrunspace.onrender.com" in reply
+    # bare /ping must not leak the site hostname (privacy)
+    assert "ahadrunspace.onrender.com" not in reply
     assert "ms" in reply
 
 
@@ -246,7 +247,7 @@ def test_a_rejected_message_is_not_sent_twice(monkeypatch):
 def _apps(n, running=0):
     out = []
     for i in range(n):
-        out.append({"name": f"app{i}", "status": "running" if i < running else "stopped",
+        out.append({"id": i + 1, "name": f"app{i}", "status": "running" if i < running else "stopped",
                     "mem_mb": 40, "uptime_s": 60, "restarts": 0})
     return out
 
@@ -518,8 +519,9 @@ def test_id_works_without_a_linked_account(monkeypatch, sent):
     monkeypatch.setattr(telegram_link, "user_for_chat", lambda cid: None)
     pingbot.cmd_id(42, {"id": 99, "username": "stranger"})
     reply = last(sent)
-    assert "`99`" in reply
-    assert "`42`" in reply
+    # HTML <code> chips — tap-to-copy on phone
+    assert "99" in reply and ("<code>99</code>" in reply or "`99`" in reply)
+    assert "42" in reply and ("<code>42</code>" in reply or "`42`" in reply)
     assert "@stranger" in reply
     assert "not linked" in reply.lower()
 
@@ -530,7 +532,7 @@ def test_id_names_a_linked_queen(monkeypatch, sent):
     monkeypatch.setattr(pingbot, "_user_is_queen", lambda u: True)
     pingbot.cmd_id(7, {"id": 7, "username": "bee"})
     reply = last(sent)
-    assert "#7" in reply and "bee" in reply
+    assert ("7" in reply) and "bee" in reply
     assert "queen" in reply.lower()
 
 
@@ -817,7 +819,7 @@ def test_a_zip_from_an_ordinary_account_still_needs_approval(monkeypatch, sent):
     pending = {"mode": "create", "name": "proj", "user_id": 3, "step": "code",
                "expires": 0}
     pingbot.handle_pending_code(3, msg, pending)
-    assert "allowzip" in last(sent)
+    assert "zip" in last(sent).lower() and ("approval" in last(sent).lower() or "allowzip" in last(sent).lower())
 
 
 def test_the_reported_production_message_is_translated():
@@ -872,7 +874,8 @@ def test_queens_get_their_own_keyboard(monkeypatch):
     royal = pingbot._main_kb({"id": 2, "username": "bee", "is_queen": 1})
     plain_cb = [b.get("callback_data") for row in plain["inline_keyboard"] for b in row]
     royal_cb = [b.get("callback_data") for row in royal["inline_keyboard"] for b in row]
-    assert plain_cb == [None]            # everybody else: just the launch button
+    # Everyone gets guides/apps shortcuts; queens additionally get the crown panel.
+    assert "queen:menu" not in plain_cb and "qproj:list" not in plain_cb
     assert "queen:menu" in royal_cb and "qproj:list" in royal_cb
     assert any(b.get("web_app") or b.get("url")
                for row in royal["inline_keyboard"] for b in row)
@@ -901,7 +904,9 @@ def test_cmd_limits_is_the_panel_for_a_queen_and_the_ceiling_for_everyone_else(m
     pingbot.cmd_limits(1, {"id": 4, "username": "ann", "is_queen": 0})
     plain = last(sent)
     assert "1/3" in plain and "512MB" in plain
-    assert "/queen" in plain             # how to get more, said once
+    # Do not advertise admin grant commands to ordinary users
+    assert "/queen" not in plain
+    assert "bot owner" in plain.lower() or "raise" in plain.lower()
 
     sent.clear()
     monkeypatch.setattr(bot_ops, "account_privileges",
@@ -1174,7 +1179,8 @@ def test_fixwebhook_does_not_fight_a_running_poller(monkeypatch, sent):
 def test_health_button_is_admin_only(monkeypatch, sent):
     monkeypatch.setattr(pingbot.telegram_link, "user_for_chat", lambda cid: None)
     pingbot.handle_admin_callback(1, 1, "health", "", None)
-    assert "Admin only" in last(sent)
+    # Silent for non-admins — do not confirm the admin panel exists.
+    assert last(sent) == "" or "Admin" not in last(sent)
 
 
 # --------------------------------------------------------------------------

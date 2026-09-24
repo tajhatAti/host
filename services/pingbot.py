@@ -3660,7 +3660,8 @@ def cmd_apps(chat_id, user):
         logger.exception("apps card failed")
 
     # Compact text + per-app buttons (logs/status/restart) — no how-to footer.
-    lines = []
+    crown = " 👑" if queen else ""
+    lines = [f"*{total} total* · *{running}/{limit} running*{crown}"]
     for a in apps[:20]:
         icon = _ICON.get(a["status"], "⚪")
         bits = [f"{icon} *{a['name']}* — `{a['status']}`"]
@@ -3679,7 +3680,9 @@ def cmd_apps(chat_id, user):
     # Buttons: each app gets Logs | Status | Restart (max ~8 apps to stay under TG limit)
     rows = []
     for a in apps[:8]:
-        jid = a["id"]
+        jid = a.get("id")
+        if jid is None:
+            continue
         name = (a.get("name") or "?")[:16]
         rows.append([
             {"text": f"📜 {name}", "callback_data": f"logs:{jid}"},
