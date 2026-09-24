@@ -3231,9 +3231,14 @@ def cmd_apps(chat_id, user):
     apps = bot_ops.list_apps(user["id"])
     queen = _user_is_queen(user)
     if not apps:
-        _send(chat_id, "You have no apps yet. `/code name` to create one."
-              + ("\n\n👑 You have queen access — `/projects` lists what you can "
-                 "deploy in one tap." if queen else ""))
+        _send(chat_id,
+              "You have no apps yet.\n\n"
+              "• `/code myapp` then paste code or a file\n"
+              "• `/import owner/repo` for a public GitHub repo\n"
+              "• `/guide start` for the cartoon how-to"
+              + ("\n\n👑 Queen access on — `/projects` for one-tap deploys."
+                 if queen else ""),
+              reply_markup=_help_guide_kb())
         return
     # This header used to read "5/3 running slots". Both halves were wrong:
     # len(apps) counts every app the account EVER created, stopped ones
@@ -3303,6 +3308,10 @@ def cmd_status(chat_id, user, ref=""):
         if info.get("env_keys"):
             # KEY NAMES ONLY — the values are bot tokens.
             txt.append(f"Env keys: `{', '.join(info['env_keys'])}`")
+        elif job.get("telegram_bot_detected"):
+            # Env empty is fine when the token lives in the file.
+            txt.append("Token: check source or Env — either place is enough "
+                       "(`/guide token`).")
         _send(chat_id, "\n".join(txt),
               reply_markup=_app_buttons(job["id"], bot_username=job.get("telegram_bot_username") or ""))
         return
@@ -3310,11 +3319,13 @@ def cmd_status(chat_id, user, ref=""):
     apps = bot_ops.list_apps(user["id"])
     running = [a for a in apps if a["status"] == "running"]
     mem = sum(a.get("mem_mb") or 0 for a in apps)
+    limit = bot_ops.effective_job_limit(user["id"])
+    crown = " 👑" if _user_is_queen(user) else ""
     _send(chat_id,
-          f"*{user['username']}*\n\n"
-          f"Apps: {len(apps)} · running {len(running)}/{bot_ops.MAX_JOBS_PER_USER}\n"
+          f"*{user.get('username') or 'you'}*{crown}\n\n"
+          f"Apps: {len(apps)} · running {len(running)}/{limit}\n"
           f"Memory in use: {round(mem)}MB\n\n"
-          "`/apps` for the list · `/status name` for one app")
+          "`/apps` for the list · `/status name` for one app · `/guide` how-tos")
 
 
 def cmd_logs(chat_id, user, ref):

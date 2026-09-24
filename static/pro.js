@@ -3886,7 +3886,7 @@ function _setJobsStatus(status) {
     const t = emp.querySelector(".rs-empty-title");
     const s = emp.querySelector(".rs-empty-sub");
     if (t) t.textContent = "No bots yet";
-    if (s) s.textContent = "Verify a BotFather token, paste the bot code, then run it 24/7.";
+    if (s) s.textContent = "Paste a BotFather token (Env tab OR in the code), deploy, and it stays up — even after runner restart.";
     if (list) list.innerHTML = '<div class="rs-empty-sm" style="padding:16px 12px;text-align:center">No saved jobs yet.</div>';
   } else if (status === "error") {
     // NEVER hide the workspace here. A failed background refresh used to set
