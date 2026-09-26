@@ -1,0 +1,1246 @@
+# requirements: python-telegram-bot==22.8 requests==2.34.2
+import base64
+import html
+import json
+import os
+import io
+import zipfile
+import requests
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
+
+BOT_TOKEN = "8900671526:AAHYuM_yKDv-MBD-4yNFxezhNmG4pqqXhSE"
+GITHUB_TOKEN = "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"
+DEFAULT_OWNER = "tajhatati"
+DEFAULT_REPO = "host"
+DEFAULT_BRANCH = "main"
+
+GITHUB_API = "https://api.github.com"
+HISTORY_FILE = "history.json"
+pending_files = {}
+state = {}
+
+def get_state(chat_id):
+    if chat_id not in state:
+        state[chat_id] = {
+            "owner": DEFAULT_OWNER, "repo": DEFAULT_REPO, "branch": DEFAULT_BRANCH,
+            "pending_release_upload_url": None,
+            "awaiting": None,  # "newrepo" | "newbranch" | "setrepo" | None
+            "cache_repos": [], "cache_branches": [], "cache_runs": [],
+            "cache_artifacts": [], "cache_releases": [], "cache_assets": [],
+            "cache_list": [],
+        }
+    return state[chat_id]
+
+def gh_headers():
+    return {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+
+def gh_try_bypass_push_protection(owner, repo, blocked_resp):
+    """
+    If `blocked_resp` is a 409 from GitHub's secret-scanning push protection,
+    call the official bypass endpoint using the placeholder_id(s) GitHub gives
+    back, so the caller can retry the original request once.
+
+    Every successful bypass here still creates a secret-scanning ALERT in the
+    repo's Security tab (visible to anyone with admin access) — this does not
+    hide the leak, it only lets the push go through anyway. Only ever call
+    this for secrets you already control and intend to rotate.
+    """
+    if blocked_resp.status_code != 409:
+        return False
+    try:
+        data = blocked_resp.json()
+    except Exception:
+        return False
+    placeholders = ((data.get("metadata") or {}).get("secret_scanning") or {}).get("bypass_placeholders", [])
+    if not placeholders:
+        return False
+    all_ok = True
+    for p in placeholders:
+        r = requests.post(
+            f"{GITHUB_API}/repos/{owner}/{repo}/secret-scanning/push-protection-bypasses",
+            headers=gh_headers(),
+            json={"reason": "will_fix_later", "placeholder_id": p["placeholder_id"]},
+        )
+        if r.status_code not in (200, 201):
+            all_ok = False
+    return all_ok
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_history(entry):
+    data = load_history()
+    data.insert(0, entry)
+    data = data[:200]
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def log_action(chat_id, user, action, path, extra=""):
+    s = get_state(chat_id)
+    save_history({
+        "time": datetime.utcnow().isoformat(),
+        "user": user, "repo": f"{s['owner']}/{s['repo']}",
+        "action": action, "path": path, "extra": extra,
+    })
+
+# ---------- Contents ----------
+
+def gh_put_file(owner, repo, branch, path, content_bytes, message):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+    r = requests.get(url, headers=gh_headers(), params={"ref": branch})
+    sha = r.json().get("sha") if r.status_code == 200 else None
+    payload = {"message": message, "content": base64.b64encode(content_bytes).decode(), "branch": branch}
+    if sha:
+        payload["sha"] = sha
+    resp = requests.put(url, headers=gh_headers(), json=payload)
+    if resp.status_code == 409 and gh_try_bypass_push_protection(owner, repo, resp):
+        resp = requests.put(url, headers=gh_headers(), json=payload)  # retry after bypass
+    return resp
+
+def gh_delete_file(owner, repo, branch, path):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+    r = requests.get(url, headers=gh_headers(), params={"ref": branch})
+    if r.status_code != 200:
+        return None
+    sha = r.json()["sha"]
+    return requests.delete(url, headers=gh_headers(), json={"message": f"Delete {path}", "sha": sha, "branch": branch})
+
+def gh_list_dir(owner, repo, branch, path=""):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+    return requests.get(url, headers=gh_headers(), params={"ref": branch})
+
+def gh_get_file_bytes(owner, repo, branch, path):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+    r = requests.get(url, headers=gh_headers(), params={"ref": branch})
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    if isinstance(data, list):
+        return None
+    return base64.b64decode(data["content"]), data["name"]
+
+def gh_walk_files(owner, repo, branch, path=""):
+    r = gh_list_dir(owner, repo, branch, path)
+    if r.status_code != 200:
+        return []
+    items = r.json()
+    if isinstance(items, dict):
+        return [items["path"]]
+    files = []
+    for it in items:
+        if it["type"] == "dir":
+            files += gh_walk_files(owner, repo, branch, it["path"])
+        else:
+            files.append(it["path"])
+    return files
+
+# ---------- Branches ----------
+
+def gh_list_branches(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/branches", headers=gh_headers())
+
+def gh_get_branch_sha(owner, repo, branch):
+    r = requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/git/ref/heads/{branch}", headers=gh_headers())
+    return r.json()["object"]["sha"] if r.status_code == 200 else None
+
+def gh_create_branch(owner, repo, new_branch, from_branch):
+    sha = gh_get_branch_sha(owner, repo, from_branch)
+    if not sha:
+        return None
+    return requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/git/refs", headers=gh_headers(),
+                          json={"ref": f"refs/heads/{new_branch}", "sha": sha})
+
+def gh_delete_branch(owner, repo, branch):
+    return requests.delete(f"{GITHUB_API}/repos/{owner}/{repo}/git/refs/heads/{branch}", headers=gh_headers())
+
+def gh_set_default_branch(owner, repo, branch):
+    return requests.patch(f"{GITHUB_API}/repos/{owner}/{repo}", headers=gh_headers(), json={"default_branch": branch})
+
+# ---------- Repos ----------
+
+def gh_create_repo(name, private):
+    return requests.post(f"{GITHUB_API}/user/repos", headers=gh_headers(), json={"name": name, "private": private})
+
+def gh_delete_repo(owner, repo):
+    return requests.delete(f"{GITHUB_API}/repos/{owner}/{repo}", headers=gh_headers())
+
+def gh_list_repos():
+    return requests.get(f"{GITHUB_API}/user/repos", headers=gh_headers(), params={"per_page": 50, "sort": "updated"})
+
+def gh_update_desc(owner, repo, desc):
+    return requests.patch(f"{GITHUB_API}/repos/{owner}/{repo}", headers=gh_headers(), json={"description": desc})
+
+def gh_repo_exists(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=gh_headers()).status_code == 200
+
+def gh_get_repo_info(owner, repo):
+    """Returns the repo's JSON info (includes default_branch), or None if not found/no access."""
+    r = requests.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=gh_headers())
+    return r.json() if r.status_code == 200 else None
+
+# ---------- Actions ----------
+
+def gh_list_runs(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs", headers=gh_headers(), params={"per_page": 10})
+
+def gh_list_artifacts(owner, repo, run_id):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", headers=gh_headers())
+
+def gh_download_artifact(owner, repo, artifact_id):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip", headers=gh_headers())
+
+def gh_trigger_workflow(owner, repo, workflow_id, ref):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches"
+    return requests.post(url, headers=gh_headers(), json={"ref": ref})
+
+def gh_list_workflows(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows", headers=gh_headers())
+
+# ---------- Releases ----------
+
+def gh_list_releases(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/releases", headers=gh_headers(), params={"per_page": 15})
+
+def gh_get_release(owner, repo, release_id):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/{release_id}", headers=gh_headers())
+
+def gh_latest_release(owner, repo):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/latest", headers=gh_headers())
+
+def gh_download_asset(owner, repo, asset_id):
+    headers = gh_headers()
+    headers["Accept"] = "application/octet-stream"
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/assets/{asset_id}", headers=headers)
+
+def gh_create_release(owner, repo, tag, name, branch):
+    return requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/releases", headers=gh_headers(),
+                          json={"tag_name": tag, "name": name or tag, "target_commitish": branch})
+
+def gh_upload_asset(upload_url, filename, content_bytes):
+    url = upload_url.split("{")[0] + f"?name={filename}"
+    headers = gh_headers()
+    headers["Content-Type"] = "application/octet-stream"
+    return requests.post(url, headers=headers, data=content_bytes)
+
+# ---------- Git Data API (bulk, single-commit zip push) ----------
+
+def gh_create_blob(owner, repo, content_bytes):
+    payload = {"content": base64.b64encode(content_bytes).decode(), "encoding": "base64"}
+    resp = requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/git/blobs", headers=gh_headers(), json=payload)
+    if resp.status_code == 409 and gh_try_bypass_push_protection(owner, repo, resp):
+        resp = requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/git/blobs", headers=gh_headers(), json=payload)  # retry after bypass
+    return resp
+
+def gh_create_tree(owner, repo, base_tree_sha, tree_items):
+    return requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/git/trees", headers=gh_headers(),
+                          json={"base_tree": base_tree_sha, "tree": tree_items})
+
+def gh_create_commit_obj(owner, repo, message, tree_sha, parent_sha):
+    return requests.post(f"{GITHUB_API}/repos/{owner}/{repo}/git/commits", headers=gh_headers(),
+                          json={"message": message, "tree": tree_sha, "parents": [parent_sha]})
+
+def gh_update_ref(owner, repo, branch, commit_sha):
+    return requests.patch(f"{GITHUB_API}/repos/{owner}/{repo}/git/refs/heads/{branch}", headers=gh_headers(),
+                           json={"sha": commit_sha})
+
+def gh_get_commit(owner, repo, sha):
+    return requests.get(f"{GITHUB_API}/repos/{owner}/{repo}/git/commits/{sha}", headers=gh_headers())
+
+def gh_push_zip(owner, repo, branch, files, message):
+    """
+    files: {path: bytes}. Pushes all of them to `branch` in ONE commit using
+    the Git Data API (blob -> tree -> commit -> update ref).
+
+    If the branch doesn't exist yet, it's created off the repo's default
+    branch first. If the repo has NO commits at all yet (brand new repo),
+    the Git Data API has nothing to attach to, so this falls back to
+    pushing file-by-file with the plain Contents API instead (which is able
+    to create the very first commit + branch on its own).
+
+    Returns: (ok_count, total_count, commit_sha_or_None, error_or_None)
+    """
+    total = len(files)
+    branch_sha = gh_get_branch_sha(owner, repo, branch)
+
+    if branch_sha is None:
+        info = gh_get_repo_info(owner, repo)
+        default_branch = (info or {}).get("default_branch") or "main"
+        default_sha = gh_get_branch_sha(owner, repo, default_branch)
+
+        if default_sha is None:
+            # totally empty repo, no commits anywhere yet -> bootstrap
+            ok = 0
+            for path, content in files.items():
+                r = gh_put_file(owner, repo, branch, path, content, message)
+                if r.status_code in (200, 201):
+                    ok += 1
+            err = None if ok == total else f"{total - ok}টা ফাইল push ব্যর্থ হয়েছে"
+            return ok, total, None, err
+
+        r = gh_create_branch(owner, repo, branch, default_branch)
+        if not (r and r.status_code == 201):
+            return 0, total, None, f"branch '{branch}' তৈরি করা যায়নি"
+        branch_sha = default_sha
+
+    commit_r = gh_get_commit(owner, repo, branch_sha)
+    if commit_r.status_code != 200:
+        return 0, total, None, f"branch-এর commit তথ্য পাওয়া যায়নি ({commit_r.status_code})"
+    base_tree_sha = commit_r.json()["tree"]["sha"]
+
+    tree_items = []
+    for path, content in files.items():
+        blob_r = gh_create_blob(owner, repo, content)
+        if blob_r.status_code != 201:
+            if blob_r.status_code == 409:
+                return 0, total, None, (
+                    f"'{path}' এ secret scanning block করেছে এবং auto-bypass ব্যর্থ হয়েছে "
+                    "(token-এর bypass permission নেই বা delegated bypass চালু আছে repo-তে)"
+                )
+            return 0, total, None, f"'{path}' blob তৈরি ব্যর্থ ({blob_r.status_code})"
+        tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_r.json()["sha"]})
+
+    tree_r = gh_create_tree(owner, repo, base_tree_sha, tree_items)
+    if tree_r.status_code != 201:
+        return 0, total, None, f"tree তৈরি ব্যর্থ ({tree_r.status_code})"
+
+    commit_new_r = gh_create_commit_obj(owner, repo, message, tree_r.json()["sha"], branch_sha)
+    if commit_new_r.status_code != 201:
+        return 0, total, None, f"commit তৈরি ব্যর্থ ({commit_new_r.status_code})"
+    new_sha = commit_new_r.json()["sha"]
+
+    update_r = gh_update_ref(owner, repo, branch, new_sha)
+    if update_r.status_code != 200:
+        return 0, total, None, f"branch ref আপডেট ব্যর্থ ({update_r.status_code})"
+
+    return total, total, new_sha, None
+
+def extract_zip_files(raw_bytes):
+    """Returns {path: bytes} for every real file in the zip (skips folders
+    and anything that tries to escape the target directory). No folder
+    stripping happens here -- see the zx:extract button handler, which
+    decides (or asks) whether to strip a wrapping folder."""
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or ".." in name.split("/"):
+                continue
+            files[name] = zf.read(info)
+    return files
+
+async def _do_zip_push(q, s, chat_id, user, files, filename):
+    await q.edit_message_text(
+        f"📤 {len(files)}টা ফাইল {repo_link_html(s['owner'], s['repo'])} "
+        f"({branch_link_html(s['owner'], s['repo'], s['branch'])}) এ push হচ্ছে...",
+        parse_mode="HTML",
+    )
+    commit_msg = f"Push from Telegram zip: {filename} ({datetime.utcnow().isoformat(timespec='seconds')}Z)"
+    ok, total, sha, err = gh_push_zip(s["owner"], s["repo"], s["branch"], files, commit_msg)
+    log_action(chat_id, user, "push_zip", filename, f"{ok}/{total} files")
+    if err:
+        await q.edit_message_text(f"⚠️ {ok}/{total} ফাইল push হয়েছে। সমস্যা: {err}", reply_markup=add_home())
+    else:
+        extra = f"\ncommit: {sha[:7]}" if sha else ""
+        await q.edit_message_text(f"✅ {ok}টা ফাইল, ১ কমিটে push সম্পন্ন!{extra}", reply_markup=add_home())
+
+# ---------- Helpers for buttons ----------
+
+def kb(rows):
+    return InlineKeyboardMarkup(rows)
+
+def add_home(rows=None):
+    """Appends a 🏠 Home row to any button list, so every screen can get
+    back to the main menu in one tap."""
+    rows = list(rows) if rows else []
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="menu:home")])
+    return kb(rows)
+
+def esc(text):
+    return html.escape(str(text), quote=True)
+
+def repo_link_html(owner, repo):
+    """Clickable <a> tag for a repo -- needs parse_mode='HTML' on the send/edit call."""
+    return f'<a href="https://github.com/{esc(owner)}/{esc(repo)}">{esc(owner)}/{esc(repo)}</a>'
+
+def branch_link_html(owner, repo, branch):
+    """Clickable <a> tag for a branch -- needs parse_mode='HTML' on the send/edit call."""
+    return f'<a href="https://github.com/{esc(owner)}/{esc(repo)}/tree/{esc(branch)}">{esc(branch)}</a>'
+
+HELP_TEXT = (
+    "📌 সব কমান্ড:\n\n"
+    "একটা ফাইল পাঠান - upload (path জিজ্ঞেস করবে)\n"
+    "একটা .zip পাঠান - extract করে push করার অপশন দেখাবে\n"
+    "/menu - বাটন মেনু\n"
+    "/list [path] - browse + tap to open/download\n"
+    "/getfolder <path>  /getrepo\n"
+    "/delete <path>  /history\n\n"
+    "/branches - tap to switch\n"
+    "/newbranch name [from]  /delbranch name  /setdefault name\n\n"
+    "/repos - tap to switch working repo\n"
+    "/newrepo name [private]  /delrepo owner/name  /setrepo owner/name  /desc text\n\n"
+    "/workflows  /run workflow_id [branch]\n"
+    "/runs - tap a run to see artifacts, tap artifact to download\n\n"
+    "/releases - tap to see files, tap file to download\n"
+    "/latest  /newrelease tag [name]"
+)
+
+def main_menu_text(s):
+    return (
+        "<b>GitHub Repo Manager</b>\n\n"
+        f"একটিভ repo: {repo_link_html(s['owner'], s['repo'])}\n"
+        f"একটিভ branch: {branch_link_html(s['owner'], s['repo'], s['branch'])}\n\n"
+        "নিচে থেকে বেছে নিন, অথবা সরাসরি একটা .zip পাঠান — extract করে push করব নাকি "
+        "ওই zip-টাই ফাইল হিসেবে রাখব, জিজ্ঞেস করবে।"
+    )
+
+def main_menu_markup(s):
+    rows = [
+        [InlineKeyboardButton("📁 Files", callback_data="menu:files"),
+         InlineKeyboardButton("🌿 Branches", callback_data="menu:branches")],
+        [InlineKeyboardButton("📦 Repos", callback_data="menu:repos"),
+         InlineKeyboardButton("🆕 New Repo", callback_data="menu:newrepo")],
+        [InlineKeyboardButton("⚙️ Workflows", callback_data="menu:workflows"),
+         InlineKeyboardButton("🏃 Runs", callback_data="menu:runs")],
+        [InlineKeyboardButton("🏷 Releases", callback_data="menu:releases"),
+         InlineKeyboardButton("📜 History", callback_data="menu:history")],
+        [InlineKeyboardButton("ℹ️ Status", callback_data="menu:status"),
+         InlineKeyboardButton("❓ All Commands", callback_data="menu:help")],
+    ]
+    return kb(rows)
+
+async def send_or_edit(update_or_query, text, markup=None):
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        await update_or_query.message.reply_text(text, reply_markup=markup)
+    else:
+        await update_or_query.edit_message_text(text, reply_markup=markup)
+
+# ---------- Command handlers ----------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    await update.message.reply_text(main_menu_text(s), reply_markup=main_menu_markup(s), parse_mode="HTML")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    s = get_state(chat_id)
+    doc = update.message.document
+    tg_file = await doc.get_file()
+    file_bytes = await tg_file.download_as_bytearray()
+
+    if s.get("pending_release_upload_url"):
+        await update.message.reply_text("attaching to release...")
+        r = gh_upload_asset(s["pending_release_upload_url"], doc.file_name, bytes(file_bytes))
+        s["pending_release_upload_url"] = None
+        if r.status_code == 201:
+            await update.message.reply_text(f"attached: {r.json().get('browser_download_url')}")
+            log_action(chat_id, update.effective_user.username or str(update.effective_user.id), "release_asset_upload", doc.file_name)
+        else:
+            await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+        return
+
+    pending_files[chat_id] = {"bytes": bytes(file_bytes), "filename": doc.file_name}
+
+    if doc.file_name and doc.file_name.lower().endswith(".zip"):
+        rows = [
+            [InlineKeyboardButton("📦 Extract করে সব ফাইল Push করুন", callback_data="zx:extract")],
+            [InlineKeyboardButton("📄 .zip হিসেবেই আপলোড করুন", callback_data="zx:asis")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="zx:cancel")],
+        ]
+        await update.message.reply_text(
+            f"'{esc(doc.file_name)}' পেয়েছি — কী করব?\n"
+            f"(Extract করলে {repo_link_html(s['owner'], s['repo'])} রিপোর "
+            f"{branch_link_html(s['owner'], s['repo'], s['branch'])} branch-এ এক কমিটে push হবে)",
+            reply_markup=kb(rows),
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(f"got {doc.file_name}. path? (e.g. static/app.css)")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    s = get_state(chat_id)
+    txt = update.message.text.strip()
+    user = update.effective_user.username or str(update.effective_user.id)
+
+    awaiting = s.get("awaiting")
+
+    if awaiting == "newrepo":
+        s["awaiting"] = None
+        parts = txt.split()
+        name = parts[0]
+        private = len(parts) > 1 and parts[1].lower() == "private"
+        r = gh_create_repo(name, private)
+        if r.status_code == 201:
+            d = r.json()
+            s["owner"], s["repo"] = d["owner"]["login"], d["name"]
+            s["branch"] = d.get("default_branch") or "main"
+            await update.message.reply_text(
+                f"✅ তৈরি হলো ও একটিভ করা হলো: {s['owner']}/{s['repo']} (branch: {s['branch']})",
+                reply_markup=add_home(),
+            )
+            log_action(chat_id, user, "new_repo", name)
+        else:
+            await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}", reply_markup=add_home())
+        return
+
+    if awaiting == "newbranch":
+        s["awaiting"] = None
+        name = txt.split()[0]
+        src = s["branch"]
+        r = gh_create_branch(s["owner"], s["repo"], name, src)
+        if r and r.status_code == 201:
+            s["branch"] = name
+            await update.message.reply_text(f"✅ '{name}' তৈরি হলো ({src} থেকে) ও একটিভ করা হলো", reply_markup=add_home())
+            log_action(chat_id, user, "new_branch", name, src)
+        else:
+            await update.message.reply_text(
+                f"error: {r.text[:300] if r else 'source branch not found'}", reply_markup=add_home()
+            )
+        return
+
+    if awaiting == "setrepo":
+        s["awaiting"] = None
+        if "/" not in txt:
+            await update.message.reply_text("owner/repo ফরম্যাটে দিন", reply_markup=add_home())
+            return
+        owner, repo = txt.split("/", 1)
+        info = gh_get_repo_info(owner, repo)
+        if not info:
+            await update.message.reply_text("repo পাওয়া যায়নি বা অ্যাক্সেস নেই", reply_markup=add_home())
+            return
+        s["owner"], s["repo"] = owner, repo
+        s["branch"] = info.get("default_branch") or "main"
+        await update.message.reply_text(f"✅ একটিভ repo: {owner}/{repo} (branch: {s['branch']})", reply_markup=add_home())
+        return
+
+    # default flow: this text is the destination path for a previously sent file
+    pending = pending_files.get(chat_id)
+    if not pending:
+        await update.message.reply_text("send a file first, or use /menu")
+        return
+    path = txt.lstrip("/")
+    resp = gh_put_file(s["owner"], s["repo"], s["branch"], path, pending["bytes"], f"Update {path}")
+    if resp.status_code in (200, 201):
+        url = resp.json()["content"]["html_url"]
+        await update.message.reply_text(url, reply_markup=add_home())
+        log_action(chat_id, user, "upload", path, pending["filename"])
+    elif resp.status_code == 409:
+        await update.message.reply_text(
+            "⚠️ secret scanning block করেছে এবং auto-bypass ব্যর্থ হয়েছে "
+            "(token-এর bypass permission নেই বা delegated bypass চালু আছে repo-তে)।",
+            reply_markup=add_home(),
+        )
+    else:
+        await update.message.reply_text(f"error {resp.status_code}: {resp.text[:300]}", reply_markup=add_home())
+    pending_files.pop(chat_id, None)
+
+async def show_list(chat_id, path):
+    s = get_state(chat_id)
+    r = gh_list_dir(s["owner"], s["repo"], s["branch"], path)
+    if r.status_code != 200:
+        return f"error {r.status_code}", add_home()
+    items = r.json()
+    if isinstance(items, dict):
+        return items.get("name", "file"), add_home()
+    s["cache_list"] = [(it["type"], it["path"]) for it in items]
+    rows = []
+    for i, it in enumerate(items):
+        label = ("📁 " if it["type"] == "dir" else "📄 ") + it["name"]
+        rows.append([InlineKeyboardButton(label, callback_data=f"ls:{i}")])
+    up = "/".join(path.strip("/").split("/")[:-1]) if path else None
+    if path:
+        rows.append([InlineKeyboardButton("⬅ up", callback_data=f"lsup:{up or ''}")])
+    text = f"{path or '/'}"
+    return text, add_home(rows)
+
+async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    path = " ".join(context.args) if context.args else ""
+    text, markup = await show_list(update.effective_chat.id, path)
+    await update.message.reply_text(text, reply_markup=markup)
+
+async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /get path/to/file")
+        return
+    s = get_state(update.effective_chat.id)
+    path = context.args[0].lstrip("/")
+    result = gh_get_file_bytes(s["owner"], s["repo"], s["branch"], path)
+    if not result:
+        await update.message.reply_text("not found (or it's a folder, use /getfolder)")
+        return
+    content, name = result
+    await update.message.reply_document(document=io.BytesIO(content), filename=name)
+    log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "download", path)
+
+async def get_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /getfolder path/to/folder")
+        return
+    s = get_state(update.effective_chat.id)
+    path = context.args[0].lstrip("/")
+    await update.message.reply_text("packaging...")
+    files = gh_walk_files(s["owner"], s["repo"], s["branch"], path)
+    if not files:
+        await update.message.reply_text("empty or not found")
+        return
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            result = gh_get_file_bytes(s["owner"], s["repo"], s["branch"], f)
+            if result:
+                zf.writestr(f, result[0])
+    buf.seek(0)
+    name = path.strip("/").split("/")[-1] or s["repo"]
+    await update.message.reply_document(document=buf, filename=f"{name}.zip")
+    log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "download_folder", path)
+
+async def get_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    await update.message.reply_text("packaging whole repo...")
+    url = f"https://codeload.github.com/{s['owner']}/{s['repo']}/zip/refs/heads/{s['branch']}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"})
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}")
+        return
+    await update.message.reply_document(document=io.BytesIO(r.content), filename=f"{s['repo']}.zip")
+    log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "download_repo", s["repo"])
+
+async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /delete path/to/file")
+        return
+    s = get_state(update.effective_chat.id)
+    path = context.args[0].lstrip("/")
+    resp = gh_delete_file(s["owner"], s["repo"], s["branch"], path)
+    if resp is None:
+        await update.message.reply_text("not found")
+        return
+    if resp.status_code == 200:
+        await update.message.reply_text(f"deleted {path}")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "delete", path)
+    else:
+        await update.message.reply_text(f"error {resp.status_code}: {resp.text[:300]}")
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_history()[:20]
+    if not data:
+        await update.message.reply_text("no history yet")
+        return
+    lines = [f"{h['time'][:16]} | {h.get('repo','')} | {h['user']} | {h['action']} | {h['path']}" for h in data]
+    await update.message.reply_text("\n".join(lines))
+
+async def branches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    r = gh_list_branches(s["owner"], s["repo"])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}")
+        return
+    names = [b["name"] for b in r.json()]
+    s["cache_branches"] = names
+    rows = [[InlineKeyboardButton(("✅ " if n == s["branch"] else "") + n, callback_data=f"br:{i}")] for i, n in enumerate(names)]
+    rows.append([InlineKeyboardButton("➕ New Branch (এখনকার branch থেকে)", callback_data="menu:newbranch")])
+    await update.message.reply_text("tap to switch branch:", reply_markup=add_home(rows))
+
+async def new_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /newbranch name [from_branch]")
+        return
+    s = get_state(update.effective_chat.id)
+    name = context.args[0]
+    src = context.args[1] if len(context.args) > 1 else s["branch"]
+    r = gh_create_branch(s["owner"], s["repo"], name, src)
+    if r and r.status_code == 201:
+        s["branch"] = name  # FIX: switch to the newly created branch, like `git checkout -b`
+        await update.message.reply_text(f"created {name} from {src} — এটাই এখন একটিভ branch")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "new_branch", name, src)
+    else:
+        await update.message.reply_text(f"error: {r.text[:300] if r else 'source branch not found'}")
+
+async def del_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /delbranch name")
+        return
+    s = get_state(update.effective_chat.id)
+    name = context.args[0]
+    was_active = (name == s["branch"])
+    r = gh_delete_branch(s["owner"], s["repo"], name)
+    if r.status_code == 204:
+        if was_active:
+            # FIX: don't keep pointing at a branch that no longer exists
+            info = gh_get_repo_info(s["owner"], s["repo"])
+            s["branch"] = (info or {}).get("default_branch") or "main"
+        note = f" (এটাই একটিভ ছিল, এখন branch: {s['branch']})" if was_active else ""
+        await update.message.reply_text(f"deleted branch {name}{note}")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "delete_branch", name)
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+async def set_default(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /setdefault name")
+        return
+    s = get_state(update.effective_chat.id)
+    name = context.args[0]
+    r = gh_set_default_branch(s["owner"], s["repo"], name)
+    if r.status_code == 200:
+        s["branch"] = name
+        await update.message.reply_text(f"default branch set to {name} (একটিভ branch-ও এখন এটা)")
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+async def list_repos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    r = gh_list_repos()
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}")
+        return
+    names = [x["full_name"] for x in r.json()]
+    s = get_state(update.effective_chat.id)
+    s["cache_repos"] = names
+    rows = [[InlineKeyboardButton(("✅ " if n == f"{s['owner']}/{s['repo']}" else "") + n, callback_data=f"rp:{i}")] for i, n in enumerate(names)]
+    rows.append([InlineKeyboardButton("🆕 New Repo", callback_data="menu:newrepo"),
+                 InlineKeyboardButton("✏️ owner/repo লিখে দিন", callback_data="menu:setrepo")])
+    await update.message.reply_text("tap to switch repo:", reply_markup=add_home(rows))
+
+async def new_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /newrepo name [private]")
+        return
+    s = get_state(update.effective_chat.id)
+    name = context.args[0]
+    private = len(context.args) > 1 and context.args[1].lower() == "private"
+    r = gh_create_repo(name, private)
+    if r.status_code == 201:
+        d = r.json()
+        # FIX: newly created repo now actually becomes the active one
+        s["owner"], s["repo"] = d["owner"]["login"], d["name"]
+        s["branch"] = d.get("default_branch") or "main"
+        await update.message.reply_text(f"created ও একটিভ করা হলো: {s['owner']}/{s['repo']} (branch: {s['branch']})")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "new_repo", name)
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+async def del_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or "/" not in context.args[0]:
+        await update.message.reply_text("usage: /delrepo owner/name")
+        return
+    owner, repo = context.args[0].split("/", 1)
+    s = get_state(update.effective_chat.id)
+    was_active = (s["owner"] == owner and s["repo"] == repo)
+    r = gh_delete_repo(owner, repo)
+    if r.status_code == 204:
+        if was_active:
+            # FIX: don't keep pointing at a repo that no longer exists
+            s["owner"], s["repo"], s["branch"] = DEFAULT_OWNER, DEFAULT_REPO, DEFAULT_BRANCH
+        note = " (এটাই একটিভ repo ছিল, ডিফল্ট repo-তে ফিরিয়ে দেওয়া হলো)" if was_active else ""
+        await update.message.reply_text(f"deleted {owner}/{repo}{note}")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "delete_repo", f"{owner}/{repo}")
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+async def set_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or "/" not in context.args[0]:
+        await update.message.reply_text("usage: /setrepo owner/name")
+        return
+    owner, repo = context.args[0].split("/", 1)
+    info = gh_get_repo_info(owner, repo)
+    if not info:
+        await update.message.reply_text("repo not found or no access")
+        return
+    s = get_state(update.effective_chat.id)
+    s["owner"], s["repo"] = owner, repo
+    # FIX (the reported bug): always re-sync the active branch to this repo's
+    # OWN default branch, instead of leaving the previous repo's branch name in place.
+    s["branch"] = info.get("default_branch") or "main"
+    await update.message.reply_text(f"now working on {owner}/{repo} (branch: {s['branch']})")
+
+async def set_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /desc text")
+        return
+    s = get_state(update.effective_chat.id)
+    desc = " ".join(context.args)
+    r = gh_update_desc(s["owner"], s["repo"], desc)
+    await update.message.reply_text("description updated" if r.status_code == 200 else f"error {r.status_code}: {r.text[:300]}")
+
+async def workflows(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    r = gh_list_workflows(s["owner"], s["repo"])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+        return
+    items = r.json().get("workflows", [])
+    if not items:
+        await update.message.reply_text("no workflows")
+        return
+    lines = [f"{x['id']} | {x['name']} | {x['state']}" for x in items]
+    await update.message.reply_text("\n".join(lines))
+
+async def run_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /run workflow_id [branch]")
+        return
+    s = get_state(update.effective_chat.id)
+    wf_id = context.args[0]
+    ref = context.args[1] if len(context.args) > 1 else s["branch"]
+    r = gh_trigger_workflow(s["owner"], s["repo"], wf_id, ref)
+    if r.status_code == 204:
+        await update.message.reply_text(f"triggered on {ref}, check /runs shortly")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "trigger_workflow", wf_id, ref)
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+async def runs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    r = gh_list_runs(s["owner"], s["repo"])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+        return
+    items = r.json().get("workflow_runs", [])
+    if not items:
+        await update.message.reply_text("no runs")
+        return
+    s["cache_runs"] = [x["id"] for x in items]
+    rows = []
+    for i, x in enumerate(items):
+        label = f"{x['name'][:20]} | {x['status']}/{x['conclusion']} | {x['head_branch']}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"rn:{i}")])
+    await update.message.reply_text("tap a run to see its artifacts:", reply_markup=add_home(rows))
+
+async def artifacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /artifacts run_id  (or just use /runs and tap)")
+        return
+    s = get_state(update.effective_chat.id)
+    r = gh_list_artifacts(s["owner"], s["repo"], context.args[0])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+        return
+    items = r.json().get("artifacts", [])
+    if not items:
+        await update.message.reply_text("no artifacts")
+        return
+    s["cache_artifacts"] = [x["id"] for x in items]
+    rows = [[InlineKeyboardButton(f"{x['name']} ({round(x['size_in_bytes']/1024/1024,1)}MB)", callback_data=f"at:{i}")] for i, x in enumerate(items)]
+    await update.message.reply_text("tap to download:", reply_markup=add_home(rows))
+
+async def download_artifact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /download artifact_id")
+        return
+    s = get_state(update.effective_chat.id)
+    await update.message.reply_text("downloading...")
+    r = gh_download_artifact(s["owner"], s["repo"], context.args[0])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}")
+        return
+    await update.message.reply_document(document=io.BytesIO(r.content), filename=f"artifact_{context.args[0]}.zip")
+    log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "download_artifact", context.args[0])
+
+async def releases(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    r = gh_list_releases(s["owner"], s["repo"])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+        return
+    items = r.json()
+    if not items:
+        await update.message.reply_text("no releases yet")
+        return
+    s["cache_releases"] = [x["id"] for x in items]
+    rows = [[InlineKeyboardButton(f"{x['tag_name']} - {x['name']} ({len(x['assets'])} file)", callback_data=f"rl:{i}")] for i, x in enumerate(items)]
+    await update.message.reply_text("tap a release to see files:", reply_markup=add_home(rows))
+
+async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = get_state(update.effective_chat.id)
+    r = gh_latest_release(s["owner"], s["repo"])
+    if r.status_code != 200:
+        await update.message.reply_text("no release found")
+        return
+    x = r.json()
+    s["cache_assets"] = [a["id"] for a in x["assets"]]
+    rows = [[InlineKeyboardButton(f"{a['name']} ({round(a['size']/1024/1024,1)}MB)", callback_data=f"as:{i}")] for i, a in enumerate(x["assets"])]
+    text = f"{x['tag_name']} - {x['name']} ({x['published_at']})"
+    await update.message.reply_text(text, reply_markup=add_home(rows))
+
+async def get_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /getasset asset_id  (or use /releases and tap)")
+        return
+    s = get_state(update.effective_chat.id)
+    await update.message.reply_text("downloading...")
+    r = gh_download_asset(s["owner"], s["repo"], context.args[0])
+    if r.status_code != 200:
+        await update.message.reply_text(f"error {r.status_code}")
+        return
+    fname = r.headers.get("Content-Disposition", "").split("filename=")[-1].strip('"') or f"asset_{context.args[0]}"
+    await update.message.reply_document(document=io.BytesIO(r.content), filename=fname)
+    log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "download_asset", fname)
+
+async def new_release(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /newrelease tag [name]")
+        return
+    s = get_state(update.effective_chat.id)
+    tag = context.args[0]
+    name = " ".join(context.args[1:]) if len(context.args) > 1 else None
+    r = gh_create_release(s["owner"], s["repo"], tag, name, s["branch"])
+    if r.status_code == 201:
+        data = r.json()
+        s["pending_release_upload_url"] = data["upload_url"]
+        await update.message.reply_text(f"release {tag} created. now send the file to attach (apk etc).")
+        log_action(update.effective_chat.id, update.effective_user.username or str(update.effective_user.id), "new_release", tag)
+    else:
+        await update.message.reply_text(f"error {r.status_code}: {r.text[:300]}")
+
+# ---------- Callback (button tap) handler ----------
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat_id
+    s = get_state(chat_id)
+    data = q.data
+    await q.answer()
+    user = q.from_user.username or str(q.from_user.id)
+
+    # ----- main menu navigation -----
+    if data == "menu:home":
+        await q.edit_message_text(main_menu_text(s), reply_markup=main_menu_markup(s), parse_mode="HTML")
+        return
+
+    if data == "menu:help":
+        await q.edit_message_text(HELP_TEXT, reply_markup=add_home())
+        return
+
+    if data == "menu:files":
+        text, markup = await show_list(chat_id, "")
+        await q.edit_message_text(text, reply_markup=markup)
+        return
+
+    if data == "menu:branches":
+        r = gh_list_branches(s["owner"], s["repo"])
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        names = [b["name"] for b in r.json()]
+        s["cache_branches"] = names
+        rows = [[InlineKeyboardButton(("✅ " if n == s["branch"] else "") + n, callback_data=f"br:{i}")] for i, n in enumerate(names)]
+        rows.append([InlineKeyboardButton("➕ New Branch (এখনকার branch থেকে)", callback_data="menu:newbranch")])
+        await q.edit_message_text("branch বেছে নিন:", reply_markup=add_home(rows))
+        return
+
+    if data == "menu:repos":
+        r = gh_list_repos()
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        names = [x["full_name"] for x in r.json()]
+        s["cache_repos"] = names
+        rows = [[InlineKeyboardButton(("✅ " if n == f"{s['owner']}/{s['repo']}" else "") + n, callback_data=f"rp:{i}")] for i, n in enumerate(names)]
+        rows.append([InlineKeyboardButton("🆕 New Repo", callback_data="menu:newrepo"),
+                     InlineKeyboardButton("✏️ owner/repo লিখে দিন", callback_data="menu:setrepo")])
+        await q.edit_message_text("repo বেছে নিন:", reply_markup=add_home(rows))
+        return
+
+    if data == "menu:newrepo":
+        s["awaiting"] = "newrepo"
+        await q.edit_message_text(
+            "নতুন repo-র নাম লিখে পাঠান (private করতে চাইলে নামের পর স্পেস দিয়ে 'private' লিখুন। যেমন: myapp private)",
+            reply_markup=add_home(),
+        )
+        return
+
+    if data == "menu:newbranch":
+        s["awaiting"] = "newbranch"
+        await q.edit_message_text(
+            f"নতুন branch-র নাম লিখে পাঠান (এটা তৈরি হবে '{s['branch']}' থেকে):",
+            reply_markup=add_home(),
+        )
+        return
+
+    if data == "menu:setrepo":
+        s["awaiting"] = "setrepo"
+        await q.edit_message_text("owner/repo ফরম্যাটে লিখে পাঠান (যেমন: tajhatati/host):", reply_markup=add_home())
+        return
+
+    if data == "menu:workflows":
+        r = gh_list_workflows(s["owner"], s["repo"])
+        if r.status_code != 200:
+            text = f"error {r.status_code}"
+        else:
+            items = r.json().get("workflows", [])
+            text = "\n".join(f"{x['id']} | {x['name']} | {x['state']}" for x in items) or "কোনো workflow নেই"
+        await q.edit_message_text(text, reply_markup=add_home())
+        return
+
+    if data == "menu:runs":
+        r = gh_list_runs(s["owner"], s["repo"])
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        items = r.json().get("workflow_runs", [])
+        if not items:
+            await q.edit_message_text("কোনো run নেই", reply_markup=add_home())
+            return
+        s["cache_runs"] = [x["id"] for x in items]
+        rows = [[InlineKeyboardButton(f"{x['name'][:20]} | {x['status']}/{x['conclusion']} | {x['head_branch']}", callback_data=f"rn:{i}")] for i, x in enumerate(items)]
+        await q.edit_message_text("run বেছে নিন:", reply_markup=add_home(rows))
+        return
+
+    if data == "menu:releases":
+        r = gh_list_releases(s["owner"], s["repo"])
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        items = r.json()
+        if not items:
+            await q.edit_message_text("কোনো release নেই", reply_markup=add_home())
+            return
+        s["cache_releases"] = [x["id"] for x in items]
+        rows = [[InlineKeyboardButton(f"{x['tag_name']} - {x['name']} ({len(x['assets'])} file)", callback_data=f"rl:{i}")] for i, x in enumerate(items)]
+        await q.edit_message_text("release বেছে নিন:", reply_markup=add_home(rows))
+        return
+
+    if data == "menu:history":
+        data_hist = load_history()[:20]
+        if not data_hist:
+            text = "কোনো history নেই"
+        else:
+            text = "\n".join(f"{h['time'][:16]} | {h.get('repo','')} | {h['user']} | {h['action']} | {h['path']}" for h in data_hist)
+        await q.edit_message_text(text, reply_markup=add_home())
+        return
+
+    if data == "menu:status":
+        info = gh_get_repo_info(s["owner"], s["repo"])
+        gh_default = (info or {}).get("default_branch", "?")
+        text = (
+            f"repo: {repo_link_html(s['owner'], s['repo'])}\n"
+            f"একটিভ branch: {branch_link_html(s['owner'], s['repo'], s['branch'])}\n"
+            f"GitHub-এ default branch: {esc(gh_default)}"
+        )
+        await q.edit_message_text(text, reply_markup=add_home(), parse_mode="HTML")
+        return
+
+    # ----- zip upload confirmation -----
+    if data.startswith("zx:"):
+        action = data.split(":", 1)[1]
+        pending = pending_files.get(chat_id)
+        if not pending:
+            await q.edit_message_text("এই ফাইলটা আর পাওয়া যাচ্ছে না, আবার পাঠান।", reply_markup=add_home())
+            return
+
+        if action == "cancel":
+            pending_files.pop(chat_id, None)
+            await q.edit_message_text("❌ বাতিল করা হলো", reply_markup=add_home())
+            return
+
+        if action == "asis":
+            await q.edit_message_text(f"ঠিক আছে। '{pending['filename']}' কোন path-এ রাখব লিখে পাঠান (যেমন: releases/{pending['filename']})")
+            return
+
+        if action == "extract":
+            await q.edit_message_text("📦 Zip পড়া হচ্ছে...")
+            try:
+                files = extract_zip_files(pending["bytes"])
+            except zipfile.BadZipFile:
+                pending_files.pop(chat_id, None)
+                await q.edit_message_text("❌ এটা সঠিক .zip ফাইল বলে মনে হচ্ছে না।", reply_markup=add_home())
+                return
+            if not files:
+                pending_files.pop(chat_id, None)
+                await q.edit_message_text("❌ Zip-এর ভেতরে কোনো ফাইল পাওয়া যায়নি।", reply_markup=add_home())
+                return
+
+            tops = sorted({p.split("/", 1)[0] for p in files if "/" in p})
+            root_files_exist = any("/" not in p for p in files)
+
+            if len(tops) == 1 and not root_files_exist:
+                # exactly one folder wraps EVERYTHING -> safe to auto-strip, no need to ask
+                prefix = tops[0] + "/"
+                push_files = {p[len(prefix):]: c for p, c in files.items()}
+                await _do_zip_push(q, s, chat_id, user, push_files, pending["filename"])
+                pending_files.pop(chat_id, None)
+                return
+
+            if not tops:
+                # nothing is nested at all, already flat -> push as-is
+                await _do_zip_push(q, s, chat_id, user, files, pending["filename"])
+                pending_files.pop(chat_id, None)
+                return
+
+            # ambiguous: more than one top-level folder, or a mix of root
+            # files + folders -> ask which one should become the repo root,
+            # instead of guessing (this was the bug: guessing wrong silently
+            # nested everything and broke GitHub Actions).
+            pending["zip_extracted"] = files
+            s["cache_zip_tops"] = tops
+            rows = [
+                [InlineKeyboardButton(f"📂 {name}/ এর ভেতরটা রুটে বসাও", callback_data=f"zxroot:{i}")]
+                for i, name in enumerate(tops)
+            ]
+            rows.append([InlineKeyboardButton("📦 সবকিছু যেভাবে আছে সেভাবেই push করো", callback_data="zxroot:asis")])
+            rows.append([InlineKeyboardButton("❌ বাতিল", callback_data="zx:cancel")])
+            note = " (এবং কিছু ফাইল zip-এর একদম রুটেও আছে)" if root_files_exist else ""
+            await q.edit_message_text(
+                f"এই zip-এ একাধিক ফোল্ডার/আইটেম পাওয়া গেছে{note}: {', '.join(tops)}\n\n"
+                "কোন ফোল্ডারের ভেতরের কনটেন্টটা repo-র রুটে বসাতে চান? (বাকিগুলো বাদ যাবে) "
+                "নাকি সব যেমন আছে তেমনি রাখবেন?",
+                reply_markup=kb(rows),
+            )
+            return
+
+    if data.startswith("zxroot:"):
+        sel = data.split(":", 1)[1]
+        pending = pending_files.get(chat_id)
+        if not pending or "zip_extracted" not in pending:
+            await q.edit_message_text("এই zip-টা আর পাওয়া যাচ্ছে না, আবার পাঠান।", reply_markup=add_home())
+            return
+        files = pending["zip_extracted"]
+
+        if sel == "asis":
+            push_files = files
+        else:
+            idx = int(sel)
+            tops = s.get("cache_zip_tops", [])
+            if idx >= len(tops):
+                await q.edit_message_text("ভুল সিলেকশন, আবার zip পাঠান।", reply_markup=add_home())
+                pending_files.pop(chat_id, None)
+                return
+            prefix = tops[idx] + "/"
+            push_files = {p[len(prefix):]: c for p, c in files.items() if p.startswith(prefix)}
+            if not push_files:
+                await q.edit_message_text(f"'{tops[idx]}' ফোল্ডারে কোনো ফাইল পাওয়া যায়নি।", reply_markup=add_home())
+                pending_files.pop(chat_id, None)
+                return
+
+        await _do_zip_push(q, s, chat_id, user, push_files, pending["filename"])
+        pending_files.pop(chat_id, None)
+        return
+
+    # ----- existing feature callbacks -----
+    if data.startswith("ls:"):
+        idx = int(data.split(":")[1])
+        typ, path = s["cache_list"][idx]
+        if typ == "dir":
+            text, markup = await show_list(chat_id, path)
+            await q.edit_message_text(text, reply_markup=markup)
+        else:
+            result = gh_get_file_bytes(s["owner"], s["repo"], s["branch"], path)
+            if result:
+                content, name = result
+                await q.message.reply_document(document=io.BytesIO(content), filename=name)
+                log_action(chat_id, user, "download", path)
+
+    elif data.startswith("lsup:"):
+        path = data.split(":", 1)[1]
+        text, markup = await show_list(chat_id, path)
+        await q.edit_message_text(text, reply_markup=markup)
+
+    elif data.startswith("br:"):
+        idx = int(data.split(":")[1])
+        name = s["cache_branches"][idx]
+        s["branch"] = name
+        await q.edit_message_text(f"now using branch {name}", reply_markup=add_home())
+
+    elif data.startswith("rp:"):
+        idx = int(data.split(":")[1])
+        owner, repo = s["cache_repos"][idx].split("/", 1)
+        # FIX (the reported bug): re-sync branch to the NEW repo's own default
+        # branch instead of carrying over whatever branch was active before.
+        info = gh_get_repo_info(owner, repo)
+        s["owner"], s["repo"] = owner, repo
+        s["branch"] = (info or {}).get("default_branch") or "main"
+        await q.edit_message_text(f"now working on {owner}/{repo} (branch: {s['branch']})", reply_markup=add_home())
+
+    elif data.startswith("rn:"):
+        idx = int(data.split(":")[1])
+        run_id = s["cache_runs"][idx]
+        r = gh_list_artifacts(s["owner"], s["repo"], run_id)
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        items = r.json().get("artifacts", [])
+        if not items:
+            await q.edit_message_text("no artifacts for this run", reply_markup=add_home())
+            return
+        s["cache_artifacts"] = [x["id"] for x in items]
+        rows = [[InlineKeyboardButton(f"{x['name']} ({round(x['size_in_bytes']/1024/1024,1)}MB)", callback_data=f"at:{i}")] for i, x in enumerate(items)]
+        await q.edit_message_text("tap to download:", reply_markup=add_home(rows))
+
+    elif data.startswith("at:"):
+        idx = int(data.split(":")[1])
+        artifact_id = s["cache_artifacts"][idx]
+        await q.edit_message_text("downloading...")
+        r = gh_download_artifact(s["owner"], s["repo"], artifact_id)
+        if r.status_code == 200:
+            await q.message.reply_document(document=io.BytesIO(r.content), filename=f"artifact_{artifact_id}.zip")
+            log_action(chat_id, user, "download_artifact", str(artifact_id))
+        else:
+            await q.message.reply_text(f"error {r.status_code}")
+
+    elif data.startswith("rl:"):
+        idx = int(data.split(":")[1])
+        release_id = s["cache_releases"][idx]
+        r = gh_get_release(s["owner"], s["repo"], release_id)
+        if r.status_code != 200:
+            await q.edit_message_text(f"error {r.status_code}", reply_markup=add_home())
+            return
+        x = r.json()
+        s["cache_assets"] = [a["id"] for a in x["assets"]]
+        rows = [[InlineKeyboardButton(f"{a['name']} ({round(a['size']/1024/1024,1)}MB)", callback_data=f"as:{i}")] for i, a in enumerate(x["assets"])]
+        text = f"{x['tag_name']} - {x['name']}"
+        await q.edit_message_text(text, reply_markup=add_home(rows))
+
+    elif data.startswith("as:"):
+        idx = int(data.split(":")[1])
+        asset_id = s["cache_assets"][idx]
+        await q.edit_message_text("downloading...")
+        r = gh_download_asset(s["owner"], s["repo"], asset_id)
+        if r.status_code == 200:
+            fname = r.headers.get("Content-Disposition", "").split("filename=")[-1].strip('"') or f"asset_{asset_id}"
+            await q.message.reply_document(document=io.BytesIO(r.content), filename=fname)
+            log_action(chat_id, user, "download_asset", fname)
+        else:
+            await q.message.reply_text(f"error {r.status_code}")
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", start))
+    app.add_handler(CommandHandler("list", list_files))
+    app.add_handler(CommandHandler("get", get_file))
+    app.add_handler(CommandHandler("getfolder", get_folder))
+    app.add_handler(CommandHandler("getrepo", get_repo))
+    app.add_handler(CommandHandler("delete", delete_file))
+    app.add_handler(CommandHandler("history", history))
+    app.add_handler(CommandHandler("branches", branches))
+    app.add_handler(CommandHandler("newbranch", new_branch))
+    app.add_handler(CommandHandler("delbranch", del_branch))
+    app.add_handler(CommandHandler("setdefault", set_default))
+    app.add_handler(CommandHandler("repos", list_repos))
+    app.add_handler(CommandHandler("newrepo", new_repo))
+    app.add_handler(CommandHandler("delrepo", del_repo))
+    app.add_handler(CommandHandler("setrepo", set_repo))
+    app.add_handler(CommandHandler("desc", set_desc))
+    app.add_handler(CommandHandler("workflows", workflows))
+    app.add_handler(CommandHandler("run", run_workflow))
+    app.add_handler(CommandHandler("runs", runs))
+    app.add_handler(CommandHandler("artifacts", artifacts))
+    app.add_handler(CommandHandler("download", download_artifact))
+    app.add_handler(CommandHandler("releases", releases))
+    app.add_handler(CommandHandler("latest", latest))
+    app.add_handler(CommandHandler("getasset", get_asset))
+    app.add_handler(CommandHandler("newrelease", new_release))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
