@@ -644,7 +644,8 @@ def jobs_recent(limit: int = 8, offset: int = 0) -> list:
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT j.id, j.name, j.language, j.runner_job_id, u.username AS owner "
+            "SELECT j.id, j.name, j.language, j.runner_job_id, "
+            "u.username AS owner, u.id AS owner_id "
             "FROM jobs j JOIN users u ON u.id = j.user_id "
             "ORDER BY j.id DESC LIMIT ? OFFSET ?", (limit, offset)
         ).fetchall()
@@ -657,6 +658,7 @@ def jobs_recent(limit: int = 8, offset: int = 0) -> list:
         d = dict(r)
         info = live.get(d.get("runner_job_id")) or {}
         d["live_status"] = info.get("status") or "unknown"
+        d["restart_locked_s"] = info.get("restart_locked_s") or 0
         out.append(d)
     return out, total
 
@@ -723,6 +725,7 @@ def job_detail(job_id: int) -> dict:
         mem_limit_mb=info.get("mem_limit_mb"),
         runner_url=(info.get("worker_url") or d.get("worker_url") or ""),
         live_repo_commit=info.get("repo_commit"),
+        restart_locked_s=info.get("restart_locked_s") or 0,
     )
     return d
 
@@ -760,6 +763,16 @@ def admin_logs(job_id: int, lines: int = 40) -> dict:
     if not row:
         return {"ok": False, "error": "No such job."}
     return bot_ops.logs(row["user_id"], str(row["id"]), lines=lines)
+
+
+def admin_unlock_job(job_id: int) -> dict:
+    """Clear an abuse-triggered /restart lock early (false positive, or the
+    owner already fixed the bug and the admin wants to let them straight
+    back in instead of waiting out the cooldown)."""
+    row = admin_find_job(job_id)
+    if not row:
+        return {"ok": False, "error": "No such job."}
+    return bot_ops.admin_unlock(row)
 
 
 # ── Audit log — mirrors GET /admin/audit-log ────────────────────────────
