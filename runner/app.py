@@ -520,6 +520,14 @@ JOB_SOFT_OVER_MB = int(os.getenv("JOB_SOFT_OVER_MB", "32"))
 # with reason "crash_loop", instead of thrashing the box forever.
 JOB_CRASH_WINDOW_S = float(os.getenv("JOB_CRASH_WINDOW_S", "120"))
 JOB_CRASH_LOOP_N = int(os.getenv("JOB_CRASH_LOOP_N", "4"))
+# Abuse throttle: a job that crash-loops this many separate TIMES within
+# ABUSE_WINDOW_S is treated as someone deliberately hammering /restart to
+# hang or crash the runner, not an unlucky bug — so /restart itself gets
+# locked out for ABUSE_LOCK_S instead of letting them immediately try again.
+# The sliding window means a job that behaves for a while is forgiven.
+ABUSE_LOOP_EPISODES_N = int(os.getenv("ABUSE_LOOP_EPISODES_N", "2"))
+ABUSE_WINDOW_S = float(os.getenv("ABUSE_WINDOW_S", "3600"))
+ABUSE_LOCK_S = float(os.getenv("ABUSE_LOCK_S", "1800"))
 
 _jobs: dict = {}                                    # id -> job record
 _jobs_lock = threading.Lock()
@@ -880,17 +888,39 @@ _IMPORT_TO_PYPI = {
 }
 
 
+def _pypi_normalize(name: str) -> str:
+    """PEP 503 normalization (runs of -_. collapse to one '-', lowercase), so
+    'python_telegram_bot' from an import scan and 'python-telegram-bot' from
+    an explicit requirement compare as the same package."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _detect_imports(code: str) -> list:
-    """Return the PyPI packages this code needs (auto-detected + header)."""
-    pkgs = set()
+    """Return the PyPI packages this code needs (auto-detected + header).
+
+    An explicit ``# requirements: foo==1.2.3`` line always wins over the bare
+    name the import scanner finds for that same package. Without this, both
+    specs ("foo" and "foo==1.2.3") were different strings, so both landed in
+    the install list and pip installed the same library twice — once pinned,
+    once unpinned/latest — doubling install time and risking the wrong
+    version winning depending on install order.
+    """
+    # Bare, auto-detected names first (import scan has no version info).
+    auto = {}
     for m in re.finditer(r"^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", code or "", re.MULTILINE):
         mod = m.group(1).lower()
         if mod in _STDLIB:
             continue
-        pkgs.add(_IMPORT_TO_PYPI.get(mod, mod))
+        pkg = _IMPORT_TO_PYPI.get(mod, mod)
+        auto.setdefault(_pypi_normalize(pkg), pkg)
+    # Explicit requirements override the auto-detected entry for the same
+    # package — this is what carries the pinned version through.
+    explicit = {}
     for p in _parse_requirements(code):
-        pkgs.add(p)
-    return sorted(pkgs)[:20]  # sanity cap
+        explicit[_pypi_normalize(_pkg_display_name(p))] = p
+    merged = dict(auto)
+    merged.update(explicit)
+    return sorted(merged.values())[:20]  # sanity cap
 
 
 ZIP_BUNDLE_MAX_BYTES = int(os.getenv("ZIP_BUNDLE_MAX_BYTES", str(5 * 1024 * 1024)))
@@ -2041,6 +2071,11 @@ def _job_public(j: dict) -> dict:
         "oom": bool(j.get("oom")),
         "web_slug": j.get("web_slug"),
         "web_public": bool(j.get("web_public", True)),
+        # >0 while /restart is throttled after repeated crash-loops (abuse
+        # protection); 0/absent means not locked. Seconds remaining, so the
+        # site/bot can show a live countdown instead of a fixed timestamp.
+        "restart_locked_s": (max(0, int((j.get("restart_locked_until") or 0) - time.time()))
+                              if (j.get("restart_locked_until") or 0) > time.time() else 0),
         # access_key only reaches the main site (this API is secret-guarded) —
         # it builds the private share-link ?key= for the job owner.
         "access_key": j.get("access_key") if not j.get("web_public", True) else None,
@@ -2408,6 +2443,22 @@ def _spawn(j: dict) -> None:
                         f"{int(JOB_CRASH_WINDOW_S)}s. Fix the code "
                         f"(`/logs` shows why) then `/restart`."
                     )
+                    # A SECOND (or later) crash-loop episode within ABUSE_WINDOW_S
+                    # means /restart itself is being used to keep re-triggering
+                    # the loop — lock it out for a cooldown instead of letting
+                    # that repeat forever.
+                    episodes = [t for t in (j.get("crash_loop_episodes") or [])
+                                if now - t < ABUSE_WINDOW_S]
+                    episodes.append(now)
+                    j["crash_loop_episodes"] = episodes
+                    if len(episodes) >= ABUSE_LOOP_EPISODES_N:
+                        j["restart_locked_until"] = now + ABUSE_LOCK_S
+                        mins = max(1, int(ABUSE_LOCK_S // 60))
+                        j["log"].append(
+                            f"[system] 🔒 {len(episodes)} crash-loops in "
+                            f"{int(ABUSE_WINDOW_S // 60)} min — /restart locked for "
+                            f"{mins} min. Fix the code and wait it out."
+                        )
 
             limit_mb = j.get("mem_limit_mb")
             if limit_mb is None:
@@ -3158,6 +3209,15 @@ def job_restart(job_id: str, authorization: Optional[str] = Header(None)):
     j = _jobs.get(job_id)
     if not j:
         raise HTTPException(404, detail="Job not found.")
+    locked_until = j.get("restart_locked_until") or 0
+    if locked_until > time.time():
+        remaining = int(locked_until - time.time())
+        mins, secs = divmod(remaining, 60)
+        raise HTTPException(
+            status_code=423,
+            detail=f"Restart locked for {mins}m {secs}s — repeated crash-loops. "
+                   f"Fix the code and wait it out, or ask an admin to unlock it.",
+        )
     # Stop current process (keeps dir)
     j["stop_requested"] = True
     _kill_job_tree(j)
@@ -3190,6 +3250,21 @@ def job_restart(job_id: str, authorization: Optional[str] = Header(None)):
     j["log"].append("[system] restarting in place (workspace preserved)")
     _spawn(j)
     logger.info("Job %s restarted in place (dir: %s)", job_id, j.get("dir"))
+    return _job_public(j)
+
+
+@app.post("/internal/jobs/{job_id}/unlock")
+def job_unlock(job_id: str, authorization: Optional[str] = Header(None)):
+    """Admin escape hatch: clear an abuse lock (and its crash-loop history)
+    early, for the case where the crash-loop was a real bug the owner has
+    now fixed rather than someone hammering /restart on purpose."""
+    _check_secret(authorization)
+    j = _jobs.get(job_id)
+    if not j:
+        raise HTTPException(404, detail="Job not found.")
+    j["restart_locked_until"] = 0
+    j["crash_loop_episodes"] = []
+    j["log"].append("[system] 🔓 Restart lock cleared by admin.")
     return _job_public(j)
 
 
