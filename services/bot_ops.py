@@ -536,6 +536,12 @@ def _act(user_id: int, ref: str, verb: str) -> dict:
                 if response.status_code == 200:
                     _set_assignment(row, rid, _worker_of(row), "running")
                     return {"ok": True, "job": row}
+                if response.status_code == 423:
+                    try:
+                        detail = response.json().get("detail") or "Locked after repeated crash-loops."
+                    except Exception:
+                        detail = "Locked after repeated crash-loops."
+                    return {"ok": False, "error": f"🔒 {detail}"}
                 if response.status_code != 404:
                     return {"ok": False, "error": f"Runner rejected restart (HTTP {response.status_code})."}
             except Exception as exc:
@@ -561,6 +567,23 @@ def _act(user_id: int, ref: str, verb: str) -> dict:
 
 def restart(user_id: int, ref: str) -> dict:
     return _act(user_id, ref, "restart")
+
+
+def admin_unlock(row: dict) -> dict:
+    """Clear a job's abuse-lock early. `row` is a full jobs-table row (any
+    owner) — admin callers already resolve it via admin_find_job()."""
+    rid = row.get("runner_job_id")
+    if not rid:
+        return {"ok": False, "error": "This job has no runner instance right now."}
+    try:
+        response = runner_client._runner_http(
+            "POST", f"/internal/jobs/{rid}/unlock", worker=_worker_of(row))
+    except Exception as exc:
+        logger.warning("admin unlock failed for job %s: %s", row.get("id"), exc)
+        return {"ok": False, "error": "The assigned runner did not answer. Try again shortly."}
+    if response.status_code != 200:
+        return {"ok": False, "error": f"Runner rejected unlock (HTTP {response.status_code})."}
+    return {"ok": True}
 
 
 def stop(user_id: int, ref: str) -> dict:
