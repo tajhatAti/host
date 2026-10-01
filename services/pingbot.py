@@ -230,6 +230,9 @@ def _admin_job_detail_text(j: dict) -> str:
         lines.append(f"Last exit: `{j['last_exit_reason']}`"
                      + (f" (code {j['last_exit_code']})"
                         if j.get("last_exit_code") not in (None, "") else ""))
+    if j.get("restart_locked_s"):
+        m, s = divmod(int(j["restart_locked_s"]), 60)
+        lines.append(f"🔒 Restart locked: {m}m {s}s left (repeated crash-loops) — ⬇️ Unlock to override")
     rid = j.get("runner_job_id") or "—"
     rurl = j.get("runner_url") or "(embedded / default pool)"
     lines += ["", f"Runner job id: `{rid}`", f"Runner URL: `{rurl}`"]
@@ -273,8 +276,12 @@ def _admin_job_kb(j: dict) -> dict:
          {"text": "🔑 Set env", "callback_data": f"admin:jobenv:{jid}"}],
         [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{jid}"},
          {"text": "🗑 Delete…", "callback_data": f"admin:jobdelconfirm:{jid}"}],
-        [{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}],
     ]
+    if j.get("restart_locked_s"):
+        rows.append([{"text": "🔓 Unlock restart", "callback_data": f"admin:jobunlock:{jid}"}])
+    if j.get("telegram_bot_username"):
+        rows.append([{"text": "🤖 Open bot", "url": f"https://t.me/{j['telegram_bot_username']}"}])
+    rows.append([{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}])
     nav = []
     if uid:
         nav.append({"text": "👤 Owner", "callback_data": f"admin:user:{uid}"})
@@ -800,6 +807,20 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
 
 
+def cmd_details(chat_id, telegram_user_id, arg):
+    """/details — admin-only shortcut straight into the job fleet list: one
+    line + one hidden-link 🔗 button per job (id, name, owner's user id,
+    🔒 if restart-locked). Tapping the button opens that job's full card —
+    status, bot, memory, repo/commit, requirements, env key names (never
+    values), source availability, logs/restart/stop/edit/delete — same as
+    /admin → 📦 Jobs, just reachable in one command."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return  # silent — same as every other admin-only command
+    page = int(arg) if (arg or "").strip().isdigit() else 0
+    handle_admin_callback(chat_id, telegram_user_id, "jobs", str(page), None)
+
+
 def _admin_users_text(page: int) -> str:
     rows = telegram_link.list_admin_overview(limit=200)
     per_page = 8
@@ -1255,11 +1276,12 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         per_page = 8
         rows, total = telegram_admin_ext.jobs_recent(limit=per_page, offset=page * per_page)
         kb = []
-        lines = [f"📦 *Jobs* ({total} total) — copy an id, or tap a button below:"]
+        lines = [f"📦 *Jobs* ({total} total) — tap 🔗 to open the hidden link:"]
         for j in rows:
-            lines.append(f"`{j['id']}` · {j['name']} · {j['owner']} · {j['live_status']}")
-            label = f"{j['name']} · {j['owner']} · {j['live_status']}"
-            kb.append([{"text": label[:60], "callback_data": f"admin:job:{j['id']}"}])
+            lock = " 🔒" if j.get("restart_locked_s") else ""
+            lines.append(f"#{j['id']} · {j['name']} · uid `{j.get('owner_id') or '?'}`{lock}")
+            kb.append([{"text": f"🔗 #{j['id']} {j['name']}"[:60],
+                        "callback_data": f"admin:job:{j['id']}"}])
         nav = []
         if page > 0:
             nav.append({"text": "◀️ Prev", "callback_data": f"admin:jobs:{page-1}"})
@@ -1412,6 +1434,18 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
             _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
             return
         _edit_or_send(chat_id, message_id, f"✅ {'Restarted' if action == 'jobrestart' else 'Stopped'}.")
+        handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id), message_id)
+        return
+
+    if action == "jobunlock":
+        job_id = int(ref) if ref.isdigit() else None
+        if not job_id:
+            _edit_or_send(chat_id, message_id, "Bad job id.")
+            return
+        res = telegram_admin_ext.admin_unlock_job(job_id)
+        if not res.get("ok"):
+            _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
+            return
         handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id), message_id)
         return
 
@@ -2259,7 +2293,7 @@ class _progress:
 _SLOW_COMMANDS = frozenset((
     "/ping", "/apps", "/jobs", "/list", "/status", "/uptime", "/info", "/logs", "/restart", "/stop",
     "/delete", "/source", "/import", "/projects", "/latest", "/autodeploy",
-    "/limits", "/admin", "/see", "/queen", "/rename", "/update", "/code",
+    "/limits", "/admin", "/details", "/see", "/queen", "/rename", "/update", "/code",
     "/health", "/backup", "/restore", "/rollback", "/token", "/history", "/env",
     "/guide", "/guides", "/howto", "/recover", "/rescue", "/whoami",
     "/templates", "/usage",
@@ -5203,6 +5237,7 @@ def handle_update(upd):
                 # and, for a 👑 account, the door to their panel.
                 "/limits": lambda: gated(lambda u: cmd_limits(chat_id, u)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
+                "/details": lambda: cmd_details(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
                 "/see": lambda: cmd_see(chat_id, msg.get("from", {}).get("id"), arg),
