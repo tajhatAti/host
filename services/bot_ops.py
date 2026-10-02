@@ -45,6 +45,7 @@ to return:
 """
 import json
 import logging
+import os
 import re
 
 from database import get_db_connection
@@ -58,24 +59,70 @@ from services.runner_client import MAX_JOBS_PER_USER  # noqa: F401
 
 logger = logging.getLogger("codenest-app")
 
+# How many apps a 👑 account may run at once when no admin typed a specific
+# number for it. Deliberately generous but not unlimited: the runner's shared-box
+# admission check is what actually protects the machine, and a count that cannot
+# be reached is a promise the box may not keep.
+QUEEN_MAX_JOBS = int(os.getenv("QUEEN_MAX_JOBS", "10"))
+
 def _effective_job_limit(user_id: int) -> int:
-    """MAX_JOBS_PER_USER, unless an admin set a per-user override via
-    /admin limit in the Telegram bot — see database.py's job_limit_override
-    column. NULL means "use the global default"."""
+    """How many apps this account may have RUNNING at once.
+
+    Three sources, in the order they should win:
+      1. a per-user override an admin typed (`/admin limit <user> <n>`) — a
+         specific instruction beats a general one;
+      2. 👑 (users.mem_unlimited) — a queen account gets QUEEN_MAX_JOBS, because
+         "no memory ceiling, big uploads, any repo" that still stops at three
+         running apps reads as a privilege that was not actually granted;
+      3. the global MAX_JOBS_PER_USER.
+    NULL means "use the default that applies to this account".
+    """
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT job_limit_override FROM users WHERE id = ?",
-                            (user_id,)).fetchone()
+        row = conn.execute("SELECT job_limit_override, mem_unlimited FROM users WHERE id = ?",
+                           (user_id,)).fetchone()
     finally:
         conn.close()
-    override = row["job_limit_override"] if row else None
-    return override if override is not None else MAX_JOBS_PER_USER
+    if row and row["job_limit_override"] is not None:
+        return int(row["job_limit_override"])
+    if row and row["mem_unlimited"]:
+        return QUEEN_MAX_JOBS
+    return MAX_JOBS_PER_USER
+
+
+# Public aliases. The chat bot shows "x of y slots" and routes/runspace.py
+# enforces the cap on the website; both must ask THIS function, because a second
+# copy of the rule is how the two surfaces drift apart — the website used to
+# check the global default and quietly ignored an admin's per-user override.
+effective_job_limit = _effective_job_limit
+
+
+def is_queen(user_id: int) -> bool:
+    """Is this account granted 👑 (users.mem_unlimited)?
+
+    One place to ask, so "queen" means the same thing in the chat bot, on the
+    website and in recovery: no memory ceiling on its jobs, zip upload allowed,
+    and the 👑 interface in the bot.
+    """
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT mem_unlimited FROM users WHERE id = ?",
+                           (user_id,)).fetchone()
+    except Exception:
+        return False
+    finally:
+        conn.close()
+    return bool(row and row["mem_unlimited"])
 
 
 def _mem_limit_for(user_id: int):
     """None (runner's global MAX_MEM_MB default) unless /queen granted this
     user mem_unlimited=1, in which case 0 tells the runner to skip the
-    per-job RLIMIT entirely (see runner/app.py's mem_limit_mb)."""
+    per-job RLIMIT entirely (see runner/app.py's mem_limit_mb).
+
+    Public alias below: routes/runspace.py needs the SAME answer when a queen
+    deploys from the web editor, and a second copy of this rule is how the two
+    surfaces would drift apart."""
     conn = get_db_connection()
     try:
         row = conn.execute("SELECT mem_unlimited FROM users WHERE id = ?",
@@ -83,6 +130,84 @@ def _mem_limit_for(user_id: int):
     finally:
         conn.close()
     return 0 if (row and row["mem_unlimited"]) else None
+
+
+mem_limit_for = _mem_limit_for
+
+# Zip bundles. The default is a source-sized upload; a 👑 account may send a
+# whole project — assets, a vendored folder, a starter database. The runner
+# still enforces its own hard ceiling (ZIP_BUNDLE_CEILING_*), so these numbers
+# only decide what the site ASKS for on this account's behalf.
+ZIP_MAX_MB = int(os.getenv("ZIP_MAX_MB", "5"))
+ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
+QUEEN_ZIP_MAX_MB = int(os.getenv("QUEEN_ZIP_MAX_MB", "60"))
+QUEEN_ZIP_MAX_FILES = int(os.getenv("QUEEN_ZIP_MAX_FILES", "5000"))
+
+
+def account_privileges(user_id: int) -> dict:
+    """Everything a UI needs about what this account is allowed, in one call.
+
+    The dashboard's bots list and the chat bot's /apps both show the 👑 flag,
+    the running-app limit and the upload size at once; asking three separate
+    functions for those is how a surface ends up disagreeing with itself (one
+    reads the flag, another reads the override, a third guesses).
+    """
+    queen = is_queen(user_id)
+    return {"is_queen": queen,
+            "job_limit": _effective_job_limit(user_id),
+            "mem_limit_mb": _mem_limit_for(user_id),
+            "zip_max_mb": QUEEN_ZIP_MAX_MB if queen else ZIP_MAX_MB,
+            "zip_max_files": QUEEN_ZIP_MAX_FILES if queen else ZIP_MAX_FILES}
+
+
+def zip_limits_for(user_id: int) -> dict:
+    """The zip fields to send to the runner for this account.
+
+    One function so a 👑 grant means the same thing on every upload path
+    (create, update, and the re-create after a 404) instead of three places
+    that can drift.
+    """
+    if is_queen(user_id):
+        return {"zip_max_mb": QUEEN_ZIP_MAX_MB, "zip_max_files": QUEEN_ZIP_MAX_FILES}
+    return {"zip_max_mb": ZIP_MAX_MB, "zip_max_files": ZIP_MAX_FILES}
+
+
+def reapply_mem_limit(user_id: int) -> int:
+    """Push the CURRENT /queen flag to this user's already-running bots.
+
+    WHY THIS EXISTS: the runner stores a job's RLIMIT when the job is created,
+    so granting or revoking 👑 changed only FUTURE deploys. The bot that was
+    being OOM-killed right now kept its old ceiling until its owner happened to
+    redeploy — which reads exactly like "/queen did nothing". One PATCH per
+    running job closes that: the runner re-spawns the process with the new
+    limit and the job's directory (database.db, session.json, data/) is
+    untouched, same as any in-place update.
+
+    Returns how many bots were re-limited. Best-effort: a bot on a runner that
+    is asleep is skipped, not an error — it picks the flag up on its next
+    deploy or cold start anyway.
+    """
+    limit = _mem_limit_for(user_id)
+    conn = get_db_connection()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, name, runner_job_id, worker_url FROM jobs "
+            "WHERE user_id = ? AND runner_job_id IS NOT NULL "
+            "AND desired_state != 'stopped'", (user_id,)).fetchall()]
+    finally:
+        conn.close()
+
+    done = 0
+    for row in rows:
+        try:
+            resp = runner_client._runner_http(
+                "PATCH", f"/internal/jobs/{row['runner_job_id']}",
+                {"mem_limit_mb": limit}, worker=row.get("worker_url"))
+            if resp.status_code == 200:
+                done += 1
+        except Exception as exc:
+            logger.info("mem-limit reapply skipped for job %s: %s", row.get("id"), exc)
+    return done
 
 
 def slugify_name(raw: str) -> str:
@@ -98,7 +223,7 @@ def list_apps(user_id: int) -> list:
     try:
         rows = [dict(r) for r in conn.execute(
             "SELECT id, name, language, runner_job_id, worker_url, desired_state, created_at, "
-            "telegram_bot_username "
+            "telegram_bot_username, repo_url, repo_entry, repo_commit, auto_deploy "
             "FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,)
         ).fetchall()]
     finally:
@@ -111,6 +236,8 @@ def list_apps(user_id: int) -> list:
         r["uptime_s"] = info.get("uptime_s")
         r["restarts"] = info.get("restarts")
         r["last_exit_reason"] = info.get("last_exit_reason")
+        r["last_exit_code"] = info.get("last_exit_code")
+        r["oom"] = info.get("oom")
     return rows
 
 
@@ -154,16 +281,116 @@ def _worker_of(row) -> str:
         return None
 
 
-def _row_env(row) -> dict:
+def _row_env(row, rescue: bool = True) -> dict:
     """Env vars saved for a job row (empty when unset / unparsable). Same
     logic as routes/runspace.py's private copy — duplicated rather than
     imported because routes/ should not become an import target for
-    services/, but kept in sync deliberately."""
+    services/, but kept in sync deliberately.
+
+    When the stored row cannot be decoded at all and `rescue` is on, the
+    runner's own copy of the env is read back and repaired into the database
+    (services/env_rescue.py). Every caller here is about to START or EDIT the
+    job, and both would otherwise act on an empty env: a start with no
+    BOT_TOKEN, or a set_env that silently deletes every other variable the bot
+    had. Pass rescue=False only for a read that must not touch the network.
+
+    A BOT_TOKEN found only in the source file is promoted into the returned
+    map (in-memory). Env tab is optional when the code already holds the token.
+    """
     try:
         raw = dict(row).get("env")
-        return secrets_store.unpack_env(raw)
     except Exception:
-        return {}
+        values, readable = {}, True
+    else:
+        values, readable = secrets_store.read_env(raw)
+    if not readable and rescue:
+        from services import env_rescue
+        got, outcome = env_rescue.rescue_job_env(row)
+        if got:
+            try:
+                row["env"] = secrets_store.pack_env(got)
+            except Exception:
+                pass
+            values = got
+        else:
+            logger.error(
+                "job %s: stored variables could not be read and the runner had "
+                "no copy to restore (outcome=%s)", dict(row).get("name"), outcome)
+    # Defined below; fine at call time. Avoids every caller forgetting.
+    return ensure_bot_token_in_env(row, values)
+
+
+def _url_slug(name) -> str:
+    """Mirror of static/pro.js `_slugify`, so a link built here opens the app
+    the dashboard will actually select."""
+    s = re.sub(r"['’]", "", str(name or "").lower().strip())
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:80]
+    return s or "untitled"
+
+
+def dashboard_link(row) -> str:
+    """Public link to one app's page, or '' when this site's URL is unknown."""
+    item = dict(row) if not isinstance(row, dict) else row
+    if not item.get("name"):
+        return ""
+    try:
+        from services.pingbot import SITE_BASE
+    except Exception:
+        return ""
+    return f"{SITE_BASE}/bots/{_url_slug(item['name'])}" if SITE_BASE else ""
+
+
+def token_from_source(code: str = "", env: dict = None) -> str:
+    """A BOT_TOKEN found in source or env — without calling Telegram.
+
+    Many bots ship the token literally in the file (no Env tab). Recovery and
+    restart must treat that as a real token: refusing with "set BOT_TOKEN in
+    Env" when the code already has one is exactly the loop owners hate.
+    """
+    try:
+        from services import telegram_detector
+        text = telegram_detector._text(code or "", env or {})
+        m = telegram_detector.TOKEN_RE.search(text or "")
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def ensure_bot_token_in_env(row, env: dict = None) -> dict:
+    """Return env, promoting a token found in code into BOT_TOKEN when missing.
+
+    Does NOT rewrite the database: the code stays the source of truth the owner
+    already trusts. We only make sure the runner process receives BOT_TOKEN so
+    frameworks that read os.environ still work, and so our own "is there a
+    token?" gates stop blocking a perfectly runnable bot.
+    """
+    env = dict(env or {})
+    if (env.get("BOT_TOKEN") or "").strip():
+        return env
+    tok = token_from_source(row.get("code") or "", env)
+    if tok:
+        env["BOT_TOKEN"] = tok
+    return env
+
+
+def env_missing_message(row) -> str:
+    """What the owner sees when a bot cannot start for want of its token.
+
+    It says nothing about keys or storage formats: from the owner's side the
+    only fact that matters is "my token isn't on the server", and the only
+    useful response is where to put it back. Everything else about the app is
+    still there, so the message says that too — a bot that will not start reads
+    like a lost bot otherwise.
+    """
+    item = dict(row) if not isinstance(row, dict) else row
+    name = item.get("name") or "your app"
+    link = dashboard_link(item)
+    where = f"{link} → *Env*" if link else "the dashboard → your app → *Env*"
+    return (f"❌ *{name}* can't start — no `BOT_TOKEN` found in Env *or* in the source.\n"
+            f"Fix it either way:\n"
+            f"• open {where}, paste the token from @BotFather, *Save & restart*, **or**\n"
+            f"• put `BOT_TOKEN = '…'` (or `os.environ['BOT_TOKEN'] = '…'`) in the code itself.\n"
+            f"Your files and database are untouched — only the token is missing.")
 
 
 def _set_assignment(row, runner_id, worker, desired="running"):
@@ -188,9 +415,14 @@ def _cold_start(row, code=None, language=None) -> dict:
     The jobs-table id/name remains the user's stable identity. Runner ids are
     disposable implementation details and may change after any runner deploy.
     """
-    env = _row_env(row)
+    env = ensure_bot_token_in_env(row, _row_env(row))
     if row.get("telegram_bot_detected") and not env.get("BOT_TOKEN"):
-        return {"ok": False, "error": "The saved bot token is unavailable. Ask the owner to restore the previous encryption key."}
+        # Still nothing: not in env, not in the runner's copy, not as a literal
+        # in the source. Only THEN do we refuse — a token sitting in the code
+        # is enough to run, Env is optional.
+        logger.error("cannot start %s: Telegram bot with no BOT_TOKEN in env, "
+                     "runner, or source", row["name"])
+        return {"ok": False, "error": env_missing_message(row)}
     # Older Telegram-created rows did not persist worker_url. Before creating
     # anything, find the process by its stable internal name across the whole
     # fleet. This adopts the real assignment and prevents a second poller from
@@ -331,6 +563,9 @@ def restart(user_id: int, ref: str) -> dict:
     return _act(user_id, ref, "restart")
 
 
+
+
+
 def stop(user_id: int, ref: str) -> dict:
     return _act(user_id, ref, "stop")
 
@@ -466,7 +701,7 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
 
     body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
             "env": {}, "zip_b64": base64.b64encode(zip_bytes).decode("ascii"),
-            "mem_limit_mb": _mem_limit_for(user_id)}
+            "mem_limit_mb": _mem_limit_for(user_id), **zip_limits_for(user_id)}
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -495,7 +730,8 @@ def create_app_from_zip(user_id: int, name: str, zip_bytes: bytes, language: str
             "web": web.get("web") or web.get("web_url")}
 
 
-def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "") -> dict:
+def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str = "",
+                         entry: str = "", deps=None) -> dict:
     """GitHub-import variant of create_app, for /import in chat.
 
     Same uniqueness/cap rules as create_app. No inline code is sent — the
@@ -533,8 +769,22 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
                 "error": (f"You already have {active} of {_limit} bots "
                           f"running — stop one before making another.")}
 
-    body = {"language": language or "", "code": "", "name": f"u{user_id}-{clean}",
+    # "python" is a placeholder the runner replaces: with a repo_url present it
+    # clones first and _detect_entry() picks the real language from the entry
+    # file it finds. Sending an empty string used to be rejected outright by an
+    # older runner ("Unsupported language: ."), so a GitHub import from chat
+    # failed before the clone -- naming python keeps it working against a runner
+    # that has not been redeployed yet, and costs nothing on one that has.
+    body = {"language": language or "python", "code": "", "name": f"u{user_id}-{clean}",
             "env": {}, "repo_url": repo_url, "mem_limit_mb": _mem_limit_for(user_id)}
+    # Which runnable thing inside the repo, and which manifests belong to it.
+    # The caller scanned the repo (services/github_repo.py) and knows; without
+    # this a repo holding two projects always deployed whichever file the
+    # runner's own guess found first.
+    if entry:
+        body["entry"] = entry
+    if deps:
+        body["deps"] = [str(d) for d in list(deps)[:4]]
     resp = runner_client._runner_http("POST", "/internal/jobs", body)
     if resp.status_code != 201:
         try:
@@ -549,10 +799,15 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
     try:
         cursor = conn.execute(
             "INSERT INTO jobs (user_id,name,language,code,runner_job_id,worker_url,desired_state,env,"
-            "created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,'running',?,?,?)",
+            "repo_url,repo_entry,repo_commit,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'running',?,?,?,?,?,?)",
             (user_id, clean, info.get("language") or language or "python", "",
-             info["id"], getattr(resp, "placed_on", None), None, now, now))
+             info["id"], getattr(resp, "placed_on", None), None,
+             # What it was built from, and which revision: the runner reports the
+             # commit it actually cloned, so "is there a newer one?" is a
+             # comparison later instead of a guess from a date.
+             repo_url, info.get("repo_entry") or entry or None,
+             info.get("repo_commit") or None, now, now))
         conn.commit()
         job_db_id = cursor.lastrowid
     finally:
@@ -560,7 +815,150 @@ def create_app_from_repo(user_id: int, name: str, repo_url: str, language: str =
 
     web = runner_client._job_web_fields(info, getattr(resp, "placed_on", None))
     return {"ok": True, "name": clean, "job_db_id": job_db_id,
-            "web": web.get("web") or web.get("web_url")}
+            "web": web.get("web") or web.get("web_url"),
+            # Which revision was built, and which file inside it runs: the
+            # reply can name the commit, and "is there a newer one?" becomes a
+            # comparison instead of a guess from a date.
+            "commit": info.get("repo_commit") or "",
+            "entry": info.get("repo_entry") or entry or ""}
+
+
+def _runner_detail(resp, fallback: str) -> str:
+    """The runner's own explanation when it refuses, or a usable sentence."""
+    try:
+        detail = (resp.json() or {}).get("detail")
+    except Exception:                                              # noqa: BLE001
+        detail = None
+    return str(detail or fallback)
+
+
+def _record_repo_state(job_db_id: int, repo_url: str, entry, commit) -> None:
+    """Remember which revision an app is running, so an update can be offered."""
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET repo_url=?, repo_entry=?, repo_commit=?, updated_at=? "
+                     "WHERE id=?",
+                     (repo_url or None, entry or None, commit or None,
+                      now_utc_str(), job_db_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_from_repo(user_id: int, ref: str, repo_url: str = None, entry=None,
+                     deps=None) -> dict:
+    """Pull the newest revision of the repo this app was built from.
+
+    In place, the way a platform redeploy works: same job id, same folder — so
+    the bot's database and sessions survive — same public address, same env. The
+    runner re-clones, installs the manifests and restarts. The commit it built
+    comes back so the caller can say which version is now running.
+    """
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. `/apps` lists yours."}
+    url = (repo_url or row.get("repo_url") or "").strip()
+    if not url:
+        return {"ok": False,
+                "error": f"*{row['name']}* wasn't deployed from a repo, so there is "
+                         f"no newer version to pull. `/update {row['name']}` and send "
+                         f"the code or a `.zip` instead."}
+    if entry is None:
+        entry = row.get("repo_entry") or ""
+    env = _row_env(row)
+    rid = row.get("runner_job_id")
+
+    patch = {"name": row["name"], "env": env, "repo_url": url,
+             # Re-sync the 👑 flag on every redeploy: the runner stores the limit
+             # when a job is created, so a grant made afterwards only reaches a
+             # job that gets redeployed.
+             "mem_limit_mb": _mem_limit_for(user_id)}
+    if entry:
+        patch["entry"] = entry
+    if deps:
+        patch["deps"] = [str(d) for d in list(deps)[:4]]
+
+    if rid:
+        try:
+            from services import snapshots
+            snapshots.save_snapshot(row["id"], rid, worker=_worker_of(row))
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("update_from_repo: pre-update snapshot failed for job %s: %s",
+                           row["id"], exc)
+        resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch,
+                                          worker=_worker_of(row))
+        if resp.status_code == 200:
+            info = resp.json() or {}
+            commit = info.get("repo_commit") or ""
+            _set_assignment(row, rid, _worker_of(row), "running")
+            _record_repo_state(row["id"], url, info.get("repo_entry") or entry, commit)
+            return {"ok": True, "job": row, "commit": commit}
+        if resp.status_code != 404:
+            return {"ok": False, "error": _runner_detail(resp, "Runner rejected the update.")}
+        # 404: the runner no longer has it (redeployed, drained, moved). Fall
+        # through and create it again on whichever worker has room.
+
+    create = {"language": row.get("language") or "python", "code": "",
+              "name": f"u{user_id}-{row['name']}", "env": env, "repo_url": url,
+              "mem_limit_mb": _mem_limit_for(user_id)}
+    if entry:
+        create["entry"] = entry
+    if deps:
+        create["deps"] = [str(d) for d in list(deps)[:4]]
+    resp = runner_client._runner_http("POST", "/internal/jobs", create)
+    if resp.status_code != 201:
+        return {"ok": False, "error": _runner_detail(resp, "Runner rejected the update.")}
+    info = resp.json()
+    now = now_utc_str()
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET runner_job_id=?, worker_url=?, desired_state='running', "
+                     "repo_url=?, repo_entry=?, repo_commit=?, updated_at=? WHERE id=?",
+                     (info["id"], getattr(resp, "placed_on", None), url,
+                      info.get("repo_entry") or entry or None,
+                      info.get("repo_commit") or None, now, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "job": row, "commit": info.get("repo_commit") or "",
+            "recreated": True}
+
+
+def set_auto_deploy(user_id: int, ref: str, on: bool) -> dict:
+    """👑 Follow the branch: redeploy by itself when a new commit lands."""
+    row = find_app(user_id, ref)
+    if not row:
+        return {"ok": False, "error": f"No app called “{ref}”. `/apps` lists yours."}
+    if not (row.get("repo_url") or "").strip():
+        return {"ok": False,
+                "error": f"*{row['name']}* wasn't deployed from a repo, so there is "
+                         f"nothing to follow. `/import <github url>` creates one that can."}
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE jobs SET auto_deploy=?, updated_at=? WHERE id=?",
+                     (1 if on else 0, now_utc_str(), row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    row["auto_deploy"] = 1 if on else 0
+    return {"ok": True, "job": row, "on": bool(on)}
+
+
+def auto_deploy_jobs() -> list:
+    """Every app that follows its branch, across all accounts.
+
+    Read by the recovery loop — the only thing here that runs on a schedule. The
+    sweep is one SELECT plus one cheap GitHub lookup per DISTINCT repo (cached),
+    so ten apps following one repo cost one request.
+    """
+    conn = get_db_connection()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, user_id, name, repo_url, repo_entry, repo_commit, worker_url, "
+            "runner_job_id FROM jobs WHERE auto_deploy = 1 AND repo_url IS NOT NULL "
+            "AND repo_url != '' ORDER BY id").fetchall()]
+    finally:
+        conn.close()
 
 
 def create_app(user_id: int, name: str, language: str, code: str) -> dict:
@@ -659,7 +1057,8 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if not rid:
         body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
+                "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id),
+                **zip_limits_for(user_id)}
         resp = runner_client._runner_http("POST", "/internal/jobs", body)
         if resp.status_code != 201:
             try:
@@ -683,7 +1082,12 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
     except Exception as exc:
         logger.warning("bot update_from_zip: pre-update snapshot failed for job %s: %s", row["id"], exc)
 
-    patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64}
+    patch_body = {"name": row["name"], "language": lang, "env": env, "zip_b64": zip_b64,
+                  **zip_limits_for(user_id),
+                  # Re-sync the /queen flag on every redeploy: the runner only
+                  # ever stored it at creation time, so a 👑 granted after the
+                  # first deploy never reached a job updated in place.
+                  "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch_body,
                                        worker=_worker_of(row))
     if resp.status_code == 200:
@@ -692,7 +1096,8 @@ def update_from_zip(user_id: int, ref: str, zip_bytes: bytes, language: str = No
 
     if resp.status_code == 404:
         create_body = {"language": lang, "code": "", "name": f"u{user_id}-{row['name']}",
-                       "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id)}
+                       "env": env, "zip_b64": zip_b64, "mem_limit_mb": _mem_limit_for(user_id),
+                       **zip_limits_for(user_id)}
         resp2 = runner_client._runner_http("POST", "/internal/jobs", create_body)
         if resp2.status_code != 201:
             try:
@@ -782,7 +1187,11 @@ def update_code(user_id: int, ref: str, code: str, language: str = None) -> dict
     except Exception as exc:
         logger.warning("bot update_code: pre-update snapshot failed for job %s: %s", row["id"], exc)
 
-    patch_body = {"name": row["name"], "language": lang, "code": code, "env": env}
+    patch_body = {"name": row["name"], "language": lang, "code": code, "env": env,
+                  # See update_from_zip: keeps the runner's RLIMIT in step with
+                  # the account's current 👑 flag instead of the one it was
+                  # first deployed with.
+                  "mem_limit_mb": _mem_limit_for(user_id)}
     resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", patch_body,
                                        worker=_worker_of(row))
     if resp.status_code == 200:
