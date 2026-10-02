@@ -325,6 +325,34 @@ def fleet_jobs(refresh: bool = False) -> dict:
     return out
 
 
+# A Render free runner that is asleep or mid-deploy answers with a bare 502/503/504
+# from Render's proxy: no JSON body, no X-Runner-Full header. That is "not up yet",
+# not a rejection, so we wait and retry instead of failing the user's app.
+_WAKE_RETRIES = int(os.getenv("RUNNER_WAKE_RETRIES", "2"))
+_WAKE_WAIT_S = float(os.getenv("RUNNER_WAKE_WAIT_S", "4"))
+
+
+def _looks_like_wakeup(resp) -> bool:
+    """True for a proxy-level 502/503/504 from a runner that is still booting.
+
+    A real answer from our own runner carries a JSON "detail" (e.g. "Runner
+    secret not configured.") or X-Runner-Full - those are NOT retried."""
+    if getattr(resp, "status_code", None) not in (502, 503, 504):
+        return False
+    try:
+        if (resp.headers or {}).get("X-Runner-Full"):
+            return False
+    except Exception:
+        pass
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and body.get("detail"):
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _runner_http(method: str, path: str, json_body=None, worker: str = None):
     """Call the runner (embedded or remote) with the shared secret; map every
     transport failure to a clean HTTPException the frontend can display."""
@@ -394,12 +422,26 @@ def _runner_http(method: str, path: str, json_body=None, worker: str = None):
 
     last_exc = None
     last_full = None
+    last_wake = None
     for i, base in enumerate(targets):
         try:
             resp = _call(base)
+            for _n in range(_WAKE_RETRIES):
+                if not _looks_like_wakeup(resp):
+                    break
+                logger.info("runner %s is waking (HTTP %s), retry %d/%d",
+                            base, resp.status_code, _n + 1, _WAKE_RETRIES)
+                time.sleep(_WAKE_WAIT_S * (_n + 1))
+                resp = _call(base)
         except (requests.ConnectionError, requests.Timeout) as exc:
             last_exc = exc
             continue                     # asleep or unreachable — try the next
+        if _looks_like_wakeup(resp):
+            # Still booting after the retries: say so plainly, and let a
+            # create try the next runner instead of reporting a rejected app.
+            last_wake = resp
+            logger.warning("runner %s still unavailable (HTTP %s)", base, resp.status_code)
+            continue
         # 503 + X-Runner-Full means that container is at its RAM ceiling.
         # Roll to the next runner instead of telling the user the site is full.
         if creating and resp.status_code == 503 and resp.headers.get("X-Runner-Full"):
@@ -420,6 +462,8 @@ def _runner_http(method: str, path: str, json_body=None, worker: str = None):
 
     if last_full is not None:
         return last_full                 # every runner full — report it honestly
+    if last_wake is not None:
+        raise HTTPException(status_code=503, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")
     if isinstance(last_exc, requests.Timeout):
         raise HTTPException(status_code=504, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")
     raise HTTPException(status_code=503, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")
