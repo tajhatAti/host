@@ -118,7 +118,8 @@ def _admin_menu_kb():
          {"text": "🚩 Abuse reports", "callback_data": "admin:abuse"}],
         [{"text": "🔍 Security", "callback_data": "admin:security"},
          {"text": "🔗 Clusters", "callback_data": "admin:clusters"}],
-        [{"text": "⛔ Bans", "callback_data": "admin:bans"}],
+        [{"text": "⛔ Bans", "callback_data": "admin:bans"},
+         {"text": "📢 Broadcast", "callback_data": "admin:broadcast"}],
         [{"text": "🔎 Search users", "callback_data": "admin:searchflow"},
          {"text": "🆕 Signups", "callback_data": "admin:signups"}],
         [{"text": "📤 Export", "callback_data": "admin:exportmenu"},
@@ -570,6 +571,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     step-by-step Q&A instead):
       /admin ban <telegram_id> [reason]
       /admin unban <telegram_id>
+      /admin broadcast <message>
       /admin limit <username|telegram_id> <number|clear>
       /admin queen <username|telegram_id> — 👑 unlimited memory (see /queen)
       /admin unqueen <username|telegram_id> / /admin queens — list them
@@ -612,6 +614,23 @@ def cmd_admin(chat_id, telegram_user_id, arg):
             return
         ok = telegram_admin_ext.unban_telegram_id(int(rest))
         _send(chat_id, "✅ Unbanned." if ok else "That id wasn't banned.")
+        return
+
+    if sub == "broadcast":
+        if not rest:
+            _start_admin_flow(chat_id, "broadcast")
+            return
+        ids = telegram_admin_ext.all_linked_telegram_ids()
+        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+        sent = 0
+        for tid in ids:
+            try:
+                _send(tid, rest)
+                sent += 1
+            except Exception:
+                pass
+            time.sleep(0.05)  # stay well under Telegram's flood limits
+        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
         return
 
     if sub in ("health", "doctor", "diag", "diagnose"):
@@ -1648,6 +1667,10 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         handle_admin_callback(chat_id, telegram_user_id, "bans", "", message_id)
         return
 
+    if action == "broadcast":
+        _start_admin_flow(chat_id, "broadcast")
+        return
+
     if action == "bansflow":
         _start_admin_flow(chat_id, "ban")
         return
@@ -1761,6 +1784,9 @@ ADMIN_FLOWS = {
         ("ref", "Which user? (username or telegram id)"),
         ("value", "New job limit? (a number, or `clear` to remove the override)"),
     ],
+    "broadcast": [
+        ("message", "What should I send to every linked user?"),
+    ],
     "search": [
         ("query", "Search for what? (part of a username or email)"),
     ],
@@ -1837,6 +1863,18 @@ def _run_admin_flow(chat_id, flow_name, data, extra=None):
             _send(chat_id, f"✅ Job limit for {target.get('username') or data['ref']} set to {val}.")
         else:
             _send(chat_id, "That wasn't a number or `clear` — nothing changed.")
+    elif flow_name == "broadcast":
+        ids = telegram_admin_ext.all_linked_telegram_ids()
+        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+        sent = 0
+        for tid in ids:
+            try:
+                _send(tid, data["message"])
+                sent += 1
+            except Exception:
+                pass
+            time.sleep(0.05)
+        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
     elif flow_name == "search":
         rows = telegram_admin_ext.search_users(data["query"])
         if not rows:

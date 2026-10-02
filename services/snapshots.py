@@ -47,8 +47,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# How old a snapshot may get before a periodic sweep refreshes it.
-SNAPSHOT_INTERVAL_S = int(os.getenv("SNAPSHOT_INTERVAL_S", str(30 * 60)))
+# How old a snapshot may get before a periodic sweep refreshes it. Was 30
+# minutes — fine for a referral bot's points file, way too long for
+# something actively writing files continuously (a video-download bot can
+# lose a lot of progress in half an hour if the runner dies unexpectedly
+# between sweeps). 3 minutes caps the worst case much lower without
+# hammering the runner — still overridable via env for a specific deploy.
+SNAPSHOT_INTERVAL_S = int(os.getenv("SNAPSHOT_INTERVAL_S", str(3 * 60)))
 # Postgres TEXT is fine with this; the runner enforces its own byte cap too.
 SNAPSHOT_MAX_B64 = int(os.getenv("SNAPSHOT_MAX_B64", str(40 * 1024 * 1024)))
 SNAPSHOTS_ENABLED = os.getenv("SNAPSHOTS_ENABLED", "1").strip() not in ("0", "false", "no")
