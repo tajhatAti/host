@@ -7,6 +7,8 @@ Features:
 - Real logs, Uptime, Download DB
 """
 import io
+import ipaddress
+import socket
 import tempfile
 import json
 import os
@@ -16,6 +18,7 @@ import time
 import zipfile
 import requests
 from collections import defaultdict
+from urllib.parse import quote, urljoin, urlparse
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN", "").strip()
              or os.getenv("TELEGRAM_PING_BOT_TOKEN", "").strip())
@@ -27,6 +30,7 @@ from services import bot_ops  # noqa: E402
 from services import runner_client  # noqa: E402
 from services import bot_analytics
 from services import telegram_admin_ext  # noqa: E402
+from services import github_repo  # noqa: E402
 
 import logging
 logger = logging.getLogger("codenest-app")
@@ -37,6 +41,23 @@ logger = logging.getLogger("codenest-app")
 # admin. It can grant/revoke admin and zip-upload permission for anyone
 # else via /admin — see cmd_admin below.
 SUPER_ADMIN_TG_ID = 8768764605
+
+
+# Soft per-chat command debounce: NOT a punishment, not a lock on any
+# action — just "please wait a sec" for someone mashing a button fast
+# (double-tapping /restart, spamming /logs). Admins (/queen) are exempt,
+# since they legitimately act across many bots back to back.
+_CMD_RATE_WINDOW_S = float(os.getenv("CMD_RATE_LIMIT_WINDOW_S", "4"))
+_CMD_RATE_N = int(os.getenv("CMD_RATE_LIMIT_N", "3"))
+_cmd_times: dict = {}
+
+
+def _rate_limited(chat_id) -> bool:
+    now = time.time()
+    hist = [t for t in _cmd_times.get(chat_id, []) if now - t < _CMD_RATE_WINDOW_S]
+    hist.append(now)
+    _cmd_times[chat_id] = hist
+    return len(hist) > _CMD_RATE_N
 
 
 def _is_admin(user, telegram_user_id=None) -> bool:
@@ -87,6 +108,10 @@ def _admin_menu_kb():
     return {"inline_keyboard": [
         [{"text": "📊 Overview", "callback_data": "admin:overview"},
          {"text": "👥 Users", "callback_data": "admin:users:0"}],
+        # First thing to open when something "doesn't work": it reads the
+        # webhook, the runners, the jobs table and both recovery loops live, and
+        # explains how a deploy is supposed to behave now.
+        [{"text": "🩺 Health & how it works", "callback_data": "admin:health"}],
         [{"text": "🖥 Runners", "callback_data": "admin:runners"},
          {"text": "📦 Jobs", "callback_data": "admin:jobs:0"}],
         [{"text": "📝 Audit log", "callback_data": "admin:audit"},
@@ -101,6 +126,8 @@ def _admin_menu_kb():
          {"text": "🏪 Store queue", "callback_data": "admin:store"}],
         [{"text": "📜 Terms status", "callback_data": "admin:terms"},
          {"text": "🧑‍⚖️ Audit by admin", "callback_data": "admin:auditadmins"}],
+        [{"text": "👑 Queens", "callback_data": "admin:queens"},
+         {"text": "♻️ Recover now", "callback_data": "admin:recovernow"}],
         [{"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
     ]}
 
@@ -110,32 +137,170 @@ def _maintenance_label():
             else "🟢 Maintenance: OFF (tap to turn on)")
 
 
-def _admin_user_row_kb(target: dict):
+def _admin_user_row_kb(target: dict, jobs: list = None):
+    """User card buttons: flags + every job as a tappable row."""
     uid = target["id"]
     admin_lbl = "➖ Revoke admin" if target.get("is_admin") else "➕ Grant admin"
     zip_lbl = "🚫 Deny zip" if target.get("can_upload_zip") else "📦 Allow zip"
     susp_lbl = "✅ Unsuspend" if target.get("is_suspended") else "⛔ Suspend"
+    queen_lbl = "🚫 Remove 👑" if target.get("mem_unlimited") else "👑 Make queen"
     rows = [
         [{"text": admin_lbl, "callback_data": f"admin:togadmin:{uid}"},
          {"text": zip_lbl, "callback_data": f"admin:togzip:{uid}"}],
-        [{"text": susp_lbl, "callback_data": f"admin:togsuspend:{uid}"}],
-        [{"text": "⬅️ Users", "callback_data": "admin:users:0"}],
+        [{"text": susp_lbl, "callback_data": f"admin:togsuspend:{uid}"},
+         {"text": queen_lbl, "callback_data": f"admin:togqueen:{uid}"}],
+        [{"text": "🚦 Set job limit", "callback_data": f"admin:limituser:{uid}"},
+         {"text": "🔄 Refresh", "callback_data": f"admin:user:{uid}"}],
     ]
+    jobs = jobs if jobs is not None else telegram_admin_ext.jobs_for_user(uid)
+    icon = {"running": "🟢", "crashed": "🔴", "stopped": "⏹",
+            "installing": "🟡", "offline": "⚪"}
+    for j in (jobs or [])[:30]:
+        st = j.get("live_status") or "?"
+        mark = icon.get(st, "⚪")
+        label = f"{mark} {j['name']} · {st}"[:60]
+        rows.append([{"text": label, "callback_data": f"admin:job:{j['id']}"}])
+    if jobs and len(jobs) > 30:
+        rows.append([{"text": f"… +{len(jobs) - 30} more",
+                      "callback_data": f"admin:user:{uid}"}])
+    rows.append([{"text": "⬅️ Users", "callback_data": "admin:users:0"},
+                 {"text": "🛠 Menu", "callback_data": "admin:menu"}])
     return {"inline_keyboard": rows}
 
 
-def _admin_user_detail_text(target: dict) -> str:
+def _admin_user_detail_text(target: dict, jobs: list = None) -> str:
+    """Everything about one account; jobs also become buttons on the keyboard."""
     flags = []
     if target.get("is_admin"): flags.append("admin")
     if target.get("can_upload_zip"): flags.append("zip-allowed")
     if target.get("is_suspended"): flags.append("suspended")
+    if target.get("mem_unlimited"): flags.append("👑 unlimited memory")
+    if target.get("job_limit_override") is not None:
+        flags.append(f"limit={target['job_limit_override']}")
     tag = ", ".join(flags) or "no special flags"
     tid = target.get("telegram_id") or "not linked"
     seen = telegram_admin_ext.last_seen_for_user(target["id"])
-    seen_line = f"\nLast seen: {seen['ls']} from `{seen.get('ip_address') or '—'}`" if seen else "\nLast seen: never"
-    return (f"*{target.get('username') or '(no username)'}* (#{target['id']})\n"
-            f"Telegram: `{tid}`\n"
-            f"Flags: {tag}{seen_line}")
+    seen_line = (f"\nLast seen: {seen['ls']} from `{seen.get('ip_address') or '—'}`"
+                 if seen else "\nLast seen: never")
+    jobs = jobs if jobs is not None else telegram_admin_ext.jobs_for_user(target["id"])
+    try:
+        priv = bot_ops.account_privileges(target["id"])
+        running = bot_ops.active_count(target["id"])
+        slots = f"{running}/{priv.get('job_limit')}"
+        mem = priv.get("mem_limit_mb")
+        mem_s = "no ceiling" if not mem else f"{mem}MB/app"
+    except Exception:
+        slots, mem_s = "—", "—"
+    lines = [
+        f"👤 *{target.get('username') or '(no username)'}* (#{target['id']})",
+        f"Telegram: `{tid}`",
+        f"Email: `{target.get('email') or '—'}`",
+        f"Flags: {tag}{seen_line}",
+        f"Slots: {slots} · Memory: {mem_s}",
+        f"Created: {target.get('created_at') or '—'}",
+        "",
+    ]
+    if not jobs:
+        lines.append("📦 No jobs yet.")
+    else:
+        lines.append(f"📦 *{len(jobs)} job(s)* — tap a button below for full control:")
+        for j in jobs[:12]:
+            st = j.get("live_status") or "?"
+            extra = []
+            if j.get("runner_url"):
+                extra.append("runner set")
+            if j.get("repo_url"):
+                extra.append("from repo")
+            if j.get("telegram_bot_username"):
+                extra.append(f"@{j['telegram_bot_username']}")
+            tail = (" · " + ", ".join(extra)) if extra else ""
+            lines.append(f"· #{j['id']} *{j['name']}* · {j.get('language') or '?'} · {st}{tail}")
+        if len(jobs) > 12:
+            lines.append(f"· … and {len(jobs) - 12} more")
+    return "\n".join(lines)
+
+
+def _admin_job_detail_text(j: dict) -> str:
+    """One job, every fact an admin needs before they press a button."""
+    st = j.get("live_status") or "unknown"
+    icon = {"running": "🟢", "crashed": "🔴", "stopped": "⏹",
+            "installing": "🟡", "offline": "⚪"}.get(st, "⚪")
+    lines = [
+        f"{icon} *{j['name']}* (#{j['id']})",
+        f"Owner: {j.get('owner') or '—'} (#{j.get('owner_id') or '?'})"
+        + (" ⛔ suspended" if j.get("owner_suspended") else ""),
+        f"Language: `{j.get('language') or '—'}` · Status: `{st}`",
+        f"Desired: `{j.get('desired_state') or '—'}`",
+    ]
+    if j.get("telegram_bot_username"):
+        lines.append(f"Bot: @{j['telegram_bot_username']}"
+                     + (f" · check `{j.get('telegram_check_status')}`"
+                        if j.get("telegram_check_status") else ""))
+    mem_now = j.get("mem_mb") or 0
+    mem_peak = j.get("peak_mem_mb") or 0
+    mem_cap = j.get("mem_limit_mb")
+    cap_s = ("unlimited" if mem_cap == 0 else
+             (f"{mem_cap}MB" if mem_cap else "runner default"))
+    lines.append(f"Memory: {round(float(mem_now))}MB now · {round(float(mem_peak))}MB peak · cap {cap_s}")
+    lines.append(f"Uptime: {_fmt_uptime(j.get('uptime_s'))} · Restarts: {j.get('restarts') or 0}")
+    if j.get("last_exit_reason"):
+        lines.append(f"Last exit: `{j['last_exit_reason']}`"
+                     + (f" (code {j['last_exit_code']})"
+                        if j.get("last_exit_code") not in (None, "") else ""))
+
+    rid = j.get("runner_job_id") or "—"
+    rurl = j.get("runner_url") or "(embedded / default pool)"
+    lines += ["", f"Runner job id: `{rid}`", f"Runner URL: `{rurl}`"]
+    if j.get("web") or j.get("web_slug") or j.get("port"):
+        lines.append(f"Web: slug `{j.get('web_slug') or '—'}` · port `{j.get('port') or '—'}`")
+    if j.get("repo_url"):
+        lines.append(f"Repo: `{j['repo_url']}`")
+        if j.get("repo_entry"):
+            lines.append(f"Entry: `{j['repo_entry']}`")
+        commit = j.get("live_repo_commit") or j.get("repo_commit") or "—"
+        lines.append(f"Commit: `{str(commit)[:12]}`"
+                     + (" · auto-deploy on" if j.get("auto_deploy") else ""))
+    if j.get("requirements"):
+        lines.append(f"Requirements: `{j['requirements'][:180]}`")
+    if j.get("libs"):
+        libs = j["libs"]
+        lines.append(f"Installed libs: `{', '.join(libs[:12])}`"
+                     + ("…" if len(libs) > 12 else ""))
+    if j.get("env_keys"):
+        lines.append(f"Env keys: `{', '.join(j['env_keys'])}`  _(values hidden)_")
+    else:
+        lines.append("Env keys: _(none)_")
+    if j.get("has_code"):
+        kb = j.get("code_bytes") or 0
+        lines.append(f"Source: stored inline ({kb} bytes) — tap 📄 to download")
+    else:
+        lines.append("Source: no inline body (repo/zip deploy) — files live on the runner")
+    lines.append(f"Created: {j.get('created_at') or '—'} · Updated: {j.get('updated_at') or '—'}")
+    return "\n".join(lines)
+
+
+def _admin_job_kb(j: dict) -> dict:
+    jid = j["id"]
+    uid = j.get("owner_id")
+    rows = [
+        [{"text": "🔄 Restart", "callback_data": f"admin:jobrestart:{jid}"},
+         {"text": "⏹ Stop", "callback_data": f"admin:jobstop:{jid}"}],
+        [{"text": "📜 Logs", "callback_data": f"admin:joblogs:{jid}"},
+         {"text": "📄 Source", "callback_data": f"admin:jobsource:{jid}"}],
+        [{"text": "✏️ Edit code", "callback_data": f"admin:jobedit:{jid}"},
+         {"text": "🔑 Set env", "callback_data": f"admin:jobenv:{jid}"}],
+        [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{jid}"},
+         {"text": "🗑 Delete…", "callback_data": f"admin:jobdelconfirm:{jid}"}],
+    ]
+    if j.get("telegram_bot_username"):
+        rows.append([{"text": "🤖 Open bot", "url": f"https://t.me/{j['telegram_bot_username']}"}])
+    rows.append([{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}])
+    nav = []
+    if uid:
+        nav.append({"text": "👤 Owner", "callback_data": f"admin:user:{uid}"})
+    nav.append({"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"})
+    rows.append(nav)
+    return {"inline_keyboard": rows}
 
 
 def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
@@ -148,7 +313,7 @@ def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
         return  # silent, same as /admin for a non-admin
     ref = (arg or "").strip()
     if not ref:
-        _send(chat_id, f"Usage: `/{'zip' if sub == 'allowzip' else 'unzip'} <username or telegram_id>`")
+        _send(chat_id, f"Usage: `/{'zip' if sub == 'allowzip' else 'unzip'} name`")
         return
     target = telegram_link.resolve_user_ref(ref)
     if not target:
@@ -157,6 +322,133 @@ def cmd_admin_short_toggle(chat_id, telegram_user_id, arg, sub):
     telegram_link.set_zip_permission(target["id"], sub == "allowzip")
     verb = "can now upload" if sub == "allowzip" else "can no longer upload"
     _send(chat_id, f"✅ {target.get('username') or ref} {verb} .zip bundles.")
+
+
+def _safe_reapply_mem(user_id: int) -> int:
+    """Push a fresh 👑 decision to the bots that are running RIGHT NOW, and
+    report how many were restarted.
+
+    Best-effort on purpose: the flag is already written to users.mem_unlimited
+    before this is called, so a runner that is asleep or mid-deploy only means
+    "the next deploy applies it" — never "the grant failed". Raising here would
+    turn a cosmetic follow-up into a lost admin command."""
+    try:
+        return bot_ops.reapply_mem_limit(user_id)
+    except Exception:
+        logger.exception("Could not re-apply the memory limit for user %s", user_id)
+        return 0
+
+
+def _queens_text() -> str:
+    rows = telegram_link.list_queens()
+    if not rows:
+        return ("👑 *Queens* — nobody has unlimited memory yet.\n"
+                "Grant it with `/queen username` (or a telegram id).")
+    lines = [f"👑 *Queens* ({len(rows)}) — no per-bot memory ceiling:"]
+    for r in rows:
+        extra = f" · jobs:`{r['job_limit_override']}`" if r.get("job_limit_override") else ""
+        lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
+                     f"tg:`{r.get('telegram_id') or '—'}`{extra}")
+    lines.append("\nRevoke with `/queen off name`.")
+    return "\n".join(lines)
+
+
+def cmd_queen(chat_id, telegram_user_id, arg):
+    """👑 /queen — the unlimited-memory flag, back by request.
+
+      /queen                 list everyone who has it
+      /queen <user>          grant  (users.mem_unlimited=1 → the runner is told
+                             mem_limit_mb=0, which skips the per-job RLIMIT_AS)
+      /queen off <user>      revoke (back to the runner's default cap)
+      /unqueen <user>        the same revoke, one word shorter
+
+    <user> is a CodeNest username, email or linked Telegram id — resolved by
+    telegram_link.resolve_user_ref, the same lookup /admin limit and /see use,
+    because an admin usually knows one of those and never the internal id.
+
+    Admin-only and SILENT for everyone else, the same posture as /admin and
+    /see: a non-admin gets nothing back, not even proof the command exists.
+
+    The flag alone used to be the whole feature, and that was the complaint:
+    the runner stores a job's RLIMIT when the job is created, so a bot that was
+    already being OOM-killed kept its old ceiling until someone redeployed it.
+    reapply_mem_limit() below closes that gap for bots that are running now.
+    """
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        # Silent for everyone else — same posture as /admin and /see. The one
+        # exception is an account that ALREADY holds 👑: showing them their own
+        # panel reveals nothing they don't have, and "I typed /queen and nothing
+        # happened" is indistinguishable from a broken bot.
+        if _user_is_queen(caller):
+            _send(chat_id, _queen_panel_text(caller), reply_markup=_queen_panel_kb())
+        return
+
+    parts = (arg or "").split(None, 1)
+    if not parts:
+        _send(chat_id, _queens_text())
+        return
+
+    off = parts[0].lower() in ("off", "remove", "revoke", "no", "unqueen")
+    # "/queen off" on its own is a real thing an admin types mid-thought —
+    # indexing parts[1] unconditionally raised IndexError, which the dispatcher
+    # logged as an error and answered with nothing at all.
+    if off:
+        ref = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        ref = parts[0].strip()
+    if not ref:
+        _send(chat_id, "Usage:\n"
+                       "`/queen username` — grant 👑\n"
+                       "`/queen off name` — revoke it\n"
+                       "`/queen` — list everyone who has it")
+        return
+
+    target = telegram_link.resolve_user_ref(ref)
+    if not target:
+        _send(chat_id, f"No user found for “{ref}”.")
+        return
+
+    name = target.get("username") or ref
+    grant = not off
+    if bool(target.get("mem_unlimited")) == grant:
+        _send(chat_id, f"{name} is {'already 👑 — no memory ceiling' if grant else 'already on the default memory cap'}. "
+                       "Nothing changed.")
+        return
+
+    telegram_link.set_unlimited_permission(target["id"], grant)
+    reapplied = _safe_reapply_mem(target["id"])
+    text = (f"👑 {name} now has unlimited memory — no per-bot RAM ceiling."
+            if grant else
+            f"✅ {name} is back on the runner's default memory cap.")
+    if reapplied:
+        text += f"\n🔁 Restarted {reapplied} running bot(s) so it applies now — data kept."
+    else:
+        text += "\nAny running bot picks it up on its next deploy or restart."
+    _send(chat_id, text)
+
+
+def cmd_user(chat_id, telegram_user_id, arg=""):
+    """`/user` — every account as buttons; `/user name` opens one card.
+
+    Same data the 👥 Users panel shows, reachable by typing so an admin who
+    already knows the username does not have to page through the list.
+    """
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return
+    ref = (arg or "").strip()
+    if not ref:
+        _send(chat_id, _admin_users_text(0), reply_markup=_admin_users_kb(0))
+        return
+    target = telegram_link.resolve_user_ref(ref)
+    if not target:
+        _send(chat_id, f"No user found for “{ref}”. Try `/user` for the full list, "
+                       f"or `/admin search {ref}`.")
+        return
+    jobs = telegram_admin_ext.jobs_for_user(target["id"])
+    _send(chat_id, _admin_user_detail_text(target, jobs),
+          reply_markup=_admin_user_row_kb(target, jobs))
 
 
 def cmd_see(chat_id, telegram_user_id, arg):
@@ -172,8 +464,8 @@ def cmd_see(chat_id, telegram_user_id, arg):
         return
     parts = (arg or "").split(None, 1)
     if not parts:
-        _send(chat_id, "Usage:\n`/see <username|telegram_id>` — account + jobs\n"
-                       "`/see <username|telegram_id> <job id|name>` — full job + code")
+        _send(chat_id, "Usage:\n`/see name` — account + jobs\n"
+                       "`/see name job` — full job + code")
         return
     target = telegram_link.resolve_user_ref(parts[0])
     if not target:
@@ -195,7 +487,7 @@ def cmd_see(chat_id, telegram_user_id, arg):
             lines.append(f"*{len(jobs)} job(s):*")
             for j in jobs:
                 lines.append(f"· #{j['id']} {j['name']} · {j['language']} · {j['live_status']}")
-            lines.append(f"\nFor full detail + code: `/see {parts[0]} <job id or name>`")
+            lines.append(f"\nFor full detail + code: `/see {parts[0]} job`")
         _send(chat_id, "\n".join(lines))
         return
 
@@ -240,12 +532,16 @@ def cmd_admin(chat_id, telegram_user_id, arg):
       /admin unban <telegram_id>
       /admin broadcast <message>
       /admin limit <username|telegram_id> <number|clear>
+      /admin queen <username|telegram_id> — 👑 unlimited memory (see /queen)
+      /admin unqueen <username|telegram_id> / /admin queens — list them
       /admin grant|revoke|allowzip|denyzip <username|telegram_id>
       /admin addrunner <label> <url> <secret>
       /admin deleterunner <id>
       /admin search <query> / /admin searchjobs <query>
       /admin signups [hours] — default 24h
       /admin export users|jobs — sends a CSV file
+      /user  — every account as buttons; /user <name|id> opens one card
+              (jobs, source, runner URL, restart/stop/delete/edit — all from chat)
     The hardcoded SUPER_ADMIN_TG_ID or any user with is_admin=1 can use all
     of this; every action re-checks admin status on its own, since
     callback_data is attacker-suppliable in principle."""
@@ -263,7 +559,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
             return
         bits = rest.split(None, 1)
         if not bits or not bits[0].isdigit():
-            _send(chat_id, "Usage: `/admin ban <telegram_id> [reason]` — or just `/admin ban` "
+            _send(chat_id, "Usage: `/admin ban 123456789 [reason]` — or just `/admin ban` "
                            "and I'll ask for each piece.")
             return
         reason = bits[1] if len(bits) > 1 else ""
@@ -273,7 +569,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub == "unban":
         if not rest.isdigit():
-            _send(chat_id, "Usage: `/admin unban <telegram_id>`")
+            _send(chat_id, "Usage: `/admin unban 123456789`")
             return
         ok = telegram_admin_ext.unban_telegram_id(int(rest))
         _send(chat_id, "✅ Unbanned." if ok else "That id wasn't banned.")
@@ -296,13 +592,78 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
         return
 
+    if sub in ("health", "doctor", "diag", "diagnose"):
+        # The same screen the 🩺 button shows: webhook, runners, jobs, the two
+        # loops that keep bots alive, and how a deploy works now.
+        _send(chat_id, _admin_health_text(), reply_markup=_admin_health_kb())
+        return
+
+    if sub in ("runners", "runner", "fleet"):
+        # Command twin of the 🖥 Runners button — same screen, no tap required.
+        handle_admin_callback(chat_id, telegram_user_id, "runners", "", None)
+        return
+
+    if sub in ("menu", "panel", "home"):
+        _send(chat_id, "🛠 *Admin panel* — every row is also a command "
+                       "(`/admin runners`, `/admin health`, `/user`, …).",
+              reply_markup=_admin_menu_kb())
+        return
+
+    
+    if sub in ("recover", "rescue", "reconcile"):
+        # Force the same recovery pass the interval loop runs — answer to
+        # "runner just woke up, bring every bot back NOW".
+        _send(chat_id, "♻️ Running recovery sweep…")
+        try:
+            from services import job_recovery
+            unresolved = job_recovery.recover_once()
+            sweep = job_recovery.auto_deploy_sweep(force=True)
+        except Exception as exc:  # noqa: BLE001
+            _send(chat_id, f"❌ Recovery failed: {type(exc).__name__}: {exc}")
+            return
+        extra = ""
+        if isinstance(sweep, dict) and not sweep.get("disabled") and not sweep.get("waiting"):
+            extra = (f"\nAuto-deploy: checked {sweep.get('checked', 0)}, "
+                     f"updated {sweep.get('updated', 0)}, "
+                     f"failed {sweep.get('failed', 0)}.")
+        _send(chat_id,
+              f"✅ Recovery pass done. Unresolved (still missing token/source): "
+              f"*{unresolved}*." + extra,
+              reply_markup={"inline_keyboard": [
+                  [{"text": "🩺 Health", "callback_data": "admin:health"},
+                   {"text": "🖥 Runners", "callback_data": "admin:runners"}],
+                  [{"text": "♻️ Run again", "callback_data": "admin:recovernow"},
+                   {"text": "⬅️ Menu", "callback_data": "admin:menu"}],
+              ]})
+        return
+
+    if sub in ("overview", "stats", "dash"):
+        handle_admin_callback(chat_id, telegram_user_id, "overview", "", None)
+        return
+
+    if sub in ("bans", "banlist"):
+        handle_admin_callback(chat_id, telegram_user_id, "bans", "", None)
+        return
+
+    if sub in ("audit", "log"):
+        handle_admin_callback(chat_id, telegram_user_id, "audit", "", None)
+        return
+
+    if sub in ("jobs", "joblist"):
+        handle_admin_callback(chat_id, telegram_user_id, "jobs", "0", None)
+        return
+
+    if sub in ("users", "userlist"):
+        handle_admin_callback(chat_id, telegram_user_id, "users", "0", None)
+        return
+
     if sub == "limit":
         if not rest:
             _start_admin_flow(chat_id, "limit")
             return
         bits = rest.split(None, 1)
         if len(bits) < 2:
-            _send(chat_id, "Usage: `/admin limit <username|telegram_id> <number|clear>` — "
+            _send(chat_id, "Usage: `/admin limit username 10` (or `clear`) — "
                            "or just `/admin limit` and I'll ask.")
             return
         target = telegram_link.resolve_user_ref(bits[0])
@@ -318,13 +679,25 @@ def cmd_admin(chat_id, telegram_user_id, arg):
                        + (f"set to {val}." if val else "cleared (back to default)."))
         return
 
+    if sub in ("queen", "unqueen", "queens"):
+        # One implementation, two spellings: /admin queen and the top-level
+        # /queen are the same command, so there is only one place that decides
+        # what the flag does or how it is reported.
+        if sub == "queens":
+            _send(chat_id, _queens_text())
+        elif sub == "queen":
+            cmd_queen(chat_id, telegram_user_id, rest)
+        else:
+            cmd_queen(chat_id, telegram_user_id, f"off {rest}".strip())
+        return
+
     if sub == "addrunner":
         if not rest:
             _start_admin_flow(chat_id, "addrunner")
             return
         bits = rest.split(None, 2)
         if len(bits) < 3:
-            _send(chat_id, "Usage: `/admin addrunner <label> <url> <RUNNER_SERVICE_SECRET>` — "
+            _send(chat_id, "Usage: `/admin addrunner label https://runner.example secret` — "
                            "or just `/admin addrunner` and I'll ask for each one.\n"
                            "⚠️ Delete this message after sending — the secret sits in chat history otherwise.")
             return
@@ -339,7 +712,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub in ("grant", "revoke", "allowzip", "denyzip"):
         if not rest:
-            _send(chat_id, f"Usage: `/admin {sub} <username or telegram_id>`")
+            _send(chat_id, f"Usage: `/admin {sub} username`")
             return
         target = telegram_link.resolve_user_ref(rest)
         if not target:
@@ -364,7 +737,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub == "search":
         if not rest:
-            _send(chat_id, "Usage: `/admin search <part of a username or email>`")
+            _send(chat_id, "Usage: `/admin search part-of-name`")
             return
         rows = telegram_admin_ext.search_users(rest)
         if not rows:
@@ -384,7 +757,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub == "searchjobs":
         if not rest:
-            _send(chat_id, "Usage: `/admin searchjobs <part of a job name>`")
+            _send(chat_id, "Usage: `/admin searchjobs part-of-name`")
             return
         rows = telegram_admin_ext.search_jobs(rest)
         if not rows:
@@ -431,7 +804,7 @@ def cmd_admin(chat_id, telegram_user_id, arg):
 
     if sub == "deleterunner":
         if not rest.isdigit():
-            _send(chat_id, "Usage: `/admin deleterunner <id>` — get the id from the Runners view.")
+            _send(chat_id, "Usage: `/admin deleterunner 3` — get the id from the Runners view.")
             return
         res = telegram_admin_ext.delete_runner(int(rest))
         _send(chat_id, f"🗑 Deleted runner “{res['label']}”." if res.get("ok") else f"❌ {res['error']}")
@@ -447,6 +820,20 @@ def cmd_admin(chat_id, telegram_user_id, arg):
     _send(chat_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
 
 
+def cmd_details(chat_id, telegram_user_id, arg):
+    """/details — admin-only shortcut straight into the job fleet list: one
+    line + one hidden-link 🔗 button per job (id, name, owner's user id,
+    🔒 if restart-locked). Tapping the button opens that job's full card —
+    status, bot, memory, repo/commit, requirements, env key names (never
+    values), source availability, logs/restart/stop/edit/delete — same as
+    /admin → 📦 Jobs, just reachable in one command."""
+    caller = telegram_link.user_for_chat(telegram_user_id)
+    if not _is_admin(caller, telegram_user_id):
+        return  # silent — same as every other admin-only command
+    page = int(arg) if (arg or "").strip().isdigit() else 0
+    handle_admin_callback(chat_id, telegram_user_id, "jobs", str(page), None)
+
+
 def _admin_users_text(page: int) -> str:
     rows = telegram_link.list_admin_overview(limit=200)
     per_page = 8
@@ -458,6 +845,7 @@ def _admin_users_text(page: int) -> str:
         if r.get("is_admin"): flags.append("admin")
         if r.get("can_upload_zip"): flags.append("zip")
         if r.get("is_suspended"): flags.append("suspended")
+        if r.get("mem_unlimited"): flags.append("👑")
         tag = f" _{', '.join(flags)}_" if flags else ""
         tid = r.get("telegram_id")
         lines.append(f"`{r['id']}` · {r.get('username') or '(no username)'} · "
@@ -476,6 +864,7 @@ def _admin_users_kb(page: int):
         if r.get("is_admin"): flags.append("A")
         if r.get("can_upload_zip"): flags.append("Z")
         if r.get("is_suspended"): flags.append("S")
+        if r.get("mem_unlimited"): flags.append("👑")
         label = r.get("username") or f"#{r['id']}"
         if flags:
             label += " [" + "".join(flags) + "]"
@@ -492,17 +881,282 @@ def _admin_users_kb(page: int):
     return {"inline_keyboard": kb}
 
 
+def _admin_health_text() -> str:
+    """🩺 One screen that answers "is the machinery actually working?".
+
+    Every line is read from the thing itself — the webhook Telegram reports, the
+    runners' own `/health`, the jobs table — instead of from what the code
+    INTENDS to do. That distinction is the point: "the inline buttons don't
+    work", "my bot stopped when the runner restarted" and "my push didn't
+    deploy" all look identical from the outside and have three different causes,
+    and each is answered here with evidence rather than a guess.
+    """
+    lines = ["🩺 *Runner & bot health*"]
+
+    # ---- Telegram delivery: why a button press arrives at all -------------
+    info = (_tg("getWebhookInfo") or {}).get("result") or {}
+    hook = str(info.get("url") or "")
+    allowed = info.get("allowed_updates") or []
+    err = str(info.get("last_error_message") or "")
+    if not hook:
+        lines.append("\n*Telegram*\n⚠️ No webhook registered — this service is "
+                     "long-polling. On a host that sleeps (Render free tier) the "
+                     "poller dies with it and button presses queue up on "
+                     "Telegram's side until something else wakes the box. Set "
+                     "`SITE_BASE` to the public URL and restart, or tap "
+                     "🔁 below.")
+    else:
+        lines.append(f"\n*Telegram*\n✅ Webhook `{hook}`")
+        lines.append(f"   Pending updates: {info.get('pending_update_count', 0)}"
+                     f" · max connections: {info.get('max_connections', '-')}")
+        # THE check for "inline buttons do nothing": a webhook registered before
+        # callback_query was in allowed_updates keeps receiving typed commands
+        # and silently drops every single button press.
+        if allowed and "callback_query" not in allowed:
+            lines.append("❌ *`callback_query` is missing from allowed_updates* — "
+                         "Telegram is dropping every button press. Tap "
+                         "🔁 *Re-register webhook* to fix it now.")
+        elif allowed:
+            lines.append(f"   allowed_updates: {', '.join(str(a) for a in allowed)}")
+        else:
+            lines.append("   allowed_updates: all types (none restricted)")
+        if err:
+            when = info.get("last_error_date")
+            stamp = ""
+            try:
+                stamp = time.strftime(" at %Y-%m-%d %H:%M UTC", time.gmtime(int(when)))
+            except Exception:                                        # noqa: BLE001
+                pass
+            lines.append(f"⚠️ Last delivery error: {err}{stamp}")
+        else:
+            lines.append("   Last delivery error: none")
+
+    # ---- runners ----------------------------------------------------------
+    pool = runner_client.runner_pool()
+    if not pool:
+        lines.append("\n*Runners*\nEmbedded mode — the runner lives inside this "
+                     "service (no `RUNNER_SERVICE_URL`).")
+    else:
+        health = runner_client.worker_health(refresh=True)
+        lines.append(f"\n*Runners* ({len(pool)})")
+        for u in pool:
+            h = health.get(u) or {}
+            if h.get("online"):
+                lines.append(f"✅ `{u}`\n   {h.get('jobs', 0)} job(s) · "
+                             f"{h.get('free', 0)} free slot(s) · "
+                             f"{int(h.get('free_mb') or 0)}MB free of "
+                             f"{int(h.get('total_mb') or 0)}MB"
+                             + (" · **FULL**" if h.get("full") else ""))
+            else:
+                lines.append(f"❌ `{u}` — no answer from `/health` "
+                             f"(asleep, restarting, or the wrong URL)")
+
+    # ---- jobs + the two loops that keep them alive ------------------------
+    s = telegram_link.admin_overview_stats()
+    try:
+        from services import job_recovery
+        ad = job_recovery.auto_deploy_status()
+        rec = job_recovery.RECOVERY_INTERVAL_S
+    except Exception as exc:                                         # noqa: BLE001
+        ad, rec = {"enabled": False, "last": {}}, 0
+        lines.append(f"\n⚠️ recovery module unreadable: {exc}")
+    lines.append(f"\n*Jobs*\n{s.get('jobs_total', 0)} total · "
+                 f"{s.get('jobs_deployed', 0)} deployed")
+    if rec >= 60:
+        lines.append(f"🔁 Recovery runs every {rec}s — any job the fleet lost is "
+                     f"re-created from the stored code and env, then its "
+                     f"snapshot (database.db, session.json, data/) is restored, "
+                     f"so a runner restart no longer stops anything.")
+    else:
+        lines.append(f"⚠️ Recovery is OFF (`JOB_RECOVERY_INTERVAL_S={rec}`) — a "
+                     f"runner redeploy will leave bots down until you restart "
+                     f"them by hand.")
+    if ad.get("enabled"):
+        last = ad.get("last") or {}
+        ago = ad.get("last_run_s_ago")
+        lines.append(f"⚙️ Auto-deploy sweep every {ad.get('interval_s')}s"
+                     + (f" · last {ago}s ago" if ago is not None else " · not run yet")
+                     + f" · checked {last.get('checked', 0)}, updated "
+                       f"{last.get('updated', 0)}, failed {last.get('failed', 0)}")
+        for e in (last.get("errors") or [])[:3]:
+            lines.append(f"   • {e}")
+    else:
+        lines.append("⚙️ Auto-deploy sweep is OFF "
+                     "(`AUTO_DEPLOY_INTERVAL_S=0`).")
+
+    # ---- GitHub reachability, which is what /import and the picker need ----
+    tok = bool(os.getenv("GITHUB_TOKEN", "").strip())
+    q_owner, q_repo = _queen_repo_parts()
+    q_branch = QUEEN_PROJECTS_BRANCH or ""
+    lines.append("\n*GitHub*")
+    lines.append(("✅ `GITHUB_TOKEN` set — 5000 req/hour"
+                  if tok else
+                  "⚠️ No `GITHUB_TOKEN` — anonymous calls are 60/hour per IP; "
+                  "a shared host can hit that and `/import` will look empty."))
+    if q_owner:
+        try:
+            head = github_repo.head_commit(q_owner, q_repo, q_branch or "")
+            gh = f"Starter pack `{q_owner}/{q_repo}`" + (f" @ `{q_branch}`" if q_branch else "") \
+                 + f" → `{(head or '')[:7] or 'no answer'}`"
+        except Exception as exc:                                     # noqa: BLE001
+            gh = f"Starter pack `{q_owner}/{q_repo}` — {type(exc).__name__}: {exc}"
+        lines.append(gh)
+    else:
+        lines.append("No starter pack configured (optional `QUEEN_PROJECTS_REPO`).")
+
+    # ---- what the runner now does, in the admin's own words ---------------
+    lines.append("\n*How a deploy works now*\n"
+                 "1. The repo is scanned, and each runnable thing in it becomes a "
+                 "button — no filename to guess.\n"
+                 "2. The runner clones the exact branch (`/tree/branch` in the "
+                 "URL, or `#<branch>`) and records the commit it built.\n"
+                 "3. It installs the root manifest AND each chosen sub-project's "
+                 "own requirements (up to 4 paths).\n"
+                 "4. `/latest` or ⬆️ redeploys IN PLACE: same id, same folder — so "
+                 "the bot's database and sessions survive — same address, same "
+                 "env.\n"
+                 "5. On boot the runner respawns every job it still wants running "
+                 "before this site even asks, and the recovery sweep above "
+                 "re-creates anything that is gone entirely.\n"
+                 "6. 👑 `/autodeploy x on` makes step 4 happen by itself.")
+    return "\n".join(lines)
+
+
+def _admin_health_kb():
+    return {"inline_keyboard": [
+        [{"text": "🔁 Re-register webhook", "callback_data": "admin:fixwebhook"},
+         {"text": "🩺 Refresh", "callback_data": "admin:health"}],
+        [{"text": "♻️ Recover bots now", "callback_data": "admin:recovernow"},
+         {"text": "⚙️ Auto-deploy now", "callback_data": "admin:autodepnow"}],
+        [{"text": "🚦 Set a job limit", "callback_data": "admin:limitflow"}],
+        [{"text": "🖥 Runners", "callback_data": "admin:runners"},
+         {"text": "⬅️ Menu", "callback_data": "admin:menu"}],
+    ]}
+
+
 def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=None):
     """Every admin: callback lands here. Re-checks admin status on every
     single press — a button label is not a permission, whoever crafted the
-    tap is."""
+    tap is.
+
+    NEVER raises to the webhook/poller: a raised error becomes Telegram's
+    alert popup "Something went wrong" which looks like the whole admin
+    panel is broken. Failures stay as a normal chat reply instead.
+    """
+    try:
+        _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("admin callback %s/%s failed", action, ref)
+        try:
+            _edit_or_send(
+                chat_id, message_id,
+                f"⚠️ Could not complete that admin action "
+                f"({type(exc).__name__}). Try `/admin` again, or 🩺 Health.",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "🛠 Menu", "callback_data": "admin:menu"},
+                     {"text": "🩺 Health", "callback_data": "admin:health"}]]})
+        except Exception:
+            try:
+                _send(chat_id, "⚠️ Admin action failed — send `/admin` again.")
+            except Exception:
+                pass
+
+
+def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message_id=None):
     caller = telegram_link.user_for_chat(telegram_user_id)
     if not _is_admin(caller, telegram_user_id):
-        _edit_or_send(chat_id, message_id, "🔒 Admin only.")
+        # Silent for non-admins — do not confirm the panel exists.
         return
 
     if action == "menu":
         _edit_or_send(chat_id, message_id, "🛠 *Admin panel*", reply_markup=_admin_menu_kb())
+        return
+
+    if action == "health":
+        # Read live: webhook, runners, jobs, the two recovery loops, GitHub.
+        _edit_or_send(chat_id, message_id, _admin_health_text(),
+                      reply_markup=_admin_health_kb())
+        return
+
+    if action == "fixwebhook":
+        # The repair for "inline buttons don't work" when the cause is on
+        # Telegram's side: a webhook registered without callback_query drops
+        # every button press while typed commands keep working.
+        #
+        # It only re-registers when a webhook ALREADY exists, because that is
+        # what proves this service is in webhook mode and no poller thread is
+        # running. Registering one over a live poller would start a fight the
+        # poller loses silently: getUpdates comes back 409, poll_loop deletes
+        # the webhook once to self-heal, and after that it just logs 409 forever
+        # while the bot answers nothing. A mode change needs a restart, and the
+        # message says so instead of pretending a button can do it.
+        before = (_tg("getWebhookInfo") or {}).get("result") or {}
+        if not str(before.get("url") or ""):
+            _send(chat_id, "⚠️ No webhook is registered, so this service is "
+                           "long-polling — and switching modes is a restart, not "
+                           "a button: registering one now would fight the running "
+                           "poller and the bot would go quiet.\n\n"
+                           "To move to webhook mode:\n"
+                           "1. set `SITE_BASE` to this service's public URL "
+                           "(e.g. `https://ahadrunspace.onrender.com`)\n"
+                           "2. restart the service\n"
+                           "It registers `/telegram/webhook` with "
+                           "`message` + `callback_query` at boot and skips "
+                           "polling. 🩺 shows which mode you are in.")
+            return
+        ok = enable_webhook()
+        info = (_tg("getWebhookInfo") or {}).get("result") or {}
+        allowed = info.get("allowed_updates") or []
+        _send(chat_id, ("✅ Webhook re-registered." if ok else
+                        "❌ Telegram refused setWebhook — check `SITE_BASE` and "
+                        "`BOT_TOKEN`, and the service log for the reason.")
+                       + f"\nurl: `{info.get('url') or '(none)'}`"
+                       + f"\nallowed_updates: {', '.join(str(a) for a in allowed) or '(all)'}"
+                       + f"\npending: {info.get('pending_update_count', 0)}"
+                       + ("\n\nButtons should answer now. If they still don't, the "
+                          "cause is inside this service, not Telegram — 🩺 shows "
+                          "which part." if ok else ""))
+        if message_id:
+            _edit_or_send(chat_id, message_id, _admin_health_text(),
+                          reply_markup=_admin_health_kb())
+        return
+
+    if action == "recovernow":
+        _send(chat_id, "♻️ Running recovery sweep…")
+        try:
+            from services import job_recovery
+            unresolved = job_recovery.recover_once()
+            _send(chat_id, f"✅ Recovery done. Unresolved: *{unresolved}*.",
+                  reply_markup={"inline_keyboard": [
+                      [{"text": "🩺 Health", "callback_data": "admin:health"},
+                       {"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
+        except Exception as exc:  # noqa: BLE001
+            _send(chat_id, f"❌ {type(exc).__name__}: {exc}")
+        return
+
+    if action == "autodepnow":
+        # Run the 👑 auto-deploy sweep on demand instead of waiting for its own
+        # clock — the answer to "I pushed twenty minutes ago, where is it?".
+        try:
+            from services import job_recovery
+            res = job_recovery.auto_deploy_sweep(force=True)
+        except Exception as exc:                                   # noqa: BLE001
+            res = {"error": f"{type(exc).__name__}: {exc}"}
+        if res.get("disabled"):
+            _send(chat_id, "⚙️ The auto-deploy sweep is switched off "
+                           "(`AUTO_DEPLOY_INTERVAL_S=0`). Individual apps still "
+                           "update with `/latest name` or ⬆️.")
+        else:
+            _send(chat_id, f"⚙️ Sweep done — checked *{res.get('checked', 0)}*, "
+                           f"updated *{res.get('updated', 0)}*, unchanged "
+                           f"{res.get('unchanged', 0)}, failed {res.get('failed', 0)}."
+                           + ("".join(f"\n• {e}" for e in (res.get("errors") or [])[:4])))
+        return
+
+    if action == "limitflow":
+        # /admin limit as a button: the same two-question flow, discoverable
+        # from the panel instead of only from the command list.
+        _start_admin_flow(chat_id, "limit")
         return
 
     if action == "overview":
@@ -525,14 +1179,17 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         if not target:
             _edit_or_send(chat_id, message_id, "That user no longer exists.")
             return
-        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        jobs = telegram_admin_ext.jobs_for_user(target["id"])
+        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target, jobs),
+                      reply_markup=_admin_user_row_kb(target, jobs))
         return
 
-    if action in ("togadmin", "togzip", "togsuspend"):
+    if action in ("togadmin", "togzip", "togsuspend", "togqueen"):
         target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
         if not target:
             _edit_or_send(chat_id, message_id, "That user no longer exists.")
             return
+        note = ""
         if action == "togadmin":
             if target.get("telegram_id") == SUPER_ADMIN_TG_ID and target.get("is_admin"):
                 _edit_or_send(chat_id, message_id, "Can't revoke the built-in super-admin.")
@@ -540,10 +1197,49 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
                 telegram_link.set_admin(target["id"], not target.get("is_admin"))
         elif action == "togzip":
             telegram_link.set_zip_permission(target["id"], not target.get("can_upload_zip"))
-        else:
+        elif action == "togsuspend":
             telegram_link.set_suspended(target["id"], not target.get("is_suspended"))
+        else:
+            # 👑 — same decision /queen makes from typed text, and the same
+            # follow-up: the flag is written first, then pushed to whatever
+            # this user has running so it is not a "next deploy" surprise.
+            grant = not target.get("mem_unlimited")
+            telegram_link.set_unlimited_permission(target["id"], grant)
+            reapplied = _safe_reapply_mem(target["id"])
+            note = ("👑 Granted — no per-bot memory ceiling." if grant
+                    else "👑 Removed — back to the runner's default cap.")
+            note += (f" Restarted {reapplied} running bot(s)." if reapplied
+                     else " Running bots pick it up on their next deploy or restart.")
         target = telegram_link.get_user_by_id(target["id"])  # fresh flags
-        _edit_or_send(chat_id, message_id, _admin_user_detail_text(target), reply_markup=_admin_user_row_kb(target))
+        jobs = telegram_admin_ext.jobs_for_user(target["id"])
+        card = _admin_user_detail_text(target, jobs)
+        if note:
+            card += f"\n\n_{note}_"
+        _edit_or_send(chat_id, message_id, card,
+                      reply_markup=_admin_user_row_kb(target, jobs))
+        return
+
+    if action in ("queens", "unqueen"):
+        if action == "unqueen":
+            target = telegram_link.get_user_by_id(int(ref)) if ref.isdigit() else None
+            if target:
+                telegram_link.set_unlimited_permission(target["id"], False)
+                _safe_reapply_mem(target["id"])
+        rows = telegram_link.list_queens()
+        kb = []
+        if not rows:
+            lines = ["👑 *Queens* — nobody has unlimited memory right now.",
+                     "Grant it from a user's card (👑 Make queen) or with "
+                     "`/queen username` (or a telegram id)."]
+        else:
+            lines = [f"👑 *Queens* ({len(rows)}) — no per-bot memory ceiling:"]
+            for r in rows:
+                who = r.get("username") or f"#{r['id']}"
+                lines.append(f"`{r['id']}` · {who} · tg:`{r.get('telegram_id') or '—'}`")
+                kb.append([{"text": f"🚫 Remove 👑 {who}"[:60],
+                            "callback_data": f"admin:unqueen:{r['id']}"}])
+        kb.append([{"text": "⬅️ Menu", "callback_data": "admin:menu"}])
+        _edit_or_send(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": kb})
         return
 
     if action == "runners":
@@ -593,11 +1289,11 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         per_page = 8
         rows, total = telegram_admin_ext.jobs_recent(limit=per_page, offset=page * per_page)
         kb = []
-        lines = [f"📦 *Jobs* ({total} total) — copy an id, or tap a button below:"]
+        lines = [f"📦 *Jobs* ({total} total) — tap 🔗 to open the hidden link:"]
         for j in rows:
-            lines.append(f"`{j['id']}` · {j['name']} · {j['owner']} · {j['live_status']}")
-            label = f"{j['name']} · {j['owner']} · {j['live_status']}"
-            kb.append([{"text": label[:60], "callback_data": f"admin:job:{j['id']}"}])
+            lines.append(f"#{j['id']} · {j['name']} · uid `{j.get('owner_id') or '?'}`")
+            kb.append([{"text": f"🔗 #{j['id']} {j['name']}"[:60],
+                        "callback_data": f"admin:job:{j['id']}"}])
         nav = []
         if page > 0:
             nav.append({"text": "◀️ Prev", "callback_data": f"admin:jobs:{page-1}"})
@@ -614,20 +1310,95 @@ def handle_admin_callback(chat_id, telegram_user_id, action, ref, message_id=Non
         if not j:
             _edit_or_send(chat_id, message_id, "That job no longer exists.")
             return
-        bot_line = f"\nBot: @{j['telegram_bot_username']}" if j.get("telegram_bot_username") else ""
-        text = (f"*{j['name']}* (#{j['id']})\n"
-                f"Owner: {j['owner']}{' ⛔suspended' if j.get('owner_suspended') else ''}\n"
-                f"Language: {j['language']} · Status: {j.get('live_status') or 'unknown'}\n"
-                f"Uptime: {j.get('uptime_s') or 0}s · Mem: {j.get('mem_mb') or 0}MB · "
-                f"Restarts: {j.get('restarts') or 0}{bot_line}")
-        kb = {"inline_keyboard": [
-            [{"text": "🔄 Restart", "callback_data": f"admin:jobrestart:{j['id']}"},
-             {"text": "⏹ Stop", "callback_data": f"admin:jobstop:{j['id']}"}],
-            [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{j['id']}"}],
-            [{"text": "🗑 Delete (asks to confirm)", "callback_data": f"admin:jobdelconfirm:{j['id']}"}],
-            [{"text": "⬅️ Jobs", "callback_data": "admin:jobs:0"}],
-        ]}
-        _edit_or_send(chat_id, message_id, text, reply_markup=kb)
+        _edit_or_send(chat_id, message_id, _admin_job_detail_text(j),
+                      reply_markup=_admin_job_kb(j))
+        return
+
+    if action == "jobsource":
+        # Send the stored source as a file. Repo/zip jobs may have an empty
+        # body — say so instead of an empty document.
+        job_id = int(ref) if ref.isdigit() else None
+        src = telegram_admin_ext.job_source(job_id) if job_id else None
+        if not src:
+            _send(chat_id, "That job no longer exists.")
+            return
+        code = src.get("code") or ""
+        if not code.strip():
+            extra = ""
+            if src.get("repo_url"):
+                extra = f"\nRepo: `{src['repo_url']}`" + (
+                    f" · entry `{src['repo_entry']}`" if src.get("repo_entry") else "")
+            _send(chat_id, f"*{src['name']}* has no inline source stored "
+                           f"(repo/zip deploy). Files live on the runner." + extra,
+                  reply_markup={"inline_keyboard": [
+                      [{"text": "⬅️ Job", "callback_data": f"admin:job:{job_id}"}]]})
+            return
+        ext = {"python": "py", "node": "js", "javascript": "js", "bash": "sh",
+               "ruby": "rb", "php": "php"}.get((src.get("language") or "").lower(), "txt")
+        fname = f"{src['name']}.{ext}"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{fname}",
+                                          delete=False, encoding="utf-8") as f:
+            f.write(code)
+            tmp_path = f.name
+        try:
+            _send_document(chat_id, tmp_path,
+                           caption=f"{src['name']} — source as stored "
+                                   f"(owner user #{src.get('user_id')})")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+
+    if action == "joblogs":
+        job_id = int(ref) if ref.isdigit() else None
+        res = telegram_admin_ext.admin_logs(job_id, lines=60) if job_id else {"ok": False, "error": "Bad id."}
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res.get('error') or 'no logs'}")
+            return
+        job = res.get("job") or {}
+        body = res.get("logs") or "(empty)"
+        header = f"📜 *{job.get('name') or job_id}* — last lines\n"
+        # Plain text: log lines break Markdown freely.
+        _send_plain(chat_id, header.replace("*", "") + body)
+        _send(chat_id, "—", reply_markup={"inline_keyboard": [
+            [{"text": "⬅️ Job", "callback_data": f"admin:job:{job_id}"},
+             {"text": "🔄 Restart", "callback_data": f"admin:jobrestart:{job_id}"}]]})
+        return
+
+    if action == "jobedit":
+        job_id = int(ref) if ref.isdigit() else None
+        j = telegram_admin_ext.admin_find_job(job_id) if job_id else None
+        if not j:
+            _send(chat_id, "That job no longer exists.")
+            return
+        _start_admin_flow(chat_id, "jobedit", extra={"job_id": job_id, "name": j.get("name")})
+        return
+
+    if action == "jobenv":
+        job_id = int(ref) if ref.isdigit() else None
+        j = telegram_admin_ext.admin_find_job(job_id) if job_id else None
+        if not j:
+            _send(chat_id, "That job no longer exists.")
+            return
+        _start_admin_flow(chat_id, "jobenv", extra={"job_id": job_id, "name": j.get("name")})
+        return
+
+    if action == "limituser":
+        uid = int(ref) if ref.isdigit() else None
+        target = telegram_link.get_user_by_id(uid) if uid else None
+        if not target:
+            _send(chat_id, "That user no longer exists.")
+            return
+        # Pre-fill the user, ask only for the new limit value.
+        _admin_flow[chat_id] = {
+            "flow": "limit", "idx": 1,
+            "data": {"ref": target.get("username") or str(target.get("telegram_id") or uid)},
+            "extra": {}, "expires": time.time() + _ADMIN_FLOW_TTL_S,
+        }
+        _send(chat_id, f"🚦 Job limit for *{target.get('username') or uid}* (#{uid}).\n"
+                       f"Send a number, or `clear` to remove the override. `/cancel` to stop.")
         return
 
     if action == "revisions":
@@ -977,6 +1748,10 @@ _CODE_EXT_LANG = {
 _pending = {}
 _PENDING_TTL_S = 300
 
+# chat_id -> set of guide topics already shown this process (avoid spam)
+_guide_shown = {}
+
+
 # Parallel to _pending, but for multi-field ADMIN actions: bot asks one
 # field at a time ("URL?" -> user answers -> "Secret?" -> user answers ->
 # runs) instead of requiring everything on one line. Each flow is a list of
@@ -1010,6 +1785,12 @@ ADMIN_FLOWS = {
     ],
     "rotatesecret": [
         ("secret", "New `RUNNER_SERVICE_SECRET` for this runner?"),
+    ],
+    "jobedit": [
+        ("code", "Send the new source as a message (or a single file). `/cancel` to stop."),
+    ],
+    "jobenv": [
+        ("pair", "Send `KEY=value` to set, or `delete KEY` to remove. `/cancel` to stop."),
     ],
 }
 
@@ -1106,8 +1887,46 @@ def _run_admin_flow(chat_id, flow_name, data, extra=None):
         runner_id = extra.get("runner_id")
         res = telegram_admin_ext.rotate_runner_secret(int(runner_id), data["secret"])
         _send(chat_id, f"✅ Secret rotated for “{res['label']}”." if res.get("ok") else f"❌ {res['error']}")
-
-
+    elif flow_name == "jobedit":
+        job_id = extra.get("job_id")
+        code = (data.get("code") or "").strip()
+        if not code:
+            _send(chat_id, "Empty source — nothing changed.")
+            return
+        name = extra.get("name") or job_id
+        with _progress(chat_id, "update", name=name) as prog:
+            prog.at(18, "Reading your edit")
+            prog.at(40, "Saving on the site")
+            res = telegram_admin_ext.admin_update_code(int(job_id), code)
+            if not res.get("ok"):
+                prog.fail(res.get("error") or "update failed")
+                return
+            prog.at(78, "Restarting on the runner")
+            prog.done(f"*{name}* updated and restarted.")
+        _send(chat_id, f"✅ *{name}* updated.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "⬅️ Job", "callback_data": f"admin:job:{job_id}"}]]})
+    elif flow_name == "jobenv":
+        job_id = extra.get("job_id")
+        pair = (data.get("pair") or "").strip()
+        name = extra.get("name") or job_id
+        if pair.lower().startswith("delete "):
+            key = pair.split(None, 1)[1].strip() if " " in pair else ""
+            res = telegram_admin_ext.admin_set_env(int(job_id), key, None)
+        elif "=" in pair:
+            key, _, val = pair.partition("=")
+            res = telegram_admin_ext.admin_set_env(int(job_id), key.strip(), val)
+        else:
+            _send(chat_id, "Send `KEY=value` or `delete KEY`. Nothing changed.")
+            return
+        if not res.get("ok"):
+            _send(chat_id, f"❌ {res.get('error')}")
+            return
+        note = "deleted" if res.get("deleted") else "set"
+        restarted = " and restarted" if res.get("restarted") else ""
+        _send(chat_id, f"✅ `{res.get('key')}` {note} on *{name}*{restarted}.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "⬅️ Job", "callback_data": f"admin:job:{job_id}"}]]})
 
 
 def _tg(method, **params):
@@ -1130,6 +1949,43 @@ def _tg(method, **params):
 TG_MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # Telegram bot upload ceiling
 
 
+def _guide_path(name: str):
+    """Path to a cartoon how-to PNG shipped with the site (static/guides/)."""
+    from pathlib import Path as _P
+    base = _P(__file__).resolve().parent.parent / "static" / "guides"
+    path = base / f"{name}.png"
+    return path if path.is_file() else None
+
+
+def _send_guide(chat_id, name: str, caption: str = ""):
+    """Send a step-guide cartoon if the PNG exists; otherwise just the caption.
+
+    New users learn faster from a picture of the three taps than from a wall of
+    commands. Missing art must never break /help — fall back to text only.
+    Prefers sendPhoto so the cartoon shows inline; falls back to document.
+    """
+    path = _guide_path(name)
+    if path is not None and TG_API:
+        try:
+            with open(path, "rb") as fh:
+                r = requests.post(
+                    f"{TG_API}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": (caption or "")[:1024]},
+                    files={"photo": (path.name, fh, "image/png")},
+                    timeout=60,
+                )
+            if (r.json() or {}).get("ok"):
+                return True
+            # Fallback: some clients prefer document for larger PNGs.
+            _send_document(chat_id, str(path), caption=caption or "")
+            return True
+        except Exception:
+            logger.exception("guide photo %s failed", name)
+    if caption:
+        _send_plain(chat_id, caption)
+    return False
+
+
 def _send_document(chat_id, filepath, caption=""):
     """Upload a real file to the chat (multipart, not the JSON endpoint)."""
     if not TG_API:
@@ -1149,12 +2005,65 @@ def _send_document(chat_id, filepath, caption=""):
         return {}
 
 
+def _is_parse_error(result) -> bool:
+    """True when Telegram rejected the message's MARKUP rather than its content.
+
+    Deliberately WIDE. The narrow version recognised four exact phrasings, and
+    every phrasing it did not know — "can't find end of the entity started at
+    byte offset 41", "wrong URL host", "unsupported protocol" — meant the reply
+    was dropped with nothing anywhere to say so. That is what "the bot didn't
+    answer" actually is, and it is the one failure a user cannot diagnose from
+    their phone. Losing the bold costs nothing; losing the answer costs a
+    support message.
+    """
+    desc = str((result or {}).get("description") or "").lower()
+    return any(word in desc for word in
+               ("parse", "entit", "markup", "markdown", "bold", "italic",
+                "url host", "unsupported", "blockquote"))
+
+
 def _send(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         # Telegram expects reply_markup as a JSON-serialised string.
         data["reply_markup"] = json.dumps(reply_markup)
-    _tg("sendMessage", **data)
+    result = _tg("sendMessage", **data)
+    if (result or {}).get("ok"):
+        return result
+    refused = str((result or {}).get("description") or "")
+    if _is_parse_error(result):
+        # Legacy Markdown breaks on a stray * _ ` [ in anything we do not
+        # control — an app called my_bot, a log line, a traceback, a README.
+        data.pop("parse_mode", None)
+        result = _tg("sendMessage", **data)
+        if (result or {}).get("ok"):
+            return result
+        refused = str((result or {}).get("description") or refused)
+    # Never silent again. A dropped reply used to leave no trace at all, so
+    # "the bot ignored me" and "the bot crashed" were indistinguishable — and
+    # both were reported as /ping not working.
+    logger.warning("TELEGRAM refused a message to chat %s (%s); first line was: %.140s",
+                   chat_id, refused or result, str(text).splitlines()[0] if text else "")
+    return result
+
+
+def _send_plain(chat_id, text):
+    """Send text we did not write (a README, a log) with no markup at all."""
+    return _tg("sendMessage", chat_id=chat_id, text=text[:4096],
+               disable_web_page_preview=True)
+
+
+def _send_html(chat_id, text, reply_markup=None):
+    """HTML parse mode — <code> chips are one-tap copy on mobile Telegram."""
+    data = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML",
+            "disable_web_page_preview": True}
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    result = _tg("sendMessage", **data)
+    if (result or {}).get("ok"):
+        return result
+    plain = re.sub(r"<[^>]+>", "", text or "")
+    return _send_plain(chat_id, plain)
 
 
 def _edit_or_send(chat_id, message_id, text, reply_markup=None):
@@ -1170,11 +2079,225 @@ def _edit_or_send(chat_id, message_id, text, reply_markup=None):
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
     result = _tg("editMessageText", **data)
-    if not result.get("ok"):
-        desc = str(result.get("description") or "")
+    if not (result or {}).get("ok"):
+        desc = str((result or {}).get("description") or "")
         if "message is not modified" in desc.lower():
             return  # content is already exactly this — nothing to do, not a failure
         _send(chat_id, text, reply_markup)
+
+
+# ---------------------------------------------------------------------------
+# "typing…" — the difference between a pause and a bot that looks dead
+# ---------------------------------------------------------------------------
+def _typing(chat_id) -> None:
+    """One "typing…" indicator. Never raises: it is a courtesy, not a step."""
+    try:
+        _tg("sendChatAction", chat_id=chat_id, action="typing")
+    except Exception:                                              # noqa: BLE001
+        pass
+
+
+class _working:
+    """`with _working(chat_id):` — keep the indicator alive while working.
+
+    Telegram shows "typing…" for about five seconds per call. A command that
+    reads the runner, clones a repo or installs dependencies takes longer than
+    that, and the complaint was exactly this: the bot answers two or three
+    seconds later with nothing on screen in between, so people send the command
+    again. One call every four seconds costs nothing and says "still working".
+    """
+
+    def __init__(self, chat_id, every: float = 4.0):
+        self.chat_id = chat_id
+        self.every = every
+        self._stop = threading.Event()
+
+    def __enter__(self):
+        _typing(self.chat_id)
+        threading.Thread(target=self._loop, daemon=True).start()
+        return self
+
+    def _loop(self):
+        while not self._stop.wait(self.every):
+            _typing(self.chat_id)
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Live progress card — the difference between "bot stopped" and "still working"
+# ---------------------------------------------------------------------------
+# A deploy takes long enough that a bare "typing…" still feels like a freeze.
+# This posts ONE message and rewrites it as each step finishes, with a bar that
+# fills 0→100% and a short label that changes so the person always knows what
+# is happening right now. Used by /code, /update, /import, zip deploy, and the
+# admin edit path.
+
+_PROGRESS_SPIN = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+_PROGRESS_SCRIPTS = {
+    # (pct, label) — labels are the ones the user watches; keep them short.
+    "create": [
+        (8,  "Got your code"),
+        (22, "Checking the name & your slot"),
+        (40, "Uploading to the site"),
+        (58, "Handing off to the runner"),
+        (75, "Installing packages"),
+        (88, "Starting the app"),
+        (96, "Almost there"),
+    ],
+    "update": [
+        (10, "Got the new code"),
+        (28, "Saving a snapshot"),
+        (48, "Uploading the edit"),
+        (68, "Restarting in place"),
+        (88, "Bringing it back up"),
+        (96, "Almost there"),
+    ],
+    "import": [
+        (8,  "Reading the GitHub link"),
+        (22, "Scanning the repo"),
+        (40, "Cloning the branch"),
+        (58, "Installing requirements"),
+        (78, "Starting the app"),
+        (92, "Almost there"),
+    ],
+    "zip": [
+        (8,  "Got the zip"),
+        (25, "Unpacking files"),
+        (45, "Finding the entry point"),
+        (65, "Installing requirements"),
+        (85, "Starting the app"),
+        (95, "Almost there"),
+    ],
+}
+
+
+def _progress_bar(pct: int, width: int = 10) -> str:
+    """A fixed-width bar that reads cleanly inside a Telegram monospace run."""
+    pct = max(0, min(100, int(pct)))
+    filled = round(width * pct / 100)
+    return "▓" * filled + "░" * (width - filled)
+
+
+class _progress:
+    """`with _progress(chat_id, kind, name=...) as p: p.at(40, "…"); p.done()`
+
+    Posts one card and edits it in place. Typing indicator keeps spinning in
+    the background so even between edits the chat never looks frozen.
+    """
+
+    def __init__(self, chat_id, kind: str = "create", name: str = ""):
+        self.chat_id = chat_id
+        self.kind = kind if kind in _PROGRESS_SCRIPTS else "create"
+        self.name = name or "app"
+        self.message_id = None
+        self._pct = 0
+        self._label = "Starting"
+        self._spin_i = 0
+        self._stop = threading.Event()
+        self._failed = None
+        self._done_text = None
+
+    def __enter__(self):
+        self._render(force_send=True)
+        # Keep "typing…" alive AND nudge the spinner glyph every few seconds
+        # so a long step (pip install) still looks alive even before the next
+        # p.at() call rewrites the percentage.
+        threading.Thread(target=self._pulse, daemon=True).start()
+        return self
+
+    def _pulse(self):
+        while not self._stop.wait(3.5):
+            try:
+                _typing(self.chat_id)
+                self._spin_i = (self._spin_i + 1) % len(_PROGRESS_SPIN)
+                if self.message_id and self._failed is None and self._done_text is None:
+                    self._render()
+            except Exception:
+                pass
+
+    def _card(self) -> str:
+        spin = _PROGRESS_SPIN[self._spin_i % len(_PROGRESS_SPIN)]
+        bar = _progress_bar(self._pct)
+        head = f"{spin} *Deploying* `{self.name}`"
+        if self._failed is not None:
+            return (f"🔴 *Failed* `{self.name}`\n"
+                    f"`{bar}` {self._pct}%\n"
+                    f"{self._failed}")
+        if self._done_text is not None:
+            return (f"✅ *Done* `{self.name}`\n"
+                    f"`{bar}` 100%\n"
+                    f"{self._done_text}")
+        return (f"{head}\n"
+                f"`{bar}` {self._pct}%\n"
+                f"_{self._label}_")
+
+    def _render(self, force_send: bool = False):
+        text = self._card()
+        if self.message_id and not force_send:
+            data = {"chat_id": self.chat_id, "message_id": self.message_id,
+                    "text": text, "parse_mode": "Markdown"}
+            result = _tg("editMessageText", **data)
+            if (result or {}).get("ok"):
+                return
+            desc = str((result or {}).get("description") or "")
+            if "message is not modified" in desc.lower():
+                return
+            # Fall through to a fresh send if the edit is refused (too old, etc.)
+        result = _send(self.chat_id, text)
+        try:
+            self.message_id = ((result or {}).get("result") or {}).get("message_id")                               or self.message_id
+        except Exception:
+            pass
+
+    def at(self, pct: int, label: str = ""):
+        """Jump the bar to `pct` and (optionally) change the label."""
+        self._pct = max(self._pct, min(99, int(pct)))  # 100 reserved for done()
+        if label:
+            self._label = label
+        self._spin_i = (self._spin_i + 1) % len(_PROGRESS_SPIN)
+        self._render()
+
+    def step(self, index: int):
+        """Apply the Nth scripted step for this kind of deploy."""
+        script = _PROGRESS_SCRIPTS.get(self.kind) or _PROGRESS_SCRIPTS["create"]
+        if index < 0 or index >= len(script):
+            return
+        pct, label = script[index]
+        self.at(pct, label)
+
+    def fail(self, reason: str):
+        self._failed = (reason or "something went wrong")[:300]
+        self._render()
+
+    def done(self, note: str = "Running."):
+        self._pct = 100
+        self._done_text = (note or "Running.")[:300]
+        self._render()
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if exc_type is not None and self._failed is None and self._done_text is None:
+            try:
+                self.fail(f"{exc_type.__name__}: {exc}")
+            except Exception:
+                pass
+        return False  # never swallow the error
+
+
+# Commands that touch the network or the runner, so they get the repeating
+# indicator instead of a single one.
+_SLOW_COMMANDS = frozenset((
+    "/ping", "/apps", "/jobs", "/list", "/status", "/uptime", "/info", "/logs", "/restart", "/stop",
+    "/delete", "/source", "/import", "/projects", "/latest", "/autodeploy",
+    "/limits", "/admin", "/details", "/see", "/queen", "/rename", "/update", "/code",
+    "/health", "/backup", "/restore", "/rollback", "/token", "/history", "/env",
+    "/guide", "/guides", "/howto", "/recover", "/rescue", "/whoami",
+    "/templates", "/usage",
+))
 
 
 # ==================== IDENTITY ====================
@@ -1183,7 +2306,7 @@ def _edit_or_send(chat_id, message_id, text, reply_markup=None):
 # saying nothing useful costs a legitimate user one visit to /start, which
 # does explain the link step — but only to a chat that asked for help, not to
 # one probing for a deploy endpoint.
-UNKNOWN_REPLY = "🤔 Unknown command. Send /start to see what I can do."
+UNKNOWN_REPLY = "🤔 Unknown command. Send /start or /guide — or try /apps, /id, /help."
 
 
 def _require_link(chat_id):
@@ -1229,11 +2352,20 @@ def handle_link(chat_id, text, display_name=""):
         # A button back, because the user arrived here FROM the dashboard and
         # the dashboard is where the connection now shows up. Telling them to
         # "go back" without a link is how a two-tap flow becomes a hunt again.
+        #
+        # The linked row is RE-READ instead of trusted from the redeem result:
+        # it is the one that carries the 👑 flag, and this is the first screen a
+        # newly connected queen ever sees. Showing everybody else's help here
+        # was the same "the privileges are invisible" complaint /start had.
+        linked = telegram_link.user_for_chat(chat_id) or {"username": res["username"]}
         rows = [[{"text": "📦 Open dashboard", "url": f"{SITE_BASE}/bots"}]] \
             if SITE_BASE else []
+        if _user_is_queen(linked):
+            rows.insert(0, [{"text": "👑 Queen panel", "callback_data": "queen:menu"},
+                            {"text": "📦 Projects", "callback_data": "qproj:list"}])
         _send(chat_id,
               f"✅ Connected to *{res['username']}*.\n\n" +
-              _help_text({"username": res["username"]}).split("\n\n", 1)[1],
+              _help_text(linked).split("\n\n", 1)[-1],
               reply_markup={"inline_keyboard": rows} if rows else None)
         return
 
@@ -1333,31 +2465,563 @@ def set_menu_button():
     return ok
 
 
-def _help_text(user):
-    """What the bot can do, including /code and /update — see the
-    "CODE-VIA-CHAT" comment near the top of this file for how those two are
-    kept safe (account-gated, same rails as the website's editor)."""
+def _queen_help_block() -> str:
+    """The 👑 half of /help: what queen access gets you, and how to use it.
+
+    A 👑 account used to be shown exactly the same help as everybody else, so
+    the privileges an admin had granted were invisible — nobody knew the memory
+    ceiling was off, that a whole project could arrive as a zip, or that
+    /projects existed at all. This is the separate interface for queens: the
+    same commands, plus the ones only they have, spelled out with the steps.
+    """
+    return (
+        "\n\n👑 *Your queen access*\n"
+        "• *No memory ceiling* — your apps run at full size and won't be killed "
+        "for using what they need.\n"
+        "• *Whole projects* — send a `.zip` right after `/code name` or "
+        "`/update name`: folders, `requirements.txt`, data files, all of it.\n"
+        "• *Any public repo, any branch* — `/import owner/repo [name]`, and a "
+        "branch with `/import owner/repo/tree/branch`.\n"
+        "• *Keep it current* — ⬆️ `/latest name` and ⚙️ `/autodeploy name on` "
+        "follow the branch the way a platform does.\n"
+        "• *`/projects`* — your repo apps, the commit each is on, and a button "
+        "to pull the newest."
+    )
+
+
+def _main_kb(user=None):
+    """The keyboard under /start and /help.
+
+    Everyone gets: Open + how-to guides + common actions.
+    A 👑 account also gets the queen panel and projects row.
+    Admin accounts get a one-tap /admin entry (same as typing /admin).
+    """
+    btn = _open_button()
+    rows = []
+    if btn:
+        rows.append([btn])
+    rows.append([
+        {"text": "📖 How to start", "callback_data": "help:start"},
+        {"text": "🌿 Import repo", "callback_data": "help:import"},
+    ])
+    rows.append([
+        {"text": "🔢 My ids", "callback_data": "help:id"},
+        {"text": "🔑 Token tips", "callback_data": "help:token"},
+    ])
+    rows.append([
+        {"text": "📦 My apps", "callback_data": "apps:list"},
+        {"text": "📡 Ping", "callback_data": "ping:site"},
+    ])
+    if _user_is_queen(user):
+        rows.insert(1 if btn else 0, [
+            {"text": "👑 Queen panel", "callback_data": "queen:menu"},
+            {"text": "📦 My projects", "callback_data": "qproj:list"},
+        ])
+    # Admin shortcut — only when this chat is an admin, so non-admins never
+    # see a dead button. Command /admin still works the same way.
+    try:
+        tg_id = (user or {}).get("telegram_id")
+        if user and _is_admin(user, tg_id):
+            rows.append([{"text": "🛠 Admin panel", "callback_data": "admin:menu"},
+                         {"text": "🖥 Runners", "callback_data": "admin:runners"}])
+    except Exception:
+        pass
+    return {"inline_keyboard": rows} if rows else None
+
+
+def _help_guide_kb(user=None):
+    """Buttons under how-to messages. Admin guides only for admins."""
+    rows = [
+        [{"text": "📖 Start", "callback_data": "help:start"},
+         {"text": "🌿 Import", "callback_data": "help:import"}],
+        [{"text": "✍️ Code", "callback_data": "help:code"},
+         {"text": "♻️ Update", "callback_data": "help:update"}],
+        [{"text": "🔢 Ids", "callback_data": "help:id"},
+         {"text": "🔑 Token", "callback_data": "help:token"}],
+        [{"text": "📦 Apps", "callback_data": "help:apps"},
+         {"text": "🏠 Help home", "callback_data": "help:home"}],
+    ]
+    try:
+        if user and _is_admin(user, (user or {}).get("telegram_id")):
+            rows.append([{"text": "🛠 Admin how-to", "callback_data": "help:admin"}])
+    except Exception:
+        pass
+    return {"inline_keyboard": rows}
+
+
+def _queen_panel_kb():
+    """Buttons for the 👑 panel: what a queen can actually do, one tap each."""
+    rows = [[{"text": "📦 My projects", "callback_data": "qproj:list"},
+             {"text": "📊 My apps", "callback_data": "queen:apps"}],
+            # An empty ref means "all of mine": the same screen /latest with no
+            # argument shows, listing every repo app and whether its branch moved.
+            [{"text": "⬆️ Deploy latest commits", "callback_data": "latest:"},
+             {"text": "🌿 Import a repo", "callback_data": "help:import"}]]
+    # Optional starter pack — only when an admin actually configured one.
+    if _queen_repo_parts()[0]:
+        rows.insert(1, [{"text": "▶️ Run starter", "callback_data": "qproj:run"},
+                        {"text": "📖 Starter README", "callback_data": "qproj:readme"}])
+    btn = _open_button("🚀 Open CodeNest")
+    if btn:
+        rows.append([btn])
+    return {"inline_keyboard": rows}
+
+
+def _queen_panel_text(user) -> str:
+    """👑 Queen panel — this account's real limits, and how to use them.
+
+    The numbers come from bot_ops.account_privileges(), the same single call the
+    website dashboard uses, so chat cannot quote a limit the site does not
+    enforce (that disagreement is what made "5/3 running slots" nonsense).
+    """
+    uid = _row_id(user)
+    name = (user or {}).get("username") or (user or {}).get("name") or "there"
+    try:
+        priv = bot_ops.account_privileges(uid)
+    except Exception:  # the panel is still useful if the privilege read fails
+        priv = {}
+    limit = priv.get("job_limit")
+    try:
+        running = bot_ops.active_count(uid)
+    except Exception:
+        running = None
+    slots = f"{running}/{limit}" if running is not None and limit else (limit or "—")
+    mem = priv.get("mem_limit_mb")
+    mem_line = ("no ceiling — your apps are never killed for the memory they use"
+                if not mem else f"{mem}MB per app")
+    zip_mb = priv.get("zip_max_mb") or bot_ops.ZIP_MAX_MB
+    zip_files = priv.get("zip_max_files") or bot_ops.ZIP_MAX_FILES
+    lines = [
+        f"👑 *Queen panel* — {name}",
+        "",
+        "*Your limits*",
+        f"🟢 Running apps — {slots}",
+        f"🧠 Memory — {mem_line}",
+        f"🗜 Zip upload — up to {zip_mb}MB / {zip_files} files unzipped",
+        "🌿 GitHub — any public repo, any branch",
+        "",
+        "*Run something*",
+        "📦 `/projects` — your repo apps, the commit each is on, ⬆️ when the "
+        "branch moved",
+        "🌿 `/import owner/repo [name]` — any public repo; a branch with "
+        "`/import owner/repo/tree/branch myapp`",
+        "🗜 `/code name`, then send a `.zip` — a whole project, folders and "
+        "`requirements.txt` included. `/update name` plus a zip replaces one.",
+    ]
+    if SITE_BASE:
+        lines.append(
+            f"⚠️ Telegram only lets a bot download 20MB. For a bigger zip use "
+            f"{SITE_BASE}/bots — that upload doesn't go through Telegram, and "
+            f"your {zip_mb}MB allowance applies there.")
+    lines += [
+        "",
+        "*After it starts*",
+        "`/apps` everything · `/status name` memory and live URL · "
+        "`/logs name` output · `/restart name`",
+        "A Telegram-bot project needs its own token: open the app → *Env* tab → "
+        "paste `BOT_TOKEN` from @BotFather → *Save & restart*.",
+        "Nothing is lost on a restart — your files and variables come back with it.",
+        "",
+        "*Keep it current*",
+        "⬆️ `/latest name` — redeploy from the newest commit on its branch. In "
+        "place: same address, same folder, so its database and sessions survive.",
+        "⚙️ `/autodeploy name on` — I watch the branch and redeploy by myself "
+        "when it moves (`off` stops it). `/projects` lists which apps are behind.",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_limits(chat_id, user):
+    """`/limits` — what this account is allowed. A 👑 gets the queen panel."""
+    if _user_is_queen(user):
+        _send(chat_id, _queen_panel_text(user), reply_markup=_queen_panel_kb())
+        return
+    uid = _row_id(user)
+    priv = bot_ops.account_privileges(uid)
+    running = bot_ops.active_count(uid)
+    lines = [
+        "*Your limits*",
+        f"🟢 Running apps — {running}/{priv.get('job_limit')}",
+        f"🧠 Memory — {priv.get('mem_limit_mb')}MB per app",
+        f"🗜 Zip upload — {priv.get('zip_max_mb')}MB / {priv.get('zip_max_files')} files",
+        "🌿 GitHub — `/import owner/repo` works for everyone",
+        "",
+        "Need more room? Ask the bot owner — they can raise limits for trusted accounts.",
+    ]
+    _send(chat_id, "\n".join(lines), reply_markup=_open_kb())
+
+
+def _queen_help_text(user) -> str:
+    """The 👑 /help screen — a different layout, not the same one with a footer.
+
+    A queen used to get everybody else's help with a paragraph appended, which
+    is not a separate interface: the thing only they can do was the last item on
+    a long list. This leads with it, keeps the privileges in one block, and puts
+    the commands everybody shares underneath, shortened.
+    """
+    name = (user or {}).get("username") or (user or {}).get("name") or "there"
+    lines = [
+        f"👑 *CodeNest — queen access*",
+        f"Hi *{name}*. This is your interface: everything below is yours, and "
+        f"the 👑 Queen panel button repeats it whenever you need it.",
+        "",
+        "*Run a project*",
+        "1️⃣ `/import owner/repo [name]` — any public GitHub repo. Add a branch "
+        "with `/import owner/repo/tree/branch myapp`. I scan it, show each "
+        "runnable thing as a BUTTON, install its requirements and start it.",
+        "2️⃣ Or `/code name` then send a `.zip` — whole folders, "
+        "`requirements.txt`, data files. Bigger than Telegram's 20MB? Use the "
+        "website upload; your queen zip allowance applies there.",
+        "3️⃣ `/logs name` while it boots, `/status name` for memory and the "
+        "live URL.",
+        "4️⃣ If it's a Telegram bot, open the app → *Env* → paste its own "
+        "`BOT_TOKEN` from @BotFather → *Save & restart*.",
+        "5️⃣ Keep it current: ⬆️ or `/latest name` pulls the newest commit and "
+        "redeploys in place — same address, same folder, so its database and "
+        "sessions survive. ⚙️ or `/autodeploy name on` does that by itself.",
+        "6️⃣ `/projects` — your repo apps at a glance, and which ones are behind.",
+    ]
+    lines.append(_queen_help_block())
+    lines += [
+        "",
+        "*Everything else*",
+        "`/limits` your allowances · `/apps` your apps · `/projects` the catalogue",
+        "`/code name` then send source or a `.zip` · `/update name` to replace it",
+        "`/import owner/repo [name]` any public repo · `/source name` download it back",
+        "`/latest [name]` redeploy from the newest commit · `/autodeploy name on|off` "
+        "👑 follow the branch by itself",
+        "`/logs name` · `/status [name]` · `/restart name` · `/stop name` · "
+        "`/delete name` · `/rename name newname`",
+        "`/ping [url]` check a URL · `/cancel` abandon a pending upload · "
+        "`/unlink` disconnect this chat",
+        "",
+        "I message you if an app stops on its own.",
+    ]
+    return "\n".join(lines)
+
+
+def _plain_help_text(user) -> str:
+    """The standard /help screen: what the bot can do for everybody.
+
+    See the "CODE-VIA-CHAT" comment near the top of this file for how /code and
+    /update are kept safe (account-gated, same rails as the website's editor).
+    """
     return (
         f"👋 Hi *{user['username']}*!\n\n"
         "Tap *Open CodeNest* to write, edit and deploy — it opens right here "
         "in Telegram and signs you in automatically.\n\n"
         "*From chat you can also:*\n"
-        "`/code <new app name>` — create an app, then send the source "
+        "`/code myapp` — create an app, then send the source "
         "(text or a file)\n"
-        "`/update <name>` — push new code to an existing app, then send it "
+        "`/update name` — push new code to an existing app, then send it "
         "(auto-saves & restarts)\n"
-        "`/import <github url> [name]` — clone a public repo and deploy it\n"
-        "`/source <name>` — download your app's current code as a file\n"
+        "`/import owner/repo [name]` — clone a public repo and deploy it\n"
+        "`/latest [name]` — redeploy a repo app from its newest commit "
+        "(same address, same data)\n"
+        "`/source name` — download your app's current code as a file\n"
         "`/apps` — everything you have, with live status\n"
+        "`/limits` — what your account is allowed\n"
         "`/status [name]` — account summary, or one app in full\n"
-        "`/logs <name>` — the last lines it printed\n"
-        "`/restart <name>`  `/stop <name>`  `/delete <name>`\n"
-        "`/rename <name> <new>`\n"
+        "`/logs name` — the last lines it printed\n"
+        "`/restart name`  `/stop name`  `/delete name`\n"
+        "`/rename name newname`\n"
         "`/cancel` — stop a pending /code or /update\n"
-        "`/ping [url]` — check a URL\n"
+        "`/projects` — your repo apps and whether a newer commit is waiting\n"
+        "`/ping [url]` — check a URL (no URL = platform health)\n"
+        "`/health` — is the platform alive, asked from inside\n"
+        "`/id` — your Telegram id (long-press to copy)\n"
+        "`/guide` — picture how-tos for every command\n"
+        "`/token` — where BOT_TOKEN can live\n"
+        "`/web` — open the site inside Telegram\n"
         "`/unlink` — disconnect this chat\n\n"
-        "I message you if an app stops on its own."
+        "I message you if an app stops on its own — and I say *why* "
+        "(memory, crash, host full), without taking other apps down."
     )
+
+
+def _help_text(user):
+    """Which /help screen this account gets: 👑 has its own, see above."""
+    if _user_is_queen(user):
+        return _queen_help_text(user)
+    return _plain_help_text(user)
+
+
+def cmd_commands(chat_id, user=None, telegram_user_id=None):
+    """`/commands` — every command this chat can use right now."""
+    user = user or telegram_link.user_for_chat(chat_id)
+    lines = [
+        "*Commands*",
+        "",
+        "Everyone:",
+        "`/start` `/help` `/guide` `/id` `/ping` `/token`",
+        "",
+    ]
+    if user:
+        lines += [
+            "Your apps:",
+            "`/apps` `/status` `/logs name` `/restart name` `/stop name`",
+            "`/code myapp` `/update myapp` `/import owner/repo`",
+            "`/source name` `/rename old new` `/delete name` `/latest name`",
+            "`/env name` `/backup name` `/history name`",
+            "",
+        ]
+        if _user_is_queen(user):
+            lines += [
+                "👑 Queen:",
+                "`/projects` `/autodeploy name on` · zip after `/code`",
+                "",
+            ]
+        if _is_admin(user, telegram_user_id or (user or {}).get("telegram_id")):
+            lines += [
+                "🛠 Admin (also buttons under `/admin`):",
+                "`/admin` `/runners` `/recover` `/health` `/user name`",
+                "`/queen id` `/admin limit id 10` `/see id`",
+                "",
+            ]
+    else:
+        lines += ["Link first: `/link` or tap Open CodeNest.", ""]
+    lines.append("Cartoon how-tos: `/guide` or `/guide code` · `/guide import` · …")
+    _send(chat_id, "\n".join(lines), reply_markup=_main_kb(user))
+
+
+def cmd_env(chat_id, user, arg=""):
+    """`/env name` list keys · `/env name KEY=value` set · `/env name del KEY`."""
+    parts = (arg or "").split(None, 1)
+    if not parts:
+        _send(chat_id, "Usage:\n`/env myapp` — list key names\n"
+                       "`/env myapp BOT_TOKEN=123:AA…` — set\n"
+                       "`/env myapp del BOT_TOKEN` — remove\n"
+                       "Token may also live in the code (`/guide token`).")
+        return
+    name = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”. `/apps` lists yours.")
+        return
+    if not rest:
+        env = bot_ops._row_env(row)
+        keys = sorted(env.keys())
+        tip = ""
+        if row.get("telegram_bot_detected") and "BOT_TOKEN" not in env:
+            tip = "\n\nNo BOT_TOKEN in Env — if it's in the source file, that's enough."
+        _send(chat_id,
+              f"🔑 *{row['name']}* env keys ({len(keys)}):\n"
+              + ("`" + "`, `".join(keys) + "`" if keys else "_(none)_")
+              + tip)
+        return
+    if rest.lower().startswith("del ") or rest.lower().startswith("delete "):
+        key = rest.split(None, 1)[1].strip()
+        res = bot_ops.set_env(user["id"], name, key, None)
+    elif "=" in rest:
+        key, _, val = rest.partition("=")
+        res = bot_ops.set_env(user["id"], name, key.strip(), val)
+    else:
+        _send(chat_id, "Send `KEY=value` or `del KEY`.")
+        return
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    act = "removed" if res.get("deleted") else "set"
+    extra = " · restarted" if res.get("restarted") else " · applies on next start"
+    _send(chat_id, f"✅ `{res['key']}` {act} on *{row['name']}*{extra}.")
+
+
+def cmd_backup(chat_id, user, arg=""):
+    """`/backup name` — snapshot workspace data into durable storage now."""
+    name = (arg or "").strip()
+    if not name:
+        _send(chat_id, "Which app? `/backup myapp` — saves its data files "
+                       "(database.db, sessions, …) so a runner rebuild can't wipe them.")
+        return
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”. `/apps` lists yours.")
+        return
+    rid = row.get("runner_job_id")
+    if not rid:
+        _send(chat_id, f"*{row['name']}* isn't on a runner right now. "
+                       f"`/restart {row['name']}` first, then `/backup` again.")
+        return
+    try:
+        from services import snapshots
+        from services import bot_ops as bo
+        out = snapshots.save_snapshot(row["id"], rid, worker=bo._worker_of(row))
+    except Exception as exc:  # noqa: BLE001
+        _send(chat_id, f"❌ Backup failed: {type(exc).__name__}: {exc}")
+        return
+    if out.get("saved"):
+        _send(chat_id, f"💾 Snapshot saved for *{row['name']}*. "
+                       "After a runner rebuild it will be restored automatically.")
+    else:
+        _send(chat_id, f"⚠️ Could not snapshot *{row['name']}*: "
+                       f"{out.get('reason') or 'unknown'}. Try again when the runner is awake.")
+
+
+def cmd_history(chat_id, user, arg=""):
+    """`/history name` — recent code revisions (website deploys)."""
+    name = (arg or "").strip()
+    if not name:
+        _send(chat_id, "Which app? `/history myapp`")
+        return
+    row = bot_ops.find_app(user["id"], name)
+    if not row:
+        _send(chat_id, f"❌ No app called “{name}”.")
+        return
+    from database import get_db_connection
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, version, action, status, created_at FROM bot_revisions "
+            "WHERE job_id=? AND user_id=? ORDER BY version DESC LIMIT 12",
+            (row["id"], user["id"]),
+        ).fetchall()
+        rows = [dict(r) for r in rows]
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    if not rows:
+        _send(chat_id, f"*{row['name']}* has no saved revisions yet. "
+                       "Website Save & Run creates them; chat `/update` does too.")
+        return
+    lines = [f"📜 *{row['name']}* revisions (newest first):"]
+    for r in rows:
+        lines.append(
+            f"v{r.get('version')} · {r.get('action') or '—'} · "
+            f"{r.get('status') or '—'} · {(r.get('created_at') or '')[:16]}"
+        )
+    lines.append("\nWebsite → bot details → Versions to roll back. "
+                 "Admins: `/user` → job → Revisions.")
+    _send(chat_id, "\n".join(lines))
+
+
+def cmd_token_tips(chat_id):
+    """`/token` — where BOT_TOKEN can live (Env or source)."""
+    handle_callback(chat_id, "help:token", None)
+
+
+def _cmd_health_smart(chat_id, telegram_user_id=None):
+    """`/health` — full admin doctor for admins; public platform health for everyone else."""
+    user = telegram_link.user_for_chat(chat_id)
+    if _is_admin(user, telegram_user_id):
+        _send(chat_id, _admin_health_text(), reply_markup=_admin_health_kb())
+    else:
+        cmd_health(chat_id, user or {})
+
+
+# command name -> (guide png stem without guide_, short caption, markdown steps)
+_COMMAND_GUIDES = {
+    "start": ("guide_start", "Start here",
+              "1. Tap *Open CodeNest* (or `/link`).\n"
+              "2. Deploy with `/code`, a template, or `/import`.\n"
+              "3. *Save & Run* — bots recover after runner restart."),
+    "code": ("guide_code", "/code — new app",
+             "`/code myapp` then paste code, send a file, or a `.zip`.\n"
+             "I deploy it and give you Logs / Restart / Stop buttons."),
+    "update": ("guide_update", "/update — replace code",
+               "`/update myapp` then paste or upload the new source.\n"
+               "Name stays; data files stay; only code changes."),
+    "import": ("guide_import", "/import — GitHub",
+               "`/import owner/repo [name]` — I show each runnable entry as a button.\n"
+               "Branch: `/import owner/repo/tree/branch myapp`."),
+    "apps": ("guide_apps", "/apps — your list",
+             "`/apps` lists every app.\n"
+             "Then `/logs name` · `/restart name` · `/stop name`."),
+    "logs": ("guide_logs", "/logs — output",
+             "`/logs myapp` — newest lines at the bottom."),
+    "restart": ("guide_restart", "/restart — wake it",
+                "`/restart myapp` brings a stopped or stuck app back."),
+    "stop": ("guide_stop", "/stop — pause",
+             "`/stop myapp` frees a running slot. Files stay yours."),
+    "status": ("guide_status", "/status — health",
+               "`/status` for the account · `/status myapp` for one app."),
+    "source": ("guide_source", "/source — download",
+               "`/source myapp` uploads the current code as a file."),
+    "delete": ("guide_delete", "/delete — remove",
+               "`/delete myapp` then confirm. Permanent."),
+    "rename": ("guide_rename", "/rename — new label",
+               "`/rename oldname newname` — data stays."),
+    "latest": ("guide_latest", "/latest — pull commit",
+               "`/latest myapp` for repo apps · bare `/latest` lists them."),
+    "env": ("guide_env", "/env — variables",
+            "`/env myapp` lists keys.\n"
+            "`/env myapp KEY=value` sets · `del KEY` removes.\n"
+            "Token may also live in the source file."),
+    "backup": ("guide_backup", "/backup — snapshot",
+               "`/backup myapp` saves data files so a rebuild cannot wipe them."),
+    "history": ("guide_history", "/history — revisions",
+                "`/history myapp` — recent deploys. Rollback on the website."),
+    "id": ("guide_id", "/id — your numbers",
+           "Long-press a number to copy. No broken markup."),
+    "token": ("guide_token", "BOT_TOKEN tips",
+              "Env tab *or* `BOT_TOKEN = '…'` in code — both work after restart."),
+    "link": ("guide_link", "/link — connect",
+             "Tap *Open CodeNest* or send `/link` so this chat can deploy."),
+    "projects": ("guide_projects", "/projects — repo apps",
+                 "`/projects` lists GitHub deploys · `/latest` pulls newest."),
+}
+
+
+def _show_command_guide(chat_id, topic: str, user=None):
+    """Picture first, then short steps — only when the user asked (/guide).
+
+    No home-menu keyboard: dumping the full help pad after every cartoon was
+    spam. One optional "More guides" row is enough.
+    """
+    topic = (topic or "").strip().lower()
+    info = _COMMAND_GUIDES.get(topic)
+    if not info:
+        _send(chat_id, "Unknown guide — try `/guide`.")
+        return
+    png, caption, body = info
+    _send_guide(chat_id, png, caption)
+    _send(chat_id, f"*{caption}*\n\n{body}",
+          reply_markup={"inline_keyboard": [[
+              {"text": "📖 More guides", "callback_data": "help:catalog"},
+          ]]})
+
+
+def _cmd_guide(chat_id, arg=""):
+    """`/guide [code|import|…]` — cartoon first, then steps. No admin topics for public."""
+    topic = (arg or "").strip().lower().split()[0] if (arg or "").strip() else ""
+    alias = {
+        "start": "start", "begin": "start", "home": "home", "help": "home",
+        "import": "import", "repo": "import", "git": "import",
+        "id": "id", "ids": "id",
+        "token": "token", "bot_token": "token",
+        "code": "code", "new": "code", "create": "code",
+        "update": "update", "edit": "update",
+        "apps": "apps", "list": "apps", "jobs": "apps",
+        "logs": "logs", "log": "logs",
+        "restart": "restart", "stop": "stop", "status": "status",
+        "source": "source", "download": "source",
+        "delete": "delete", "remove": "delete",
+        "rename": "rename",
+        "latest": "latest", "pull": "latest",
+        "env": "env", "backup": "backup", "history": "history",
+        "link": "link", "connect": "link",
+        "projects": "projects", "project": "projects",
+        # admin is NOT in the public alias map — only /admin path shows it
+    }
+    user = telegram_link.user_for_chat(chat_id)
+    if not topic or topic in ("home", "help"):
+        handle_callback(chat_id, "help:home", None)
+        return
+    ref = alias.get(topic)
+    if ref is None:
+        # Unknown word: show the public catalogue, never invent admin topics.
+        lines = ["📖 *Guides* — send one of:",
+                 "`/guide code` · `/guide update` · `/guide import`",
+                 "`/guide apps` · `/guide logs` · `/guide restart` · `/guide stop`",
+                 "`/guide status` · `/guide env` · `/guide token` · `/guide id`",
+                 "`/guide backup` · `/guide history` · `/guide projects` · `/guide link`"]
+        _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        return
+    if ref in _COMMAND_GUIDES:
+        _show_command_guide(chat_id, ref, user)
+    else:
+        handle_callback(chat_id, f"help:{ref}", None)
 
 
 def handle_start(chat_id, first_name, payload=""):
@@ -1383,7 +3047,7 @@ def handle_start(chat_id, first_name, payload=""):
 
     user = telegram_link.user_for_chat(chat_id)
     if user:
-        _send(chat_id, _help_text(user), reply_markup=_open_kb())
+        _send(chat_id, _help_text(user), reply_markup=_main_kb(user))
         return
 
     # UNLINKED: one button, and no instructions at all.
@@ -1440,19 +3104,404 @@ def _link_rate_ok(chat_id):
 
 
 # ==================== /ping ====================
-def handle_ping(chat_id, text):
-    target = text.split()[1] if len(text.split()) > 1 else "https://ahadorg.onrender.com"
+PING_TIMEOUT_S = float(os.getenv("PING_TIMEOUT_S", "8"))
+PING_MAX_REDIRECTS = int(os.getenv("PING_MAX_REDIRECTS", "3"))
+PING_UA = "CodeNest-PingBot/1.0"
+
+# Hosts that must never be fetched from a user-supplied /ping: this command is a
+# server-side request, so without this list it doubles as a probe of the machine
+# it runs on (and of a cloud provider's metadata endpoint). Same rule the
+# standalone bot service applies — see bot/app.py's _PING_BLOCKED_HOSTS.
+_PING_BLOCKED_HOSTS = ("localhost", "metadata", "metadata.google.internal",
+                       "0.0.0.0", "ip6-localhost", "ip6-loopback")
+
+
+def ping_default_target() -> str:
+    """What a bare `/ping` measures: THIS site.
+
+    It used to be a hardcoded foreign host. On any install that was not that
+    one, `/ping` measured somebody else's server — and when it timed out the
+    reply was a raw requests exception naming that server
+    ("HTTPSConnectionPool(host='…', port=443): Read timed out."), which reads
+    like the bot crashed. PING_DEFAULT_TARGET still overrides this for anyone
+    who wants a fixed target; api.telegram.org is the last resort because it is
+    the one service every install here actually depends on.
+    """
+    return (os.getenv("PING_DEFAULT_TARGET", "").strip() or SITE_BASE
+            or "https://api.telegram.org")
+
+
+def _ping_ip_blocked(value: str) -> bool:
+    """True for an ADDRESS that must not be fetched.
+
+    A hostname is not an address: it is judged by what it resolves to a few
+    lines below, so "not an IP" means "not blocked here", not "blocked". (The
+    opposite reading refused every /ping of a normal domain name.)
+    """
     try:
-        t0 = time.time()
-        r = requests.head(target, timeout=8, allow_redirects=True)
-        ms = round((time.time() - t0) * 1000, 1)
-        _send(chat_id, f"🟢 {ms}ms | HTTP {r.status_code}")
-    except Exception as e:
-        _send(chat_id, f"❌ {str(e)}")
+        ip = ipaddress.ip_address(str(value).split("%")[0])
+    except ValueError:
+        return False
+    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified or str(ip).startswith("169.254."))
+
+
+def _ping_host_allowed(host: str) -> tuple:
+    """(ok, reason). Refuses internal names and addresses before any request."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return False, "there's no hostname in that URL"
+    for blocked in _PING_BLOCKED_HOSTS:
+        if host == blocked or host.endswith("." + blocked):
+            return False, f"`{host}` is an internal address I'm not allowed to fetch"
+    try:
+        if _ping_ip_blocked(host):
+            return False, f"`{host}` is in a private/internal IP range"
+    except Exception:
+        pass
+    try:
+        # No family/type here on purpose: getaddrinfo(host, None, SOCK_STREAM)
+        # raises "ai_family not supported" on some resolvers, which would refuse
+        # every domain name — a guard that blocks all pings is worse than none.
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        # A name with no record is a real answer. Anything else is the resolver
+        # itself failing, and that is the request's problem to report (it does,
+        # in words — see _ping_error_text), not a reason to refuse up front.
+        nodata = getattr(socket, "EAI_NODATA", -5)
+        if exc.errno in (socket.EAI_NONAME, nodata):
+            return False, f"`{host}` doesn't resolve — no DNS record for that name"
+        return True, ""
+    except Exception:
+        return True, ""            # resolver hiccup: let the request decide
+    for info in infos:
+        addr = info[4][0]
+        if isinstance(addr, tuple):
+            addr = addr[0]
+        if _ping_ip_blocked(addr):
+            return False, f"`{host}` resolves to an internal address ({addr})"
+    return True, ""
+
+
+def _ping_error_detail(exc: Exception) -> str:
+    """The useful fragment of a requests exception, wrappers peeled off.
+
+    "HTTPSConnectionPool(host='x', port=443): Max retries exceeded with url: /
+    (Caused by SSLError(SSLZeroReturnError(6, '…')))" is four layers of library
+    plumbing around one fact. This keeps the fact and drops the plumbing — that
+    string is what made a two-second network hiccup look like a crash report.
+    """
+    text = str(exc).strip()
+    caused = re.search(r"\(Caused by ([A-Za-z_.]+)\((.*)\)\)\s*$", text, re.S)
+    if caused:
+        text = f"{caused.group(1)}: {caused.group(2)}"
+    text = re.sub(r"^(?:New ?|HTTPS?|HTTP)ConnectionPool\([^)]*\):\s*", "", text)
+    text = re.sub(r"^Max retries exceeded with url:\s*\S+\s*", "", text)
+    text = re.sub(r"^[A-Za-z_.]*(?:Error|Exception)\(\d+,\s*", "", text)
+    text = re.sub(r"\(_ssl\.c:\d+\)", "", text)
+    return (text.strip(" '\"") or type(exc).__name__)[:140]
+
+
+def _ping_error_text(host: str, exc: Exception, seconds: float = None,
+                     own_site: bool = False) -> str:
+    """One short line a person can act on, instead of a requests traceback.
+
+    `seconds` is the budget actually used (the own-site case gets a longer one),
+    and `own_site` adds the one hint that matters when the address being
+    measured is this deployment itself: a free-tier host can take a minute to
+    wake, and 🩺 answers the same question without an HTTP round trip.
+    """
+    low = str(exc).lower()
+    detail = _ping_error_detail(exc)
+    wait = int(seconds if seconds is not None else PING_TIMEOUT_S)
+    hint = ("\nA free-tier service can take up to a minute to wake up — try 🩺 "
+            "*Health from inside* below, which doesn't depend on it answering "
+            "HTTP at all." if own_site else "")
+    if isinstance(exc, requests.Timeout) or "timed out" in low or "timeout" in low:
+        return (f"🔴 *{host}* didn't answer within {wait}s.\n"
+                f"It's down, still waking up, or too slow to reply.{hint}")
+    if "name or service not known" in low or "failed to resolve" in low \
+            or "nodename nor servname" in low or "getaddrinfo" in low:
+        return f"🔴 *{host}* doesn't resolve — check the spelling of the address."
+    if "connection refused" in low:
+        return f"🔴 *{host}* refused the connection — nothing is listening there."
+    if "certificate verify failed" in low or "self signed" in low or "self-signed" in low:
+        return f"🔴 *{host}*'s TLS certificate isn't trusted from here: `{detail}`"
+    if "ssl" in low or "certificate" in low or "tls" in low:
+        return (f"🔴 *{host}* closed the secure connection before answering.\n"
+                f"`{detail}`{hint}")
+    if isinstance(exc, requests.TooManyRedirects) or "too many redirects" in low:
+        return f"🔴 *{host}* keeps redirecting in a loop."
+    if "connection aborted" in low or "connection reset" in low:
+        return f"🔴 *{host}* dropped the connection part-way: `{detail}`{hint}"
+    return f"🔴 Couldn't reach *{host}*: `{detail}`{hint}"
+
+
+PING_SELF_TIMEOUT_S = float(os.getenv("PING_SELF_TIMEOUT_S", "25"))
+
+
+def _ping_kb():
+    """Buttons under a /ping result: measure again, or ask from the inside."""
+    return {"inline_keyboard": [
+        [{"text": "🔁 Measure again", "callback_data": "ping:again"},
+         {"text": "🩺 Health from inside", "callback_data": "ping:health"}]]}
+
+
+def handle_ping(chat_id, text):
+    """`/ping [url]` — how long a URL takes to answer, in plain words.
+
+    With no argument it measures THIS site, because that is the question being
+    asked ("is my hosting alive?"). Two consequences follow, and both used to
+    read as "/ping is broken":
+
+    • A free-tier service that has been asleep takes tens of seconds to answer
+      its FIRST request. Judging that with the 8s budget meant for an arbitrary
+      URL produced "🔴 didn't answer" about a site that was answering — slowly,
+      because the ping itself had just woken it. The own-site case gets a longer
+      budget, and a slow answer is reported as a cold start, not as death.
+    • Nobody could tell what had been measured, so a red result looked like the
+      bot failing rather than a verdict about a named address. The reply now
+      names its target and offers 🩺 — the same question asked from inside the
+      process, where no HTTP round trip can confuse the answer.
+    """
+    parts = text.split()
+    given = parts[1].strip() if len(parts) > 1 else ""
+    target = given or ping_default_target()
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", target):
+        target = "https://" + target          # "/ping example.com" should work
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        _send(chat_id, "🔴 I can only ping `http://` and `https://` addresses.")
+        return
+    if parsed.username or parsed.password:
+        _send(chat_id, "🔴 Please don't put a username or password in a pinged URL.")
+        return
+    host = parsed.hostname or target
+    ok, why = _ping_host_allowed(host)
+    if not ok:
+        _send(chat_id, f"🔴 I can't ping that: {why}")
+        return
+
+    budget = PING_TIMEOUT_S if given else max(PING_TIMEOUT_S, PING_SELF_TIMEOUT_S)
+    started = time.time()
+    current, method, hops = target, "HEAD", 0
+    try:
+        while True:
+            # Redirects are followed by hand so every hop is re-checked: a public
+            # URL that 302s to an internal address would otherwise smuggle the
+            # request past the guard above.
+            resp = requests.request(method, current, timeout=budget,
+                                    allow_redirects=False,
+                                    headers={"User-Agent": PING_UA})
+            if resp.status_code in (301, 302, 303, 307, 308) and hops < PING_MAX_REDIRECTS:
+                location = resp.headers.get("Location") or ""
+                if not location:
+                    break
+                nxt = urljoin(current, location)
+                next_host = urlparse(nxt).hostname or ""
+                ok, why = _ping_host_allowed(next_host)
+                if not ok:
+                    _send(chat_id, f"🔴 *{host}* redirected somewhere I can't follow: {why}")
+                    return
+                current, hops = nxt, hops + 1
+                if urlparse(nxt).scheme not in ("http", "https"):
+                    break
+                continue
+            # Some hosts answer HEAD with 403/405 but serve GET fine — measuring
+            # that as "the site is broken" would be wrong, so try GET once.
+            if method == "HEAD" and resp.status_code in (403, 405, 501):
+                method = "GET"
+                continue
+            break
+    except Exception as exc:                                   # noqa: BLE001
+        if not given:
+            # Own platform: no hostname in the reply.
+            msg = _ping_error_text("the platform", exc, budget, own_site=True)
+            msg = msg.replace("`the platform`", "the platform")
+            _send(chat_id, msg, reply_markup=_ping_kb())
+        else:
+            _send(chat_id, _ping_error_text(host, exc, budget, own_site=False),
+                  reply_markup=_ping_kb())
+        return
+
+    ms = round((time.time() - started) * 1000, 1)
+    code = resp.status_code
+    final_host = urlparse(current).hostname or host
+    icon = "🟢" if code < 400 else ("🟡" if code < 500 else "🔴")
+    lines = []
+    # Bare /ping measures THIS platform. Never print the hostname — a normal
+    # user does not need the deploy URL, and it is not a public brand name.
+    if not given:
+        lines.append(f"{icon} Platform is reachable — {ms}ms · HTTP {code}")
+        lines.append("`/ping example.com` checks any other URL.")
+    else:
+        lines.append(f"{icon} *{host}* — {ms}ms · HTTP {code}")
+        if final_host != host:
+            lines.append(f"↳ landed on `{final_host}` after {hops} redirect(s)")
+    if code in (401, 403):
+        lines.append("It answered, but refused the request — normal for a page "
+                     "behind a login.")
+    elif code == 404 and given:
+        lines.append("It answered, but that path doesn't exist.")
+    elif code >= 500:
+        lines.append("It answered with a server error.")
+    elif ms > 5000:
+        lines.append("⏳ Cold start — the service had been asleep. Next ping is fast.")
+    _send(chat_id, "\n".join(lines), reply_markup=_ping_kb())
+
+
+def cmd_id(chat_id, msg_from=None):
+    """`/id` — numbers only, each in HTML <code> so Telegram copies on tap.
+
+    No how-to cartoon, no home menu, no second "Open the site" bubble.
+    One message: tap a grey code chip → copy that id alone.
+    """
+    frm = msg_from or {}
+    tg_id = frm.get("id") or chat_id
+    username = (frm.get("username") or "").strip()
+    user = telegram_link.user_for_chat(chat_id)
+    account_id = (user or {}).get("id")
+
+    def esc(x):
+        return (str(x).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    parts = [
+        "<b>Your ids</b> — tap a grey number to copy",
+        "",
+        f"Telegram id:  <code>{esc(tg_id)}</code>",
+        f"This chat:    <code>{esc(chat_id)}</code>"
+        + ("  <i>(same — private chat)</i>" if chat_id == tg_id else
+           "  <i>(group)</i>"),
+    ]
+    if username:
+        parts.append(f"Username:     @{esc(username)}")
+    if user:
+        flags = []
+        if _user_is_queen(user):
+            flags.append("queen")
+        if user.get("is_admin"):
+            flags.append("admin")
+        flag_s = (" · " + ", ".join(flags)) if flags else ""
+        uname = user.get("username") or ""
+        parts.append(
+            f"CodeNest #:   <code>{esc(user['id'])}</code>"
+            + (f"  ({esc(uname)})" if uname else "")
+            + flag_s
+        )
+    else:
+        parts.append("CodeNest #:   not linked — send /link")
+
+    tg_uid = frm.get("id") or chat_id
+    if _is_admin(user, tg_uid):
+        sample = account_id or tg_id
+        parts += [
+            "",
+            "<b>Admin</b> (you only) — tap a line to copy:",
+            f"<code>/queen {esc(sample)}</code>",
+            f"<code>/admin limit {esc(sample)} 10</code>",
+            f"<code>/see {esc(sample)}</code>",
+            f"<code>/user {esc(sample)}</code>",
+        ]
+    _send_html(chat_id, "\n".join(parts))
+
+
+
+
+def cmd_web(chat_id, user=None):
+    """`/web` — open the Telegram Web App: the whole site, inside Telegram.
+
+    The Mini App is the front door. It verifies the same Telegram identity the
+    bot uses, so there is no password to remember and no browser to leave — and
+    it is the only way to upload a project bigger than Telegram's own 20MB file
+    limit, which is why it has a command of its own rather than living only
+    inside /start.
+    """
+    kb = _open_kb()
+    if not kb:
+        _send(chat_id, "⚠️ I can't offer the web app yet: this server has no "
+                       "public URL of its own (`SITE_BASE_URL`). Until the owner "
+                       "sets it, a button would open somebody else's site.")
+        return
+    user = user or telegram_link.user_for_chat(chat_id)
+    name = (user or {}).get("username") or "there"
+    body = [f"🌐 *CodeNest web* — hi {name}", "",
+            "Tap below: it opens inside Telegram and signs you in automatically, "
+            "no password."]
+    if SITE_BASE:
+        body.append(f"Direct link: {SITE_BASE}")
+    body += ["", "What's in there:",
+             "• Write, edit and deploy code, file by file",
+             "• *Env* — a Telegram bot's own `BOT_TOKEN` goes here",
+             "• Upload a `.zip` (bigger than Telegram's 20MB limit)",
+             "• Files, logs, revisions, and each app's live URL"]
+    _send(chat_id, "\n".join(body), reply_markup=kb)
+
+
+def cmd_health(chat_id, user):
+    """🩺 `/health` — is the platform alive, asked from the INSIDE.
+
+    `/ping` sends a real HTTP request out of the container and back in. On a
+    free-tier host that trip can be slow, cold-started, or refused by the edge —
+    and then "🔴 didn't answer" reads as "my hosting is broken" when nothing is.
+    This asks the same question without leaving the process: can the database be
+    read, which runners answer, how many jobs are alive, and which URL the Mini
+    App button opens. An admin gets the full 🩺 panel instead.
+    """
+    if _is_admin(user, chat_id):
+        _send(chat_id, _admin_health_text(), reply_markup=_admin_health_kb())
+        return
+
+    lines = ["🩺 *Platform health*"]
+    try:
+        from database import DIALECT, get_db_connection
+        conn = get_db_connection()
+        try:
+            conn.execute("SELECT 1").fetchone()
+        finally:
+            conn.close()
+        lines.append(f"🟢 Database — reachable ({DIALECT})")
+    except Exception as exc:                                   # noqa: BLE001
+        lines.append(f"🔴 Database — {type(exc).__name__}: {str(exc)[:80]}")
+
+    pool = runner_client.runner_pool()
+    try:
+        health = runner_client.worker_health(refresh=True) if pool else {}
+        online = [u for u, h in health.items() if h.get("online")]
+        if not pool:
+            lines.append("🟢 Runner — embedded in this service")
+        elif online:
+            free = sum(int(h.get("free") or 0) for h in health.values())
+            mb = sum(int(h.get("free_mb") or 0) for h in health.values())
+            lines.append(f"🟢 Runner — {len(online)}/{len(pool)} answering · "
+                         f"{free} free slot(s) · {mb}MB free")
+        else:
+            lines.append(f"🔴 Runner — none of the {len(pool)} runner(s) answered "
+                         f"/health (asleep or restarting)")
+    except Exception as exc:                                   # noqa: BLE001
+        lines.append(f"⚠️ Runner — couldn't be checked ({type(exc).__name__})")
+
+    try:
+        running = bot_ops.active_count(_row_id(user))
+        priv = bot_ops.account_privileges(_row_id(user))
+        lines.append(f"🟢 Your apps — {running} running of {priv.get('job_limit')} allowed")
+    except Exception:                                          # noqa: BLE001
+        pass
+
+    hook = (_tg("getWebhookInfo") or {}).get("result") or {}
+    lines.append("🔔 Telegram — " + ("webhook (fast, wakes itself)"
+                                     if str(hook.get("url") or "") else
+                                     "long-polling (slower to wake on a free host)"))
+    if SITE_BASE:
+        lines.append("🌐 Mini App button — ready")
+    else:
+        lines.append("⚠️ Mini App button — site URL not configured yet")
+    _send(chat_id, "\n".join(lines))
+
 
 
 # ==================== APP BUTTONS ====================
-def _app_buttons(job_id, url="", bot_username=""):
+def _app_buttons(job_id, url="", bot_username="", repo=False, queen=False):
     """Buttons keyed on the SITE job id, not the runner id.
 
     The runner id changes when a job is recreated, so buttons attached to an
@@ -1466,6 +3515,14 @@ def _app_buttons(job_id, url="", bot_username=""):
          {"text": "⏹ Stop", "callback_data": f"stop:{job_id}"}],
         [{"text": "📥 Download data", "callback_data": f"db:{job_id}"}],
     ]
+    # An app that came from a repo can be brought up to date in one tap — the
+    # same idea as a platform auto-deploy, and the reason nobody has to remember
+    # which commit is running.
+    if repo:
+        rows.append([{"text": "⬆️ Deploy latest commit", "callback_data": f"latest:{job_id}"}])
+        if queen:
+            rows.append([{"text": "⚙️ Auto-deploy: on/off",
+                          "callback_data": f"autodep:{job_id}"}])
     # The whole point of this platform is deploying a Telegram bot — so the
     # single most relevant thing to do right after a deploy is open THAT
     # bot and talk to it. This button was missing entirely; every other
@@ -1504,25 +3561,173 @@ _ICON = {"running": "🟢", "crashed": "🔴", "installing": "🟡",
          "starting": "🟡", "restarting": "🟡", "recovering": "🟡", "stopped": "⚪", "offline": "⚪"}
 
 
+def _user_is_queen(user) -> bool:
+    """👑 flag for a linked account.
+
+    telegram_link.user_for_chat already selects it (mem_unlimited AS is_queen),
+    so this is normally free; the database fallback covers callers that built
+    the user dict somewhere else (the admin panel, tests).
+    """
+    if not user:
+        return False
+    if "is_queen" in user:
+        return bool(user.get("is_queen"))
+    try:
+        return bot_ops.is_queen(user.get("id"))
+    except Exception:
+        return False
+
+
+
+def _send_photo_file(chat_id, filepath, caption=""):
+    """Inline photo (not document download). Quiet on failure."""
+    if not TG_API or not filepath:
+        return {}
+    try:
+        import os as _os
+        with open(filepath, "rb") as fh:
+            r = requests.post(
+                f"{TG_API}/sendPhoto",
+                data={"chat_id": chat_id, "caption": (caption or "")[:1024]},
+                files={"photo": (_os.path.basename(str(filepath)), fh, "image/png")},
+                timeout=60,
+            )
+        return r.json() if r is not None else {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sendPhoto failed: %s", e)
+        return {}
+
+
+def _render_apps_card(apps, running=0, limit=0, mem_mb=0):
+    """One PNG dashboard: total / running / memory + per-app rows.
+
+    This is the answer to /apps — a live snapshot, not a how-to cartoon.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    from pathlib import Path as _P
+    import tempfile
+
+    W, H = 720, min(900, 160 + max(len(apps), 1) * 44 + 40)
+    BG, CARD, TEXT = (15, 23, 42), (30, 41, 59), (226, 232, 240)
+    MUTED, OK, OFF, WARN = (148, 163, 184), (34, 197, 94), (100, 116, 139), (251, 191, 36)
+    ACCENT = (99, 102, 241)
+
+    def font(sz, bold=False):
+        for c in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ):
+            if _P(c).exists():
+                return ImageFont.truetype(c, sz)
+        return ImageFont.load_default()
+
+    im = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(im)
+    # header
+    d.rounded_rectangle((16, 16, W - 16, 120), 16, fill=CARD)
+    d.text((32, 28), "Your apps", fill=TEXT, font=font(26, True))
+    d.text((32, 68), f"{len(apps)} total", fill=MUTED, font=font(16))
+    # big stats
+    stats = [
+        (220, "Running", f"{running}/{limit or '—'}", OK if running else OFF),
+        (400, "Memory", f"{round(mem_mb)} MB", ACCENT),
+        (560, "Live", str(sum(1 for a in apps if a.get("status") == "running")), OK),
+    ]
+    for x, label, val, col in stats:
+        d.text((x, 32), label, fill=MUTED, font=font(13))
+        d.text((x, 54), val, fill=col, font=font(22, True))
+
+    # rows
+    y = 140
+    for a in apps[:14]:
+        st = (a.get("status") or "offline").lower()
+        col = OK if st == "running" else (WARN if st in ("starting", "installing", "restarting", "recovering") else OFF)
+        d.rounded_rectangle((16, y, W - 16, y + 40), 10, fill=CARD)
+        d.ellipse((28, y + 12, 44, y + 28), fill=col)
+        name = str(a.get("name") or "?")[:28]
+        d.text((56, y + 10), name, fill=TEXT, font=font(16, True))
+        right = f"{st}"
+        if a.get("mem_mb"):
+            right += f"  ·  {round(a['mem_mb'])}MB"
+        if a.get("uptime_s"):
+            right += f"  ·  {_fmt_uptime(a['uptime_s'])}"
+        # right-align-ish
+        bbox = d.textbbox((0, 0), right, font=font(13))
+        tw = bbox[2] - bbox[0]
+        d.text((W - 32 - tw, y + 12), right, fill=MUTED, font=font(13))
+        y += 44
+    if len(apps) > 14:
+        d.text((32, y + 4), f"+{len(apps) - 14} more — scroll the list below", fill=MUTED, font=font(13))
+
+    out = _P(tempfile.gettempdir()) / f"codenest_apps_{os.getpid()}.png"
+    im.save(out, "PNG", optimize=True)
+    return str(out)
+
+
 def cmd_apps(chat_id, user):
+    """Live fleet card + list. Not a how-to — the user asked what they own."""
     apps = bot_ops.list_apps(user["id"])
+    queen = _user_is_queen(user)
     if not apps:
-        _send(chat_id, "You have no apps yet. `/code <name>` to create one.")
+        _send(chat_id,
+              "No apps yet.\n"
+              "`/code myapp` · `/import owner/repo` · `/guide code`")
         return
-    lines = [f"*Your apps* ({len(apps)}/{bot_ops.MAX_JOBS_PER_USER} running slots)\n"]
-    for a in apps:
+
+    running = bot_ops.active_count(user["id"])
+    limit = bot_ops.effective_job_limit(user["id"])
+    total = len(apps)
+    mem = sum(float(a.get("mem_mb") or 0) for a in apps)
+
+    # One picture that IS the answer: counts + bars — not a tutorial.
+    try:
+        path = _render_apps_card(apps, running=running, limit=limit, mem_mb=mem)
+        if path:
+            _send_photo_file(chat_id, path,
+                             caption=f"Your apps · {total} total · {running}/{limit} running")
+    except Exception:
+        logger.exception("apps card failed")
+
+    # Compact text + per-app buttons (logs/status/restart) — no how-to footer.
+    crown = " 👑" if queen else ""
+    lines = [f"*{total} total* · *{running}/{limit} running*{crown}"]
+    for a in apps[:20]:
         icon = _ICON.get(a["status"], "⚪")
-        bits = [f"{icon} *{a['name']}* — {a['status']}"]
+        bits = [f"{icon} *{a['name']}* — `{a['status']}`"]
         if a.get("mem_mb"):
             bits.append(f"{round(a['mem_mb'])}MB")
         if a.get("uptime_s"):
             bits.append(_fmt_uptime(a["uptime_s"]))
-        if a.get("restarts"):
-            bits.append(f"{a['restarts']}× restarted")
         lines.append(" · ".join(bits))
-    lines.append("\n`/logs <name>` `/restart <name>` `/stop <name>`")
-    lines.append("`/update <name>` `/rename <name> <new>` `/delete <name>`")
-    _send(chat_id, "\n".join(lines))
+    if total > 20:
+        lines.append(f"… +{total - 20} more")
+    if queen:
+        lines.append("👑 queen · no memory ceiling")
+    if running >= limit:
+        lines.append(f"⚠️ {limit}/{limit} slots full — `/stop name` frees one")
+
+    # Buttons: each app gets Logs | Status | Restart (max ~8 apps to stay under TG limit)
+    rows = []
+    for a in apps[:8]:
+        jid = a.get("id")
+        if jid is None:
+            continue
+        name = (a.get("name") or "?")[:16]
+        rows.append([
+            {"text": f"📜 {name}", "callback_data": f"logs:{jid}"},
+            {"text": "📊", "callback_data": f"stat:{jid}"},
+            {"text": "🔄", "callback_data": f"restart:{jid}"},
+            {"text": "⏹", "callback_data": f"stop:{jid}"},
+        ])
+    kb = {"inline_keyboard": rows} if rows else None
+    _send(chat_id, "\n".join(lines) if lines else "—", reply_markup=kb)
+
+
 
 
 def cmd_status(chat_id, user, ref=""):
@@ -1542,12 +3747,29 @@ def cmd_status(chat_id, user, ref=""):
                f"Uptime: {_fmt_uptime(info.get('uptime_s'))}",
                f"Restarts: {info.get('restarts', 0)}"]
         if info.get("last_exit_reason"):
-            txt.append(f"Last exit: `{info['last_exit_reason']}`")
+            reason = info["last_exit_reason"]
+            human = {
+                "oom": "went over its memory limit (other apps kept running)",
+                "limit": "stopped to protect the runner — host was full",
+                "crash": "exited with an error",
+                "crash_loop": "crash-looped and was stopped for good",
+                "isolation": "stopped to protect every other app on the runner",
+                "manual": "stopped on purpose",
+                "exit": "finished cleanly",
+                "workspace missing": "its files were gone on the runner",
+            }.get(reason, reason)
+            txt.append(f"Last exit: {human}")
+            if info.get("last_exit_code") not in (None, ""):
+                txt.append(f"Exit code: `{info['last_exit_code']}`")
         if info.get("libs"):
             txt.append(f"Packages: `{', '.join(info['libs'])}`")
         if info.get("env_keys"):
             # KEY NAMES ONLY — the values are bot tokens.
             txt.append(f"Env keys: `{', '.join(info['env_keys'])}`")
+        elif job.get("telegram_bot_detected"):
+            # Env empty is fine when the token lives in the file.
+            txt.append("Token: check source or Env — either place is enough "
+                       "(`/guide token`).")
         _send(chat_id, "\n".join(txt),
               reply_markup=_app_buttons(job["id"], bot_username=job.get("telegram_bot_username") or ""))
         return
@@ -1555,16 +3777,18 @@ def cmd_status(chat_id, user, ref=""):
     apps = bot_ops.list_apps(user["id"])
     running = [a for a in apps if a["status"] == "running"]
     mem = sum(a.get("mem_mb") or 0 for a in apps)
+    limit = bot_ops.effective_job_limit(user["id"])
+    crown = " 👑" if _user_is_queen(user) else ""
     _send(chat_id,
-          f"*{user['username']}*\n\n"
-          f"Apps: {len(apps)} · running {len(running)}/{bot_ops.MAX_JOBS_PER_USER}\n"
+          f"*{user.get('username') or 'you'}*{crown}\n\n"
+          f"Apps: {len(apps)} · running {len(running)}/{limit}\n"
           f"Memory in use: {round(mem)}MB\n\n"
-          "`/apps` for the list · `/status <name>` for one app")
+          "`/apps` for the live card · `/status name` for one app")
 
 
 def cmd_logs(chat_id, user, ref):
     if not ref:
-        _send(chat_id, "Which app? `/logs <name>` — /apps lists them.")
+        _send(chat_id, "Which app? `/logs name` — /apps lists them.")
         return
     res = bot_ops.logs(user["id"], ref)
     if not res.get("ok"):
@@ -1582,20 +3806,30 @@ def cmd_logs(chat_id, user, ref):
 
 def cmd_restart(chat_id, user, ref):
     if not ref:
-        _send(chat_id, "Which app? `/restart <name>`")
+        _send(chat_id, "Which app? `/restart name` — or open `/apps`.")
         return
     res = bot_ops.restart(user["id"], ref)
-    _send(chat_id, f"🔄 Restarting *{res['job']['name']}*…" if res.get("ok")
-          else f"❌ {res['error']}")
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    job = res["job"]
+    _send(chat_id, f"🔄 Restarting *{job['name']}*…",
+          reply_markup=_app_buttons(job["id"],
+                                    bot_username=job.get("telegram_bot_username") or ""))
 
 
 def cmd_stop(chat_id, user, ref):
     if not ref:
-        _send(chat_id, "Which app? `/stop <name>`")
+        _send(chat_id, "Which app? `/stop name` — or open `/apps`.")
         return
     res = bot_ops.stop(user["id"], ref)
-    _send(chat_id, f"⏹ Stopped *{res['job']['name']}*." if res.get("ok")
-          else f"❌ {res['error']}")
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res['error']}")
+        return
+    job = res["job"]
+    _send(chat_id, f"⏹ Stopped *{job['name']}*.",
+          reply_markup=_app_buttons(job["id"],
+                                    bot_username=job.get("telegram_bot_username") or ""))
 
 
 def cmd_source(chat_id, user, ref):
@@ -1604,7 +3838,7 @@ def cmd_source(chat_id, user, ref):
     like every other user command (find_app checks user_id) — this is NOT
     the admin /see tool, it only ever returns the caller's own code."""
     if not ref:
-        _send(chat_id, "Usage: `/source <name>`")
+        _send(chat_id, "Usage: `/source name`")
         return
     app = bot_ops.find_app(user["id"], ref)
     if not app:
@@ -1633,7 +3867,7 @@ def cmd_source(chat_id, user, ref):
 
 def cmd_delete(chat_id, user, ref):
     if not ref:
-        _send(chat_id, "Which app? `/delete <name>` — this cannot be undone.")
+        _send(chat_id, "Which app? `/delete name` — this cannot be undone.")
         return
     app = bot_ops.find_app(user["id"], ref)
     if not app:
@@ -1655,7 +3889,7 @@ def _cmd_delete_confirmed(chat_id, user, ref):
 def cmd_rename(chat_id, user, args):
     parts = (args or "").split()
     if len(parts) < 2:
-        _send(chat_id, "Usage: `/rename <current name> <new name>`")
+        _send(chat_id, "Usage: `/rename x x`")
         return
     res = bot_ops.rename(user["id"], parts[0], " ".join(parts[1:]))
     _send(chat_id, f"✏️ *{res['old']}* is now *{res['name']}*." if res.get("ok")
@@ -1664,16 +3898,52 @@ def cmd_rename(chat_id, user, args):
 
 # ==================== /code AND /update — see the module comment above ====
 
+def _repo_branch_of(url: str) -> str:
+    """The branch a GitHub URL asks for, or "" for the repo's default.
+
+    Only used for what the user is TOLD (the runner does its own parsing in
+    _repo_clone_target), so a mismatch here would be a wrong label, never a
+    wrong deploy.
+    """
+    text = (url or "").strip()
+    # The whole remainder, slashes included: a branch may be "arena/01a0ba14-b",
+    # and the runner works out how much of it is the branch when it clones.
+    m = re.search(r"github\.com/[^/\s]+/[^/\s]+?(?:\.git)?/(?:tree|blob|commits?)/([^#\s?]+)", text)
+    if m:
+        return m.group(1).strip("/")
+    if "#" in text:
+        return text.rsplit("#", 1)[1].strip()
+    return ""
+
+
 def cmd_import(chat_id, user, arg):
     """/import <github url> [name] — clone a public GitHub repo and deploy it.
-    The runner auto-detects which file to run (main.py/bot.py/app.py first,
-    then a manifest-aware fallback — see runner/app.py:_detect_entry). A
-    static site (index.html, no requirements.txt/package.json) is served
-    as-is."""
+
+    With no name, nothing has been decided yet, so the repo is scanned and what
+    comes back is a button per runnable thing in it (offer_repo_choices) — a repo
+    is rarely exactly one project, and asking for a name in a sentence full of
+    placeholders is a form to fill in by hand. With a name, the person has said
+    what they want: it deploys straight away and the scan only decides WHICH file
+    runs and which dependency files belong to it.
+
+    A branch can be part of the URL — `owner/repo/tree/<branch>` (what the
+    browser shows) or `owner/repo#<branch>` — and the runner clones exactly that
+    branch. Without it a repo whose work lives off `main` deploys the wrong code.
+    """
     if not arg:
-        _send(chat_id, "Usage: `/import <github.com/user/repo>`\n"
-                       "Optionally name it yourself: `/import <url> myapp`\n"
-                       "Only public repos are supported right now.")
+        ex_owner, ex_repo = _queen_repo_parts()
+        example = f"github.com/{ex_owner}/{ex_repo}" if ex_owner else "github.com/user/repo"
+        _send(chat_id, "Send me a repo and I'll show what can run in it:\n"
+                       f"`/import {example}`   ← paste your own instead\n\n"
+                       "Then tap the project you want — no name to invent, no "
+                       "filename to guess.\n"
+                       "• A branch: paste the address from your browser, "
+                       "`/import " + example + "/tree/dev`\n"
+                       "• A name of your own: add it at the end, "
+                       "`/import " + example + " myapp`\n"
+                       "Public repos only"
+                       + (" — and 👑 `/projects` lists the ready-made ones."
+                          if _user_is_queen(user) else "."))
         return
     parts = arg.split(None, 1)
     url = parts[0]
@@ -1683,8 +3953,16 @@ def cmd_import(chat_id, user, arg):
         _send(chat_id, "That doesn't look like a github.com repo URL — "
                        "expected something like `github.com/user/repo`.")
         return
+    branch = _repo_branch_of(url)
+
     if not name:
+        with _working(chat_id):
+            if offer_repo_choices(chat_id, user, url):
+                return
+        # Nothing to choose between (one entry, or GitHub wouldn't answer):
+        # deploy the repo itself, and let the runner detect the entry.
         name = m.group(2).replace(".git", "")
+
     clean = bot_ops.slugify_name(name)
     if not clean:
         _send(chat_id, "That name has no usable characters — letters, numbers, "
@@ -1692,30 +3970,508 @@ def cmd_import(chat_id, user, arg):
         return
     if bot_ops.find_app(user["id"], clean):
         _send(chat_id, f"You already have an app called “{clean}”. Pick a "
-                       f"different name: `/import {url} <name>`.")
+                       f"different name: `/import {url} name`.")
         return
-    _send(chat_id, f"📥 Cloning and deploying *{clean}*… this can take a "
-                   f"little longer than /code, since the repo has to be "
-                   f"fetched first.")
-    res = bot_ops.create_app_from_repo(user["id"], clean, url)
-    if not res.get("ok"):
-        _send(chat_id, f"❌ {res['error']}")
-        return
+
+    # Which file runs, and which dependency files belong to it. Exactly one
+    # project in the repo means no ambiguity; more than one means the picker
+    # above was the right answer, so the runner's own detection decides.
+    entry, deps = "", None
+    owner, repo_name, parsed_branch = github_repo.parse_repo(url)
+    if owner:
+        projects = github_repo.scan_projects(owner, repo_name, branch or parsed_branch)
+        if len(projects) == 1:
+            entry = projects[0]["entry"]
+            deps = projects[0]["manifests"]
+
+    with _progress(chat_id, "import", name=clean) as prog:
+        prog.at(10, "Reading the GitHub link")
+        prog.at(28, "Cloning" + (f" branch `{branch}`" if branch else " the repo"))
+        if entry:
+            prog.at(42, f"Will run `{entry}`")
+        prog.at(58, "Installing requirements")
+        res = bot_ops.create_app_from_repo(user["id"], clean, url, entry=entry, deps=deps)
+        if not res.get("ok"):
+            prog.fail(res.get("error") or "import failed")
+            _send(chat_id, f"❌ {res['error']}")
+            return
+        prog.at(85, "Starting the app")
+        prog.done("Deployed.")
+    _send_deployed(chat_id, user, res, branch=branch, repo=True)
+
+
+# ==================== CHOOSING WHAT TO RUN ====================
+# A repo is rarely one thing. The project repo this install ships with holds a
+# Telegram bot at the root (bot.py + requirements.txt) AND a web dashboard in
+# web/ (dashboard.py + requirements-web.txt). Telling someone to type
+# "/import owner/repo/tree/<branch> <name>" hands them a form with blanks in it —
+# and the brackets read as something the bot failed to fill in. So the repo is
+# scanned first and what comes back is one button per runnable thing in it.
+
+_PICK_TTL_S = int(os.getenv("PROJECT_PICK_TTL_S", "900"))
+_picks: dict = {}
+_picks_lock = threading.Lock()
+
+
+def _remember_picks(chat_id, state: dict) -> None:
+    """Keep the scan result here; the button carries only an index."""
+    now = time.time()
+    with _picks_lock:
+        for cid in [c for c, v in _picks.items() if now - v.get("at", 0) > _PICK_TTL_S]:
+            _picks.pop(cid, None)
+        _picks[chat_id] = dict(state, at=now)
+
+
+def _take_pick(chat_id, key: str):
+    """Resolve `pick:<key>` for THIS chat, or None when the list has expired.
+
+    callback_data is attacker-supplied and capped at 64 bytes, so it holds an
+    index into a list this server kept — never a URL, a path or a branch. A press
+    from a chat that never asked for a list resolves to nothing at all.
+    """
+    with _picks_lock:
+        state = _picks.get(chat_id)
+        if not state or time.time() - state.get("at", 0) > _PICK_TTL_S:
+            return None
+        items = state.get("items") or []
+        if key in ("all", "readme"):
+            return dict(state, item=None)
+        if not str(key).isdigit() or not (0 <= int(key) < len(items)):
+            return None
+        return dict(state, item=items[int(key)])
+
+
+def _free_app_name(user, base: str) -> str:
+    """A name this account does not already use: base, base-2, base-3, …"""
+    base = bot_ops.slugify_name(base) or "app"
+    candidate, n = base, 1
+    while bot_ops.find_app(user["id"], candidate) and n < 50:
+        n += 1
+        candidate = f"{base}-{n}"
+    return candidate
+
+
+def offer_repo_choices(chat_id, user, url, intro="", branch="") -> bool:
+    """Scan `url` and offer one button per runnable thing inside it.
+
+    Returns False when there is nothing to choose between — not a GitHub URL, the
+    API is rate-limited, or the repo holds exactly one obvious entry — and the
+    caller deploys the whole repo the way it always did. Degrading to the old
+    behaviour beats showing an empty menu.
+    """
+    owner, repo, parsed_branch = github_repo.parse_repo(url)
+    if not owner:
+        return False
+    branch = branch or parsed_branch
+    projects = github_repo.scan_projects(owner, repo, branch)
+    if not projects:
+        return False
+    _remember_picks(chat_id, {"owner": owner, "repo": repo, "branch": branch,
+                              "url": github_repo.repo_url(owner, repo, branch),
+                              "items": projects})
+    lines = [intro or (f"🔎 *{len(projects)} thing(s) can run in `{owner}/{repo}`*"
+                       + (f" — branch `{branch}`" if branch else "")), ""]
+    for i, p in enumerate(projects, start=1):
+        where = "repo root" if not p.get("dir") else f"in `{p['dir']}`"
+        deps = ", ".join(f"`{os.path.basename(m)}`" for m in (p.get("manifests") or [])[:2])
+        lines.append(f"{i}. *{p['name']}* — {where}, runs `{p['entry']}` "
+                     f"({p['language']})" + (f", installs {deps}" if deps else ""))
+    lines += ["", "Tap one: I clone it, install what it needs and start it."]
+    rows = []
+    for i, p in enumerate(projects):
+        icon = "🌐" if p.get("kind") in ("web", "static") else "📦"
+        label = f"{icon} {p['name']} · {os.path.basename(p['entry'])}"
+        rows.append([{"text": label[:60], "callback_data": f"pick:{i}"}])
+    if len(projects) > 1:
+        rows.append([{"text": "▶️ Deploy the whole repo", "callback_data": "pick:all"}])
+    rows.append([{"text": "📖 README", "callback_data": "pick:readme"},
+                 {"text": "✖️ Not now", "callback_data": "pick:no"}])
+    _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": rows})
+    return True
+
+
+def deploy_pick(chat_id, user, state, whole=False):
+    """Deploy one scanned project — or the whole repo — with nothing to type."""
+    item = None if whole else state.get("item")
+    owner, repo = state["owner"], state["repo"]
+    branch = state.get("branch") or ""
+    url = state.get("url") or github_repo.repo_url(owner, repo, branch)
+    name = _free_app_name(user, (item or {}).get("name") or repo)
+    entry = (item or {}).get("entry") or ""
+    deps = (item or {}).get("manifests") or []
+    with _progress(chat_id, "import", name=name) as prog:
+        prog.at(10, "Reading the GitHub link")
+        prog.at(28, "Cloning the branch" + (f" `{branch}`" if branch else ""))
+        if entry:
+            prog.at(40, f"Entry `{entry}`")
+        prog.at(55, "Installing requirements")
+        res = bot_ops.create_app_from_repo(user["id"], name, url, entry=entry, deps=deps)
+        if not res.get("ok"):
+            prog.fail(res.get("error") or "import failed")
+            _send(chat_id, f"❌ {res.get('error')}")
+            return res
+        prog.at(85, "Starting the app")
+        prog.done("Deployed.")
+    _send_deployed(chat_id, user, res, branch=branch, repo=True)
+    return res
+
+
+def _send_deployed(chat_id, user, res, branch="", repo=False):
+    """The one message every deploy path ends with, buttons included."""
     url_web = res.get("web") or ""
-    _send(chat_id, f"✅ *{res['name']}* imported and running.\n"
-                   + (url_web + "\n" if url_web else "")
-                   + "⚠️ No Telegram bot token check on import yet — if this "
-                     f"is meant to be a Telegram bot, run `/status {res['name']}` "
-                     f"to confirm it's actually polling.\n"
-                   + f"`/logs {res['name']}` if anything looks wrong.",
-          reply_markup=_app_buttons(res["job_db_id"], url=url_web))
+    queen = _user_is_queen(user)
+    name = res.get("name")
+    lines = [f"✅ *{name}* is deployed and running"
+             + (f" from branch `{branch}`" if branch else "") + "."]
+    if url_web:
+        lines.append(url_web)
+    if res.get("commit"):
+        lines.append(f"🔖 commit `{str(res['commit'])[:7]}`")
+    lines.append("⚠️ If this is a Telegram bot it needs its own token: open the app "
+                 "→ *Env* → paste `BOT_TOKEN` from @BotFather → *Save & restart*.")
+    lines.append(f"`/logs {name}` if anything looks wrong.")
+    if repo:
+        lines.append(f"⬆️ `/latest {name}` pulls the newest commit; the button below "
+                     f"does the same.")
+        if queen:
+            lines.append(f"👑 `/autodeploy {name} on` makes it follow the branch by itself.")
+    _send(chat_id, "\n".join(lines),
+          reply_markup=_app_buttons(res.get("job_db_id"), url=url_web,
+                                    repo=repo, queen=queen))
+
+
+def _send_repo_readme(chat_id, owner, repo, branch=""):
+    """📖 The repo's own instructions, as plain text — it is Markdown we do not
+    control, so no parse mode, and raw.githubusercontent.com rather than the API:
+    the same README read through the API counts against a rate limit shared with
+    the scan that fills the project list."""
+    raw = (f"https://raw.githubusercontent.com/{owner}/{repo}/"
+           f"{quote(branch or 'HEAD', safe='')}/README.md")
+    try:
+        r = requests.get(raw, timeout=12, headers={"User-Agent": PING_UA})
+    except Exception as exc:                                   # noqa: BLE001
+        _send_plain(chat_id, f"📖 Couldn't fetch the README just now "
+                             f"({type(exc).__name__}). It's here:\n{raw}")
+        return
+    if r.status_code != 200:
+        _send_plain(chat_id, f"📖 No README.md on branch “{branch or 'HEAD'}” "
+                             f"(HTTP {r.status_code}).\nRepo: {owner}/{repo}")
+        return
+    text = (r.text or "").strip() or "(that README is empty)"
+    if len(text) > 3800:
+        text = text[:3800].rstrip() + "\n\n… truncated — the rest is in the repo."
+    _send_plain(chat_id, f"📖 README · {owner}/{repo}"
+                         + (f" @ {branch}" if branch else "") + f"\n\n{text}")
+
+
+# --------------------------------------------------------------------------
+# Staying current: the commit an app was built from, and the one after it
+# --------------------------------------------------------------------------
+def _update_one_app(chat_id, user, row, force=False):
+    """Redeploy one app from its branch's HEAD, in place.
+
+    In place means the runner keeps the job id, the folder and the public
+    address, so the bot's database and sessions survive — which is the whole
+    difference between "updated" and "reinstalled and lost my data".
+    """
+    owner, repo, branch = github_repo.parse_repo(row.get("repo_url") or "")
+    name = row["name"]
+    if not owner:
+        _send(chat_id, f"❌ *{name}* has a repo address I can't read: "
+                       f"`{row.get('repo_url')}`.")
+        return
+    with _working(chat_id):
+        head = github_repo.head_commit(owner, repo, branch)
+    current = (row.get("repo_commit") or "").strip()
+    if not head:
+        _send(chat_id, f"⚠️ I can't read `{owner}/{repo}` right now (GitHub may be "
+                       f"rate-limiting this server). Nothing was changed.")
+        return
+    if head == current and not force:
+        _send(chat_id, f"✅ *{name}* is already on the latest commit (`{head[:7]}`).")
+        return
+    _send(chat_id, f"⬆️ *{name}*: `{(current or 'unknown')[:7]}` → `{head[:7]}` — "
+                   f"redeploying in place (same address, same data)…")
+    with _working(chat_id):
+        res = bot_ops.update_from_repo(user["id"], name)
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res.get('error')}")
+        return
+    commit = (res.get("commit") or head)[:7]
+    _send(chat_id, f"✅ *{name}* is now on `{commit}`"
+                   + (" — the worker that had it no longer did, so it was placed "
+                      "again on another one" if res.get("recreated") else "")
+                   + f".\n`/logs {name}` to watch it come back.",
+          reply_markup=_app_buttons(row["id"], repo=True, queen=_user_is_queen(user)))
+
+
+def cmd_latest(chat_id, user, ref=""):
+    """`/latest [name]` — bring a repo app up to date with its branch."""
+    apps = [a for a in bot_ops.list_apps(user["id"]) if (a.get("repo_url") or "").strip()]
+    if not apps:
+        _send(chat_id, "None of your apps came from a repo, so there is no commit to "
+                       "follow. `/import x` deploys one"
+                       + (" — and 👑 `/projects` lists ready-made ones."
+                          if _user_is_queen(user) else "."))
+        return
+    if ref:
+        row = bot_ops.find_app(user["id"], ref)
+        if not row or not (row.get("repo_url") or "").strip():
+            _send(chat_id, f"❌ No repo-backed app called “{ref}”. `/apps` lists yours.")
+            return
+        _update_one_app(chat_id, user, row)
+        return
+    if len(apps) == 1:
+        _update_one_app(chat_id, user, apps[0])
+        return
+    rows = [[{"text": f"⬆️ {a['name']}", "callback_data": f"latest:{a['id']}"}]
+            for a in apps[:8]]
+    _send(chat_id, "🔎 *Which app should I update?*\nEach one is redeployed from the "
+                   "commit its branch points at right now.",
+          reply_markup={"inline_keyboard": rows})
+
+
+def cmd_autodeploy(chat_id, user, arg=""):
+    """👑 `/autodeploy name on|off` — follow the branch without being asked."""
+    if not _user_is_queen(user):
+        _send(chat_id, "👑 Auto-deploy is part of queen access — ask the bot owner if you need it. "
+                       "Anyone can still pull an update with `/latest name`.")
+        return
+    parts = (arg or "").split()
+    states = ("on", "off", "yes", "no", "true", "false")
+    if len(parts) < 2 or parts[1].lower() not in states:
+        rows = [[{"text": f"⚙️ {a['name']} — {'ON' if a.get('auto_deploy') else 'off'}",
+                  "callback_data": f"autodep:{a['id']}"}]
+                for a in bot_ops.list_apps(user["id"])
+                if (a.get("repo_url") or "").strip()][:8]
+        _send(chat_id, "⚙️ *Auto-deploy* — I redeploy the app by itself when its branch "
+                       "gets a new commit (checked every few minutes, in place, so the "
+                       "data survives).\n\n"
+                       "`/autodeploy name on` or `/autodeploy name off`, "
+                       "or tap one below.",
+              reply_markup={"inline_keyboard": rows} if rows else None)
+        return
+    res = bot_ops.set_auto_deploy(user["id"], parts[0], parts[1].lower() in ("on", "yes", "true"))
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res.get('error')}")
+        return
+    name = res["job"]["name"]
+    if res["on"]:
+        _send(chat_id, f"⚙️ *{name}* now follows its branch: when a new commit lands I "
+                       f"redeploy it in place and tell you.\n`/autodeploy {name} off` "
+                       f"stops that.")
+    else:
+        _send(chat_id, f"⚙️ *{name}* no longer deploys by itself. `/latest {name}` still "
+                       f"updates it whenever you ask.")
+
+
+def toggle_autodeploy(chat_id, user, row):
+    """The ⚙️ button: flip auto-deploy for one app, and say which way it went."""
+    on = not bool(row.get("auto_deploy"))
+    res = bot_ops.set_auto_deploy(user["id"], row["name"], on)
+    if not res.get("ok"):
+        _send(chat_id, f"❌ {res.get('error')}")
+        return
+    _send(chat_id, f"⚙️ *{row['name']}* auto-deploy is now "
+                   + ("ON — I redeploy when the branch moves." if on else "off."))
+
+
+# ==================== 👑 PROJECTS ====================
+# There is NO separate "queen projects" GitHub repo any more. A 👑 account gets
+# higher limits (no RAM ceiling, big zips, auto-deploy) and can `/import` any
+# public repo the same way everybody else can — the catalogue used to point at
+# one hard-coded owner repo, which made "queen" look like "one special project"
+# instead of "more capacity". QUEEN_PROJECTS_REPO is still read if an admin sets
+# it (a personal starter pack), but it is empty by default and nothing breaks
+# without it.
+QUEEN_PROJECTS_REPO = os.getenv("QUEEN_PROJECTS_REPO", "").strip().rstrip("/")
+QUEEN_PROJECTS_BRANCH = os.getenv("QUEEN_PROJECTS_BRANCH", "").strip()
+QUEEN_PROJECTS_NAME = os.getenv("QUEEN_PROJECTS_NAME", "").strip()
+def _queen_repo_parts() -> tuple:
+    """(owner, repo) of the configured project repo, or ("", "")."""
+    m = re.search(r"github\.com/([^/\s]+)/([^/\s#]+?)(?:\.git)?(?:[#/].*)?$",
+                  QUEEN_PROJECTS_REPO)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def queen_project_url() -> str:
+    """The `/import`-ready URL for the project, branch included."""
+    if QUEEN_PROJECTS_BRANCH:
+        return f"{QUEEN_PROJECTS_REPO}/tree/{QUEEN_PROJECTS_BRANCH}"
+    return QUEEN_PROJECTS_REPO
+
+
+def _project_app_name(user) -> str:
+    """A free app name for this project, so a second deploy doesn't collide."""
+    _owner, repo = _queen_repo_parts()
+    base = QUEEN_PROJECTS_NAME or (repo if len(repo or "") > 2 else f"{repo or 'queen'}-project")
+    base = bot_ops.slugify_name(base) or "project"
+    candidate, n = base, 1
+    while bot_ops.find_app(user["id"], candidate) and n < 50:
+        n += 1
+        candidate = f"{base}-{n}"
+    return candidate
+
+
+def _send_repo_apps(chat_id, user, limit=6):
+    """Your apps that came from a repo: which commit they are on, and whether it
+    moved since.
+
+    One GitHub lookup per DISTINCT repo (cached), so this screen costs nothing
+    extra when several apps share a source — and it is the answer to "did my
+    deploy pick up the change I pushed?" without opening a browser.
+    """
+    apps = [a for a in bot_ops.list_apps(user["id"]) if (a.get("repo_url") or "").strip()]
+    if not apps:
+        return
+    queen = _user_is_queen(user)
+    lines = ["🔎 *Your repo apps*"]
+    rows = []
+    for a in apps[:limit]:
+        owner, repo, branch = github_repo.parse_repo(a.get("repo_url") or "")
+        head = github_repo.head_commit(owner, repo, branch) if owner else ""
+        current = (a.get("repo_commit") or "").strip()
+        if head and current and head != current:
+            state = f"⬆️ newer commit waiting (`{current[:7]}` → `{head[:7]}`)"
+        elif head and current:
+            state = f"✅ up to date (`{current[:7]}`)"
+        elif current:
+            state = f"🔖 on `{current[:7]}`"
+        else:
+            state = "🔖 commit unknown (deployed before this was recorded)"
+        auto = " · ⚙️ auto-deploy on" if a.get("auto_deploy") else ""
+        lines.append(f"• *{a['name']}* — `{owner}/{repo}`"
+                     + (f" @ `{branch}`" if branch else "") + f"\n   {state}{auto}")
+        row = [{"text": f"⬆️ {a['name']}"[:60], "callback_data": f"latest:{a['id']}"}]
+        if queen:
+            row.append({"text": f"⚙️ auto: {'on' if a.get('auto_deploy') else 'off'}",
+                        "callback_data": f"autodep:{a['id']}"})
+        rows.append(row)
+    if len(apps) > limit:
+        lines.append(f"… and {len(apps) - limit} more — `/latest` lists them all.")
+    lines.append("\n⬆️ redeploys in place: same address, same folder, same data.")
+    _send(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": rows})
+
+
+def cmd_projects(chat_id, user, arg=""):
+    """`/projects` — your repo-backed apps, and (optionally) a starter pack.
+
+    There is no separate "queen projects" GitHub repo any more. Everyone who can
+    talk to the bot can see the apps they already deployed from a repo, the
+    commit each is on, and a ⬆️ button when the branch moved. A 👑 account also
+    gets `/autodeploy` and the higher limits; if an admin has set
+    QUEEN_PROJECTS_REPO as a personal starter pack, that is offered too — but
+    nothing depends on it.
+    """
+    sub = (arg or "").strip().lower()
+    if sub in ("run", "deploy", "start", "install"):
+        if not _user_is_queen(user):
+            _send(chat_id, "▶️ One-tap starter deploy is part of 👑 queen access. "
+                           "Use `/import x` for any public repo — that "
+                           "works for everyone.")
+            return
+        _deploy_queen_project(chat_id, user)
+        return
+    if sub in ("readme", "read", "doc", "docs"):
+        _send_project_readme(chat_id)
+        return
+    if sub in ("latest", "update", "upgrade", "apps"):
+        cmd_latest(chat_id, user)
+        return
+
+    # Optional starter pack — only when an admin actually configured one.
+    owner, repo = _queen_repo_parts()
+    if owner and _user_is_queen(user):
+        branch = QUEEN_PROJECTS_BRANCH or ""
+        url = queen_project_url()
+        with _working(chat_id):
+            offered = offer_repo_choices(
+                chat_id, user, url,
+                intro=f"📦 *Starter pack* — `{owner}/{repo}`"
+                      + (f" · branch `{branch}`" if branch else ""))
+        if not offered:
+            _send(chat_id, f"📦 Starter pack `{owner}/{repo}` is configured but "
+                           f"I couldn't list it just now. `/import {owner}/{repo}` "
+                           f"still works, or ▶️ below deploys the default entry.",
+                  reply_markup={"inline_keyboard": [
+                      [{"text": "▶️ Run starter", "callback_data": "qproj:run"},
+                       {"text": "📖 README", "callback_data": "qproj:readme"}]]})
+
+    # The useful part for everyone: your own repo apps + how to add more.
+    lines = ["📦 *Your projects*",
+             "Deploy any public GitHub repo with "
+             "`/import owner/repo [name]` — I scan it and show each runnable "
+             "thing as a button. A branch: "
+             "`/import owner/repo/tree/branch myapp`."]
+    if _user_is_queen(user):
+        lines.append("👑 You also have `/autodeploy name on` — I watch the "
+                     "branch and redeploy by myself when it moves.")
+    _send(chat_id, "\n".join(lines),
+          reply_markup={"inline_keyboard": [
+              [{"text": "⬆️ Deploy latest", "callback_data": "latest:"},
+               {"text": "🌿 How to import", "callback_data": "help:import"}],
+              ([{"text": "👑 Queen panel", "callback_data": "queen:menu"}]
+               if _user_is_queen(user) else
+               [{"text": "📋 My apps", "callback_data": "apps:list"}])]})
+    _send_repo_apps(chat_id, user)
+
+
+def _deploy_queen_project(chat_id, user, name=""):
+    """One tap = the project cloned, installed and running.
+
+    Delegates to cmd_import so a queen deploy goes through exactly the same
+    rails as any other repo import — same cap check, same slug rules, same
+    messages — instead of a second copy of that logic drifting apart.
+    """
+    url = queen_project_url()
+    if not url:
+        _send(chat_id, "👑 No project repo is configured on this server yet.")
+        return
+    clean = bot_ops.slugify_name(name or "") or _project_app_name(user)
+    cmd_import(chat_id, user, f"{url} {clean}")
+
+
+def _send_project_readme(chat_id):
+    """📖 The configured 👑 project repo's own README.
+
+    Delegates to the reader the picker's README button uses, so there is one
+    implementation: raw.githubusercontent.com (the API copy would spend rate
+    limit the project scan also needs) and no parse mode, because a README is
+    Markdown we do not control and legacy Markdown would either mangle it or get
+    the whole message rejected.
+    """
+    owner, repo = _queen_repo_parts()
+    if not owner:
+        _send(chat_id, "👑 No project repo is configured on this server yet.")
+        return
+    _send_repo_readme(chat_id, owner, repo, QUEEN_PROJECTS_BRANCH or "")
+
+
+
+def _maybe_guide(chat_id, topic: str, user=None):
+    """Send the cartoon for a command at most once per chat per process.
+
+    First time someone runs /code (or /update, /import, …) they see the picture
+    then the normal flow. Repeat runs stay quiet — they already know the steps.
+    """
+    topic = (topic or "").strip().lower()
+    if topic not in _COMMAND_GUIDES:
+        return
+    seen = _guide_shown.setdefault(chat_id, set())
+    if topic in seen:
+        return
+    seen.add(topic)
+    try:
+        _show_command_guide(chat_id, topic, user)
+    except Exception:
+        logger.exception("guide %s failed", topic)
 
 
 def cmd_code_start(chat_id, user, name):
     """/code <new app name> — the NEXT message from this chat becomes the
     app's source (text or a file)."""
     if not name:
-        _send(chat_id, "Usage: `/code <new app name>`, then send the source "
+        _send(chat_id, "Usage: `/code myapp`, then send the source "
                        "as a message or upload a file.")
         return
     clean = bot_ops.slugify_name(name)
@@ -1741,7 +4497,7 @@ def cmd_update_start(chat_id, user, ref):
     """/update <existing app name> — the NEXT message becomes its new code,
     redeployed in place (workspace data preserved)."""
     if not ref:
-        _send(chat_id, "Usage: `/update <app name>`, then send the new "
+        _send(chat_id, "Usage: `/update myapp`, then send the new "
                        "source as a message or upload a file.")
         return
     row = bot_ops.find_app(user["id"], ref)
@@ -1926,10 +4682,15 @@ def handle_pending_code(chat_id, msg, pending):
     if doc and (doc.get("file_name") or "").lower().endswith(".zip"):
         tg_uid = (msg.get("from") or {}).get("id")
         linked_user = telegram_link.user_for_chat(tg_uid)
-        if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")):
-            _send(chat_id, "🔒 .zip uploads need admin approval on this account. "
-                           "Ask an admin to run `/admin allowzip` for you, or send a "
-                           "single source file instead.")
+        # 👑 implies zip access. The flag is an admin's decision to trust this
+        # account with more of the box (no memory ceiling, bigger bundles), so
+        # making them ask a second time with /admin allowzip was a privilege
+        # that looked granted and behaved as if it wasn't.
+        queen = _user_is_queen(linked_user)
+        if not (_is_admin(linked_user, tg_uid) or (linked_user or {}).get("can_upload_zip")
+                or queen):
+            _send(chat_id, "🔒 .zip uploads need approval on this account. "
+                           "Ask the bot owner, or send a single source file instead.")
             return
         # Multi-file path for BOTH create and update: hand the WHOLE zip to
         # the runner, which extracts it for real (see
@@ -1939,8 +4700,20 @@ def handle_pending_code(chat_id, msg, pending):
         # what broke any app whose entry file imported a sibling module.
         size = doc.get("file_size") or 0
         if size > TG_MAX_DOWNLOAD_BYTES:
+            # The 20MB wall is Telegram's, not ours, and no setting lifts it.
+            # What CAN be said is the way round it: the website upload has no
+            # Telegram in the middle, and a 👑 account is allowed a big bundle
+            # there (bot_ops.zip_limits_for).
+            bigger = ""
+            if queen:
+                where = f"{SITE_BASE}/bots" if SITE_BASE else "the dashboard"
+                bigger = (f"\n\n👑 Send the big one through {where} instead — the "
+                          f"website upload doesn't go through Telegram, and your "
+                          f"account is allowed up to {bot_ops.QUEEN_ZIP_MAX_MB}MB "
+                          f"unzipped ({bot_ops.QUEEN_ZIP_MAX_FILES} files).")
             _send(chat_id, f"❌ That file is {size // (1024*1024)}MB — "
-                           f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`.")
+                           f"Telegram bots can only download up to 20MB.\nSend it again, or `/cancel`."
+                           + bigger)
             return
         try:
             meta = _tg("getFile", file_id=doc["file_id"])
@@ -1956,11 +4729,16 @@ def handle_pending_code(chat_id, msg, pending):
     if zip_raw is not None:
         _pending.pop(chat_id, None)
         if pending["mode"] == "create":
-            _send(chat_id, f"📦 Extracting *{pending['name']}*…")
-            res = bot_ops.create_app_from_zip(pending["user_id"], pending["name"], zip_raw)
-            if not res.get("ok"):
-                _send(chat_id, f"❌ {res['error']}")
-                return
+            with _progress(chat_id, "zip", name=pending["name"]) as prog:
+                prog.at(12, "Got the zip")
+                prog.at(30, "Unpacking on the runner")
+                res = bot_ops.create_app_from_zip(pending["user_id"], pending["name"], zip_raw)
+                if not res.get("ok"):
+                    prog.fail(res.get("error") or "deploy failed")
+                    _send(chat_id, f"❌ {res['error']}")
+                    return
+                prog.at(70, "Installing & starting")
+                prog.done("Running.")
             url = res.get("web") or ""
             _send(chat_id, f"✅ *{res['name']}* created and running.\n"
                            + (url + "\n" if url else "")
@@ -1969,11 +4747,16 @@ def handle_pending_code(chat_id, msg, pending):
                              f"to verify it.\n`/status {res['name']}` for details.",
                   reply_markup=_app_buttons(res["job_db_id"], url=url))
         else:
-            _send(chat_id, f"📦 Extracting into *{pending['ref']}*…")
-            res = bot_ops.update_from_zip(pending["user_id"], pending["ref"], zip_raw)
-            if not res.get("ok"):
-                _send(chat_id, f"❌ {res['error']}")
-                return
+            with _progress(chat_id, "zip", name=pending.get("ref") or "app") as prog:
+                prog.at(12, "Got the zip")
+                prog.at(35, "Unpacking into the workspace")
+                res = bot_ops.update_from_zip(pending["user_id"], pending["ref"], zip_raw)
+                if not res.get("ok"):
+                    prog.fail(res.get("error") or "update failed")
+                    _send(chat_id, f"❌ {res['error']}")
+                    return
+                prog.at(75, "Restarting")
+                prog.done("Updated.")
             _send(chat_id, f"✅ *{res['job']['name']}* updated from zip and restarted.\n"
                            f"Existing data files (databases, sessions) were left alone — "
                            f"only what's in the zip was written.",
@@ -2005,10 +4788,19 @@ def handle_pending_code(chat_id, msg, pending):
 
     if pending["mode"] == "create":
         lang = doc_lang or "python"
-        res = bot_ops.create_app(pending["user_id"], pending["name"], lang, code)
-        if not res.get("ok"):
-            _send(chat_id, f"❌ {res['error']}")
-            return
+        with _progress(chat_id, "create", name=pending["name"]) as prog:
+            prog.at(10, "Got your code")
+            if (pending.get("requirements") or "").strip():
+                prog.at(22, "Writing requirements")
+            prog.at(38, "Uploading to the site")
+            res = bot_ops.create_app(pending["user_id"], pending["name"], lang, code)
+            if not res.get("ok"):
+                prog.fail(res.get("error") or "deploy failed")
+                _send(chat_id, f"❌ {res['error']}")
+                return
+            prog.at(72, "Starting on the runner")
+            prog.at(90, "Almost done")
+            prog.done("Running.")
         url = res.get("web") or ""
         note = ""
         if not res.get("telegram_bot_username"):
@@ -2025,10 +4817,18 @@ def handle_pending_code(chat_id, msg, pending):
         # keep the app's existing language and let the code speak for itself.
         row = bot_ops.find_app(pending["user_id"], pending["ref"])
         lang = doc_lang if (doc_lang and row and doc_lang == row.get("language")) else None
-        res = bot_ops.update_code(pending["user_id"], pending["ref"], code, lang)
-        if not res.get("ok"):
-            _send(chat_id, f"❌ {res['error']}")
-            return
+        name = (row or {}).get("name") or pending.get("ref") or "app"
+        with _progress(chat_id, "update", name=name) as prog:
+            prog.at(12, "Got the new code")
+            prog.at(35, "Saving a snapshot")
+            res = bot_ops.update_code(pending["user_id"], pending["ref"], code, lang)
+            if not res.get("ok"):
+                prog.fail(res.get("error") or "update failed")
+                _send(chat_id, f"❌ {res['error']}")
+                return
+            prog.at(70, "Restarting in place")
+            prog.at(92, "Almost done")
+            prog.done("Updated.")
         _send(chat_id, f"✅ *{res['job']['name']}* updated, saved and restarted.",
               reply_markup=_app_buttons(res["job"]["id"],
                                          bot_username=res["job"].get("telegram_bot_username") or ""))
@@ -2058,7 +4858,11 @@ def handle_callback(chat_id, data, message_id=None):
         return
 
     user = telegram_link.user_for_chat(chat_id)
-    if not user:
+    # A few actions work without a linked account — same rule as /ping and /id.
+    # Everything else needs one, and must say so (never silent).
+    if not user and action not in ("ping", "help"):
+        _send(chat_id, "🔗 This chat isn't linked to a CodeNest account yet.\n"
+                       "Send `/link`, pick your account, and the buttons work.")
         return
 
     if action == "logs":
@@ -2075,6 +4879,162 @@ def handle_callback(chat_id, data, message_id=None):
         _cmd_delete_confirmed(chat_id, user, ref)
     elif action == "delcancel":
         _send(chat_id, "Cancelled — nothing was deleted.")
+    elif action == "qproj":
+        # "list" is for everyone (your own repo apps). run/readme only make
+        # sense when a starter pack is configured, and still require 👑.
+        if ref == "list":
+            cmd_projects(chat_id, user)
+        elif not _user_is_queen(user):
+            _send(chat_id, "👑 That's part of queen access — ask the bot owner if you need it. "
+                           "`/import owner/repo` works for anyone.")
+        elif ref == "readme":
+            _send_project_readme(chat_id)
+        else:
+            _deploy_queen_project(chat_id, user)
+    elif action == "help":
+        # Cartoon + short steps. Each guide mirrors a typed command so the
+        # "every action = button + command" rule holds for newcomers too.
+        if ref in ("", "home"):
+            u = user or telegram_link.user_for_chat(chat_id)
+            _send(chat_id, _help_text(u) if u else (
+                "👋 *CodeNest help*\n\n"
+                "Tap a guide below, or type `/help` any time.\n"
+                "New here? Start with *How to start*."),
+                  reply_markup=_main_kb(u))
+        elif ref == "import":
+            _send_guide(chat_id, "guide_import",
+                        "Import a GitHub repo — three steps")
+            _send(chat_id,
+                  "🌿 *Import a GitHub repo*\n\n"
+                  "Command: `/import owner/repo [name]`\n"
+                  "Or paste a full `https://github.com/…` URL.\n\n"
+                  "I scan it and show each runnable entry as a *button* — "
+                  "tap one to deploy.\n"
+                  "Branch: `/import owner/repo/tree/branch myapp`\n\n"
+                  "After it starts: `/logs name` · `/status name` · "
+                  "`/latest name`."
+                  + ("\n👑 `/autodeploy name on` follows the branch."
+                     if user and _user_is_queen(user) else ""),
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        elif ref == "start":
+            _send_guide(chat_id, "guide_start", "Start here — three taps")
+            _send(chat_id,
+                  "📖 *How to start*\n\n"
+                  "1. Tap *Open CodeNest* (or send `/link`).\n"
+                  "2. Deploy: paste code, pick a template, or `/import` a repo.\n"
+                  "3. *Save & Run*. After a runner restart, bots come back alone.\n\n"
+                  "Handy: `/apps` · `/status` · `/logs name` · `/id`",
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        elif ref == "id":
+            _send_guide(chat_id, "guide_id", "Your ids — long-press to copy")
+            # Reuse the real /id output so the numbers match what admins need.
+            cmd_id(chat_id)
+            _send(chat_id, "Tip: long-press a number to copy it. No broken <id> markup.",
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        elif ref == "token":
+            _send_guide(chat_id, "guide_token", "BOT_TOKEN — Env or inside code")
+            _send(chat_id,
+                  "🔑 *BOT_TOKEN tips*\n\n"
+                  "Either place works — recovery finds both:\n"
+                  "• *Env tab* on the site → paste BotFather token → Save & restart\n"
+                  "• *In the code*: `BOT_TOKEN = '123:AA…'` (no Env needed)\n\n"
+                  "After a runner restart your bot comes back if the token is "
+                  "in either place. You do *not* have to set it only in Env.",
+                  reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        elif ref in ("code", "update", "apps", "logs", "restart", "stop",
+                     "status", "source", "delete", "rename", "latest",
+                     "env", "backup", "history", "link", "projects"):
+            _show_command_guide(chat_id, ref, user)
+        elif ref == "catalog":
+            lines = ["📖 *Guides* (how-to pictures — only when you ask):",
+                     "`/guide code` · `/guide update` · `/guide import`",
+                     "`/guide env` · `/guide token` · `/guide link`",
+                     "",
+                     "Day-to-day (no picture — direct answer):",
+                     "`/apps` · `/logs name` · `/status name` · `/restart name`"]
+            _send(chat_id, "\n".join(lines))
+        elif ref == "commands":
+            cmd_commands(chat_id, user)
+        elif ref == "admin":
+            u = user or telegram_link.user_for_chat(chat_id)
+            if not _is_admin(u, chat_id):
+                # Silent for non-admins — do not advertise the admin surface.
+                _send(chat_id, "Unknown guide — try /help.",
+                      reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+            else:
+                _send_guide(chat_id, "guide_admin", "Admin — command + button")
+                _send(chat_id,
+                      "🛠 *Admin how-to*\n\n"
+                      "Every admin action has *both* a button under `/admin` "
+                      "and a matching typed command.\n\n"
+                      "`/admin` · `/runners` · `/recover` · `/user name`\n"
+                      "`/queen id` · `/admin limit id 10` · `/see id`",
+                      reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+        else:
+            _send(chat_id, "Unknown guide — try /help.", reply_markup={"inline_keyboard": [[{"text": "📖 More guides", "callback_data": "help:catalog"}]]})
+    elif action == "apps" and ref == "list":
+        cmd_apps(chat_id, user)
+    elif action == "queen":
+        # The 👑 panel: a queen's own limits and the buttons that use them.
+        if not user or not _user_is_queen(user):
+            _send(chat_id, "👑 That panel is part of queen access — an admin "
+                           "can turn it on for you. "
+                           "`/limits` shows what your account can do now.")
+        elif ref == "apps":
+            cmd_apps(chat_id, user)
+        else:
+            _send(chat_id, _queen_panel_text(user), reply_markup=_queen_panel_kb())
+    elif action == "ping":
+        if ref == "health":
+            # cmd_health wants a user for the admin branch; None is fine for
+            # the public platform-health path.
+            cmd_health(chat_id, user or {})
+        else:
+            handle_ping(chat_id, "/ping")
+    elif action == "latest":
+        if not ref:
+            # "latest:" with nothing after it is the 👑 panel's button: show
+            # every repo app and which ones are behind, exactly like /latest.
+            cmd_latest(chat_id, user)
+            return
+        row = bot_ops.find_app(user["id"], ref)
+        if not row:
+            _send(chat_id, "❌ That app is not yours or no longer exists.")
+        elif not (row.get("repo_url") or "").strip():
+            _send(chat_id, f"❌ *{row['name']}* wasn't deployed from a repo, so there "
+                           f"is no commit to pull. `/update {row['name']}` replaces "
+                           f"its code.")
+        else:
+            _update_one_app(chat_id, user, row)
+    elif action == "autodep":
+        row = bot_ops.find_app(user["id"], ref)
+        if not row:
+            _send(chat_id, "❌ That app is not yours or no longer exists.")
+        elif not _user_is_queen(user):
+            _send(chat_id, "👑 Auto-deploy is queen access — ask the bot owner if you need it. "
+                           "`/latest name` updates any repo app by hand.")
+        elif not (row.get("repo_url") or "").strip():
+            _send(chat_id, f"❌ *{row['name']}* wasn't deployed from a repo, so there "
+                           f"is no branch for it to follow.")
+        else:
+            toggle_autodeploy(chat_id, user, row)
+    elif action == "pick":
+        # A button from a scanned repo list. The index resolves against the list
+        # THIS chat was shown: another chat's list, or one that has expired, is
+        # not reachable by guessing a number.
+        if ref == "no":
+            _send(chat_id, "✖️ Nothing was deployed.")
+            return
+        state = _take_pick(chat_id, ref)
+        if not state:
+            _send(chat_id, "⌛ That list has expired — send `/projects` (or "
+                           "`/import x`) again and I'll show it once more.")
+            return
+        if ref == "readme":
+            _send_repo_readme(chat_id, state["owner"], state["repo"],
+                              state.get("branch") or "")
+            return
+        deploy_pick(chat_id, user, state, whole=(ref == "all"))
 
 
 def _send_job_data(chat_id, user, ref):
@@ -2173,12 +5133,27 @@ def handle_update(upd):
             linked = telegram_link.user_for_chat(chat_id)
             event["user_id"] = _row_id(linked)
 
+            if command and not _is_admin(linked, tg_uid_early) and _rate_limited(chat_id):
+                _send(chat_id, f"⏳ একটু wait করো ({int(_CMD_RATE_WINDOW_S)}s)")
+                event.update(outcome="rate_limited")
+                return
+
             if command == "/cancel" and chat_id in _admin_flow:
                 _admin_flow.pop(chat_id, None)
                 _send(chat_id, "Cancelled.")
                 return
             if not command and chat_id in _admin_flow:
-                if _advance_admin_flow(chat_id, text):
+                # jobedit can take a document; everything else is plain text.
+                state = _admin_flow.get(chat_id) or {}
+                if (state.get("flow") == "jobedit"
+                        and "document" in msg
+                        and not text.strip()):
+                    code, _lang, _reqs, _note, err = _download_document(msg["document"])
+                    if err:
+                        _send(chat_id, f"❌ {err}")
+                        return
+                    text = code or ""
+                if text.strip() and _advance_admin_flow(chat_id, text):
                     return
 
             # A pending upload/text is claimed before normal non-command input.
@@ -2197,7 +5172,7 @@ def handle_update(upd):
                     return
                 if "document" in msg:
                     _send(chat_id, "I wasn't expecting a file — send "
-                                   "`/code <new app name>` or `/update <app name>` first, "
+                                   "`/code myapp` or `/update myapp` first, "
                                    "then the file.")
                 else:
                     _send(chat_id, UNKNOWN_REPLY, reply_markup=_open_kb())
@@ -2205,11 +5180,18 @@ def handle_update(upd):
 
             def gated(fn):
                 user = _require_link(chat_id)
-                if user:
-                    event["user_id"] = _row_id(user)
-                    fn(user)
-                else:
+                if not user:
                     event["outcome"] = "refused"
+                    return
+                event["user_id"] = _row_id(user)
+                # "typing…" BEFORE the work starts, not after it finishes. These
+                # commands talk to a runner and to GitHub — seconds, not
+                # milliseconds — and a chat with no reaction in it for three
+                # seconds reads as a bot that died, so the command gets sent
+                # again. One indicator costs one request.
+                if command in _SLOW_COMMANDS:
+                    _typing(chat_id)
+                fn(user)
 
             handlers = {
                 "/start": lambda: handle_start(chat_id, _tg_display(msg) or
@@ -2217,11 +5199,28 @@ def handle_update(upd):
                 "/link": lambda: handle_link(chat_id, text, _tg_display(msg)),
                 "/unlink": lambda: handle_unlink(chat_id),
                 "/ping": lambda: gated(lambda _u: handle_ping(chat_id, text)),
+                # 🩺 the same question /ping asks, from inside the process — so
+                # a free-tier cold start or a blocked round trip cannot make the
+                # platform look dead when it is not.
+                "/health": lambda: gated(lambda u: cmd_health(chat_id, u)),
+                # NOT gated: "what is my id?" is asked before an account is
+                # linked, and it is the number an admin needs to grant one.
+                "/id": lambda: cmd_id(chat_id, msg.get("from") or {}),
+                "/whoami": lambda: cmd_id(chat_id, msg.get("from")),
+                "/me": lambda: cmd_id(chat_id, msg.get("from")),
+                "/web": lambda: cmd_web(chat_id),
+                "/webapp": lambda: cmd_web(chat_id),
                 "/cancel": lambda: cmd_cancel_pending(chat_id),
                 "/apps": lambda: gated(lambda u: cmd_apps(chat_id, u)),
                 "/jobs": lambda: gated(lambda u: cmd_apps(chat_id, u)),
+                "/list": lambda: gated(lambda u: cmd_apps(chat_id, u)),
                 "/status": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
+                "/uptime": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
+                "/info": lambda: gated(lambda u: cmd_status(chat_id, u, arg)),
                 "/logs": lambda: gated(lambda u: cmd_logs(chat_id, u, arg)),
+                "/env": lambda: gated(lambda u: cmd_env(chat_id, u, arg)),
+                "/backup": lambda: gated(lambda u: cmd_backup(chat_id, u, arg)),
+                "/history": lambda: gated(lambda u: cmd_history(chat_id, u, arg)),
                 "/restart": lambda: gated(lambda u: cmd_restart(chat_id, u, arg)),
                 "/stop": lambda: gated(lambda u: cmd_stop(chat_id, u, arg)),
                 "/delete": lambda: gated(lambda u: cmd_delete(chat_id, u, arg)),
@@ -2230,12 +5229,51 @@ def handle_update(upd):
                 "/code": lambda: gated(lambda u: cmd_code_start(chat_id, u, arg)),
                 "/update": lambda: gated(lambda u: cmd_update_start(chat_id, u, arg)),
                 "/import": lambda: gated(lambda u: cmd_import(chat_id, u, arg)),
+                # 👑 the catalogue of ready-made projects, with the steps and a
+                # one-tap deploy. cmd_projects explains to a non-queen what they
+                # are missing instead of staying silent.
+                "/projects": lambda: gated(lambda u: cmd_projects(chat_id, u, arg)),
+                # Repo deploys, the two halves of a Render-style workflow:
+                # "is there a newer commit?" (/latest, everyone) and "keep it
+                # current without me" (/autodeploy, 👑).
+                "/latest": lambda: gated(lambda u: cmd_latest(chat_id, u, arg)),
+                "/autodeploy": lambda: gated(lambda u: cmd_autodeploy(chat_id, u, arg)),
+                # /limits is the plain-language answer to "what am I allowed?"
+                # and, for a 👑 account, the door to their panel.
+                "/limits": lambda: gated(lambda u: cmd_limits(chat_id, u)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
+                "/details": lambda: cmd_details(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
                 "/unzip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "denyzip"),
                 "/see": lambda: cmd_see(chat_id, msg.get("from", {}).get("id"), arg),
+                "/user": lambda: cmd_user(chat_id, msg.get("from", {}).get("id"), arg),
+                # 👑 admin-only, and NOT behind gated(): /queen has to work for
+                # an admin who never ran /link, exactly like /admin and /see.
+                # cmd_queen re-checks _is_admin itself and stays silent otherwise.
+                "/queen": lambda: cmd_queen(chat_id, msg.get("from", {}).get("id"), arg),
+                "/unqueen": lambda: cmd_queen(chat_id, msg.get("from", {}).get("id"),
+                                              f"off {arg}".strip()),
+                # Admin shortcuts that match the inline buttons 1:1
+                "/runners": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "runners"),
+                "/recover": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "recover"),
+                "/rescue": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "recover"),
+                "/fleet": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "runners"),
+                "/health": lambda: _cmd_health_smart(chat_id, msg.get("from", {}).get("id")),
+                "/overview": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "overview"),
+                "/signups": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"),
+                                              f"signups {arg}".strip()),
+                "/bans": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "bans"),
+                "/audit": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), "audit"),
                 "/help": lambda: handle_start(chat_id, _tg_display(msg) or
                                                 msg.get("from", {}).get("first_name", "user")),
+                "/guide": lambda: _cmd_guide(chat_id, arg),
+                "/token": lambda: cmd_token_tips(chat_id),
+                "/commands": lambda: cmd_commands(chat_id, telegram_link.user_for_chat(chat_id),
+                                                  msg.get("from", {}).get("id")),
+                "/cmds": lambda: cmd_commands(chat_id, telegram_link.user_for_chat(chat_id),
+                                              msg.get("from", {}).get("id")),
+                "/guides": lambda: _cmd_guide(chat_id, arg),
+                "/howto": lambda: _cmd_guide(chat_id, arg),
             }
             handler = handlers.get(command)
             if handler:
@@ -2246,7 +5284,17 @@ def handle_update(upd):
 
         elif "callback_query" in upd:
             cb = upd["callback_query"]
-            chat_id = cb["message"]["chat"]["id"]
+            # The message a button lives on can be MISSING: Telegram keeps
+            # delivering taps for a message it has already dropped from the chat
+            # and sends an "inaccessible_message" stub for old ones. Reading
+            # cb["message"]["chat"]["id"] straight through then raised a
+            # TypeError inside this branch, the tap went unanswered, and the
+            # button looked dead — one more way "the inline buttons don't work"
+            # happens without any bug in the buttons themselves. The person who
+            # tapped is always known, and in a private chat their id IS the chat.
+            msg_cb = cb.get("message") or {}
+            chat_id = ((msg_cb.get("chat") or {}).get("id")
+                       or (cb.get("from") or {}).get("id"))
             data = str(cb.get("data") or "")
             tg_uid_cb = cb.get("from", {}).get("id")
             if telegram_admin_ext.is_banned(tg_uid_cb):
@@ -2257,10 +5305,11 @@ def handle_update(upd):
                 event.update(chat_id=chat_id, event_type="banned", outcome="refused",
                              telegram_user_id=tg_uid_cb)
                 return
-            linked = telegram_link.user_for_chat(chat_id)
-            event.update(chat_id=chat_id, event_type="callback",
+            linked = telegram_link.user_for_chat(chat_id) if chat_id is not None else None
+            event.update(chat_id=chat_id if chat_id is not None else "",
+                         event_type="callback",
                          command=data.partition(":")[0], payload=data.partition(":")[2],
-                         display_name=_tg_display(cb.get("message", {})),
+                         display_name=_tg_display(msg_cb),
                          telegram_user_id=cb.get("from", {}).get("id"),
                          user_id=_row_id(linked))
             # Telegram requires answerCallbackQuery within ~30s or the
@@ -2279,20 +5328,46 @@ def handle_update(upd):
                 # ate every admin button press for an admin who hadn't run
                 # /link, with no error message at all. That's exactly what
                 # made retyping /admin look like the only thing that worked.
-                if linked or data.startswith("admin:"):
-                    handle_callback(chat_id, data, cb.get("message", {}).get("message_id"))
-                else:
+                if chat_id is None:
                     event["outcome"] = "refused"
+                elif linked or data.startswith(("admin:", "queen:", "qproj:",
+                                                  "ping:", "help:")):
+                    # ping: and help:import do not need a linked account — the
+                    # same way /ping and /id work before /link. Without this
+                    # allowlist an unlinked tap was answered with "link first"
+                    # and looked exactly like "the button is broken".
+                    handle_callback(chat_id, data, msg_cb.get("message_id"))
+                else:
+                    # A button that needs an account, pressed from a chat that
+                    # has none (someone tapped /unlink, or a button outlived the
+                    # link). Silence here is indistinguishable from a broken
+                    # button, so the tap is answered and the reason is said.
+                    event["outcome"] = "refused"
+                    _send(chat_id, "This chat isn't linked to an account right now. "
+                                   "Send `/link`, pick your account, and the buttons "
+                                   "will work.")
                 _tg("answerCallbackQuery", callback_query_id=cb["id"])
             except Exception as cb_exc:
                 event["outcome"] = "error"
                 event["error"] = f"{type(cb_exc).__name__}: {cb_exc}"
+                logger.exception("callback %s failed", data)
+                # answer quietly (no full-screen alert). A show_alert popup that
+                # says "Something went wrong" made every admin button look dead
+                # even when the real work partly succeeded or was a one-off blip.
                 try:
                     _tg("answerCallbackQuery", callback_query_id=cb["id"],
-                        text="Something went wrong — try again.", show_alert=True)
+                        text="Couldn't finish — try again.", show_alert=False)
                 except Exception:
                     logger.exception("Could not even answer the callback query")
-                raise
+                try:
+                    if chat_id is not None:
+                        _send(chat_id,
+                              "⚠️ That button didn't finish. "
+                              "Send the command again, or `/admin` if you were in the panel.")
+                except Exception:
+                    pass
+                # Do NOT re-raise: webhook must return 200 so Telegram stops retrying
+                # the same broken update in a loop.
     except Exception as exc:
         event["outcome"] = "error"
         event["error"] = f"{type(exc).__name__}: {exc}"
@@ -2360,12 +5435,24 @@ def enable_webhook():
         logger.error("Cannot enable webhook: BOT_TOKEN or SITE_BASE is not set.")
         return False
     url = f"{SITE_BASE.rstrip('/')}/telegram/webhook"
-    res = _tg("setWebhook", url=url, secret_token=_WEBHOOK_SECRET,
-              allowed_updates=json.dumps(["message", "callback_query"]))
-    if (res or {}).get("ok"):
-        logger.warning("TELEGRAM: webhook registered at %s — polling is NOT started.", url)
-        return True
-    logger.error("TELEGRAM: setWebhook failed: %s", res)
+    # allowed_updates has two accepted spellings and the docs call it a
+    # "JSON-serialized list", which is ambiguous for a JSON body: a real array,
+    # or the string form a urlencoded request needs. Guessing wrong makes
+    # Telegram reject setWebhook, this service falls back to polling, and on a
+    # host that sleeps between requests button presses queue up on Telegram's
+    # side with nobody fetching them — "the inline buttons don't work", behind a
+    # green deploy. So both are offered and whichever Telegram accepts wins.
+    wanted = ["message", "callback_query"]
+    res = {}
+    for form in (json.dumps(wanted), wanted):
+        res = _tg("setWebhook", url=url, secret_token=_WEBHOOK_SECRET,
+                  allowed_updates=form)
+        if (res or {}).get("ok"):
+            logger.warning("TELEGRAM: webhook registered at %s (allowed_updates "
+                           "sent as a %s) — polling is NOT started.", url,
+                           "JSON string" if isinstance(form, str) else "array")
+            return True
+    logger.error("TELEGRAM: setWebhook failed both ways: %s", res)
     return False
 
 
