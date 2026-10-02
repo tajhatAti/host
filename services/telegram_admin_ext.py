@@ -309,6 +309,10 @@ def _notify_state_get(key: str) -> int:
     conn = get_db_connection()
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS tg_notify_state (key TEXT PRIMARY KEY, last_id INTEGER)")
+        conn.commit()  # Postgres rolls DDL back on close() without this — the
+        # table was being created and then immediately un-created every call,
+        # which is why every INSERT after it failed with "relation ... does
+        # not exist".
         row = conn.execute("SELECT last_id FROM tg_notify_state WHERE key=?", (key,)).fetchone()
         return row["last_id"] if row else 0
     finally:
@@ -361,6 +365,7 @@ def get_maintenance_mode() -> bool:
     conn = get_db_connection()
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS tg_notify_state (key TEXT PRIMARY KEY, last_id INTEGER)")
+        conn.commit()  # same missing-commit bug as _notify_state_get above
         row = conn.execute("SELECT last_id FROM tg_notify_state WHERE key='maintenance'").fetchone()
         return bool(row and row["last_id"])
     finally:
@@ -658,7 +663,6 @@ def jobs_recent(limit: int = 8, offset: int = 0) -> list:
         d = dict(r)
         info = live.get(d.get("runner_job_id")) or {}
         d["live_status"] = info.get("status") or "unknown"
-        d["restart_locked_s"] = info.get("restart_locked_s") or 0
         out.append(d)
     return out, total
 
@@ -725,7 +729,6 @@ def job_detail(job_id: int) -> dict:
         mem_limit_mb=info.get("mem_limit_mb"),
         runner_url=(info.get("worker_url") or d.get("worker_url") or ""),
         live_repo_commit=info.get("repo_commit"),
-        restart_locked_s=info.get("restart_locked_s") or 0,
     )
     return d
 
@@ -765,14 +768,7 @@ def admin_logs(job_id: int, lines: int = 40) -> dict:
     return bot_ops.logs(row["user_id"], str(row["id"]), lines=lines)
 
 
-def admin_unlock_job(job_id: int) -> dict:
-    """Clear an abuse-triggered /restart lock early (false positive, or the
-    owner already fixed the bug and the admin wants to let them straight
-    back in instead of waiting out the cooldown)."""
-    row = admin_find_job(job_id)
-    if not row:
-        return {"ok": False, "error": "No such job."}
-    return bot_ops.admin_unlock(row)
+
 
 
 # ── Audit log — mirrors GET /admin/audit-log ────────────────────────────
