@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,10 +18,35 @@ from services import pingbot  # noqa: E402
 client = TestClient(app, raise_server_exceptions=False)
 
 
+def _webhook_row(update_id):
+    conn = database.get_db_connection()
+    try:
+        return conn.execute(
+            "SELECT claimed_at,completed_at,payload FROM telegram_webhook_updates "
+            "WHERE update_id=?", (update_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _delete_webhook_row(update_id):
+    conn = database.get_db_connection()
+    try:
+        conn.execute("DELETE FROM telegram_webhook_updates WHERE update_id=?", (update_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_webhook_retry_is_acknowledged_without_dispatching_twice(monkeypatch):
     update_id = time.time_ns() % 8_000_000_000 + 8_000_000_000
     handled = []
-    monkeypatch.setattr(pingbot, "handle_update", lambda update: handled.append(update["update_id"]))
+    finished = threading.Event()
+
+    def record(update):
+        handled.append(update["update_id"])
+        finished.set()
+
+    monkeypatch.setattr(pingbot, "handle_update", record)
     headers = {"X-Telegram-Bot-Api-Secret-Token": pingbot._WEBHOOK_SECRET}
     update = {"update_id": update_id, "message": {"text": "/admin recover"}}
 
@@ -28,14 +54,58 @@ def test_webhook_retry_is_acknowledged_without_dispatching_twice(monkeypatch):
     retry = client.post("/telegram/webhook", json=update, headers=headers)
     assert first.status_code == retry.status_code == 200
     assert first.json() == retry.json() == {"ok": True}
+    assert finished.wait(2)
     assert handled == [update_id]
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        row = _webhook_row(update_id)
+        if row and row["completed_at"] is not None:
+            break
+        time.sleep(0.01)
+    assert row and row["completed_at"] is not None
+    assert row["payload"] is None
+    _delete_webhook_row(update_id)
 
-    conn = database.get_db_connection()
+
+def test_webhook_ack_is_not_held_open_by_a_slow_handler(monkeypatch):
+    import threading
+    from services import telegram_webhook_queue
+
+    update_id = time.time_ns() % 8_000_000_000 + 8_000_000_000
+    original_handler = pingbot.handle_update
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(update):
+        entered.set()
+        release.wait(3)
+        finished.set()
+
+    monkeypatch.setattr(pingbot, "handle_update", slow)
+    headers = {"X-Telegram-Bot-Api-Secret-Token": pingbot._WEBHOOK_SECRET}
+    update = {"update_id": update_id, "message": {"text": "/status"}}
+    started = time.monotonic()
     try:
-        conn.execute("DELETE FROM telegram_webhook_updates WHERE update_id=?", (update_id,))
-        conn.commit()
+        response = client.post("/telegram/webhook", json=update, headers=headers)
+        elapsed = time.monotonic() - started
+        assert response.status_code == 200 and response.json() == {"ok": True}
+        assert elapsed < 1.0
+        assert entered.wait(1)
+        row = _webhook_row(update_id)
+        assert row and row["completed_at"] is None
+        assert '"update_id":' in row["payload"]
     finally:
-        conn.close()
+        release.set()
+        assert finished.wait(2)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            row = _webhook_row(update_id)
+            if row and row["completed_at"] is not None:
+                break
+            time.sleep(0.01)
+        assert row and row["payload"] is None
+        _delete_webhook_row(update_id)
+        # Keep the global worker wired to the real handler after monkeypatching.
+        telegram_webhook_queue.start(original_handler)
 
 
 def test_manual_recovery_is_one_queued_sweep_separate_from_auto_deploy(monkeypatch):

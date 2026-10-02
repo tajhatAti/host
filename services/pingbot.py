@@ -6,7 +6,6 @@ Features:
 - Inline buttons after deploy
 - Real logs, Uptime, Download DB
 """
-import asyncio
 import io
 import ipaddress
 import socket
@@ -5357,6 +5356,8 @@ def handle_update(upd):
 # ==================== MAIN LOOP ====================
 import hashlib
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from services import telegram_webhook_queue
 
 # secret_token Telegram echoes back in the X-Telegram-Bot-Api-Secret-Token
 # header on every webhook delivery — derived from BOT_TOKEN itself so no
@@ -5364,103 +5365,18 @@ from fastapi import APIRouter, Request
 _WEBHOOK_SECRET = hashlib.sha256((BOT_TOKEN or "unset").encode()).hexdigest()[:32]
 
 webhook_router = APIRouter()
-_WEBHOOK_UPDATE_LEASE_NS = 300 * 1_000_000_000
-_WEBHOOK_UPDATE_KEEP = 50_000
-_WEBHOOK_UPDATE_REUSE_NS = 7 * 24 * 60 * 60 * 1_000_000_000
+_WEBHOOK_UPDATE_LEASE_NS = telegram_webhook_queue.LEASE_NS
+_WEBHOOK_UPDATE_KEEP = telegram_webhook_queue.KEEP_UPDATES
+_WEBHOOK_UPDATE_REUSE_NS = telegram_webhook_queue.REUSE_AFTER_NS
 
 
-def _claim_webhook_update(update_id: int):
-    """Claim one Telegram delivery; return lease token, False for duplicate.
-
-    Telegram retries webhooks on slow or interrupted responses. Without a
-    durable claim, an `/admin recover` retry can start the same runner work
-    again and make the bot appear stuck in a recovery loop. Only update IDs
-    and timestamps are stored, never message text or credentials.
-
-    None means the DB was unavailable; in that case process the update rather
-    than silently dropping a user's command.
-    """
-    from database import get_db_connection
-    update_id = int(update_id)
-    now_ns = time.time_ns()
-    conn = get_db_connection()
-    try:
-        cur = conn.execute(
-            "INSERT INTO telegram_webhook_updates(update_id,claimed_at,completed_at) "
-            "VALUES(?,?,NULL) ON CONFLICT(update_id) DO NOTHING",
-            (update_id, now_ns),
-        )
-        inserted = cur.rowcount == 1
-        cur.close()
-        if inserted:
-            claim = now_ns
-        else:
-            row = conn.execute(
-                "SELECT claimed_at,completed_at FROM telegram_webhook_updates WHERE update_id=?",
-                (update_id,),
-            ).fetchone()
-            if not row:
-                conn.rollback()
-                return None
-            claimed_at = int(row["claimed_at"] or 0)
-            completed_at = int(row["completed_at"] or 0)
-            reclaim = (completed_at and now_ns - completed_at > _WEBHOOK_UPDATE_REUSE_NS) or (
-                not completed_at and now_ns - claimed_at > _WEBHOOK_UPDATE_LEASE_NS)
-            if not reclaim:
-                conn.commit()
-                return False
-            if completed_at:
-                cur = conn.execute(
-                    "UPDATE telegram_webhook_updates SET claimed_at=?,completed_at=NULL "
-                    "WHERE update_id=? AND claimed_at=? AND completed_at=?",
-                    (now_ns, update_id, claimed_at, completed_at),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE telegram_webhook_updates SET claimed_at=?,completed_at=NULL "
-                    "WHERE update_id=? AND claimed_at=? AND completed_at IS NULL",
-                    (now_ns, update_id, claimed_at),
-                )
-            claim = now_ns if cur.rowcount == 1 else False
-            cur.close()
-        if claim is False:
-            conn.commit()
-            return False
-        conn.execute(
-            "DELETE FROM telegram_webhook_updates WHERE update_id<? AND completed_at IS NOT NULL",
-            (update_id - _WEBHOOK_UPDATE_KEEP,),
-        )
-        conn.commit()
-        return claim
-    except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        logger.warning("Could not claim Telegram webhook update (%s)", type(exc).__name__)
-        return None
-    finally:
-        conn.close()
+def _claim_webhook_update(update_id: int, payload=None):
+    """Compatibility wrapper around the durable webhook queue's claim."""
+    return telegram_webhook_queue.claim_update(update_id, payload)
 
 
 def _complete_webhook_update(update_id: int, claim: int) -> None:
-    from database import get_db_connection
-    conn = get_db_connection()
-    try:
-        conn.execute(
-            "UPDATE telegram_webhook_updates SET completed_at=? "
-            "WHERE update_id=? AND claimed_at=? AND completed_at IS NULL",
-            (time.time_ns(), int(update_id), int(claim)),
-        )
-        conn.commit()
-    except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        logger.warning("Could not complete Telegram webhook claim (%s)", type(exc).__name__)
-    finally:
-        conn.close()
+    telegram_webhook_queue.complete_update(update_id, claim)
 
 
 @webhook_router.post("/telegram/webhook")
@@ -5478,9 +5394,9 @@ async def telegram_webhook(request: Request):
 
     A webhook flips the direction: Telegram POSTs the update TO this
     endpoint. That POST *is* incoming HTTP traffic, so it wakes a sleeping
-    dyno itself, and even a slow cold-start response just makes THIS
-    delivery slow — Telegram retries automatically, and the retry lands on
-    an already-warm process in well under a second.
+    dyno itself. The update is saved in the site's database before the fast
+    acknowledgement; a worker handles it afterward and resumes pending work
+    after a process restart.
     """
     got = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if got != _WEBHOOK_SECRET:
@@ -5489,27 +5405,17 @@ async def telegram_webhook(request: Request):
         upd = await request.json()
     except Exception:
         return {"ok": False}
-    raw_update_id = upd.get("update_id") if isinstance(upd, dict) else None
-    try:
-        update_id = int(raw_update_id) if raw_update_id is not None else None
-    except (TypeError, ValueError):
-        update_id = None
-    claim = _claim_webhook_update(update_id) if update_id is not None else None
-    if claim is False:
-        # Telegram got an earlier 200, or another instance is already handling
-        # this update. Acknowledge the retry but never replay its side effects.
-        return {"ok": True}
-    try:
-        # Never block the ASGI event loop with runner/GitHub work. Recovery
-        # commands also queue their sweep in a worker thread and answer the
-        # webhook before that potentially slow work finishes.
-        await asyncio.to_thread(handle_update, upd)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("webhook handle_update failed: %s", exc)
-    finally:
-        if update_id is not None and claim is not None:
-            _complete_webhook_update(update_id, claim)
-    return {"ok": True}  # Telegram only cares that this came back fast
+    # Store the update in the site's database before acknowledging it. The
+    # handler runs on the queue's worker, so runner/GitHub calls cannot consume
+    # Telegram's webhook timeout; a process restart can still resume the saved
+    # payload after its short claim lease expires.
+    queued = telegram_webhook_queue.enqueue(upd, handle_update)
+    if queued == "unavailable":
+        # No durable write means we must not acknowledge it; Telegram will retry.
+        return JSONResponse(status_code=503, content={"ok": False})
+    if queued == "invalid":
+        return JSONResponse(status_code=400, content={"ok": False})
+    return {"ok": True}
 
 
 def enable_webhook():
@@ -5632,6 +5538,11 @@ def start_bot():
     if not BOT_TOKEN:
         print("TELEGRAM_PING_BOT_TOKEN not set")
         return
+
+    try:
+        telegram_webhook_queue.start(handle_update)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Telegram webhook queue did not start (%s)", type(exc).__name__)
 
     # ASK TELEGRAM WHO WE ARE, ONCE, AT BOOT.
     #

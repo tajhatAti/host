@@ -332,11 +332,24 @@ _WAKE_RETRIES = int(os.getenv("RUNNER_WAKE_RETRIES", "2"))
 _WAKE_WAIT_S = float(os.getenv("RUNNER_WAKE_WAIT_S", "4"))
 
 
+def _is_owner_suspended(resp) -> bool:
+    """Render's explicit owner-suspension page means this worker is gone, not waking."""
+    body = getattr(resp, "text", "") or ""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    text = str(body).lower()
+    return "service suspended" in text or "suspended by its owner" in text
+
+
 def _looks_like_wakeup(resp) -> bool:
     """True for a proxy-level 502/503/504 from a runner that is still booting.
 
     A real answer from our own runner carries a JSON "detail" (e.g. "Runner
-    secret not configured.") or X-Runner-Full - those are NOT retried."""
+    secret not configured.") or X-Runner-Full. Render's owner-suspension page
+    is also a definitive response, not a temporary wake-up, and must not be
+    retried as if the worker were merely starting."""
+    if _is_owner_suspended(resp):
+        return False
     if getattr(resp, "status_code", None) not in (502, 503, 504):
         return False
     try:
@@ -423,6 +436,7 @@ def _runner_http(method: str, path: str, json_body=None, worker: str = None):
     last_exc = None
     last_full = None
     last_wake = None
+    last_suspended = None
     for i, base in enumerate(targets):
         try:
             resp = _call(base)
@@ -436,6 +450,15 @@ def _runner_http(method: str, path: str, json_body=None, worker: str = None):
         except (requests.ConnectionError, requests.Timeout) as exc:
             last_exc = exc
             continue                     # asleep or unreachable — try the next
+        if _is_owner_suspended(resp):
+            # Render explicitly says the owner suspended this service. It has
+            # no live job process to duplicate, so skip it during placement and
+            # let recovery put missing jobs on a healthy runner.
+            last_suspended = resp
+            logger.warning("runner %s is suspended by its owner", base)
+            if not creating and path.rstrip("/") == "/health":
+                return resp  # recovery needs the page text to distinguish this
+            continue
         if _looks_like_wakeup(resp):
             # Still booting after the retries: say so plainly, and let a
             # create try the next runner instead of reporting a rejected app.
@@ -464,6 +487,9 @@ def _runner_http(method: str, path: str, json_body=None, worker: str = None):
         return last_full                 # every runner full — report it honestly
     if last_wake is not None:
         raise HTTPException(status_code=503, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")
+    if last_suspended is not None:
+        raise HTTPException(status_code=503,
+                            detail="Runner is suspended by its owner; use another online runner.")
     if isinstance(last_exc, requests.Timeout):
         raise HTTPException(status_code=504, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")
     raise HTTPException(status_code=503, detail="Waking up your RunSpace... this can take up to a minute on the free tier.")

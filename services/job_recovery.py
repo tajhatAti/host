@@ -106,9 +106,10 @@ def _answered_workers(wanted: list) -> dict:
 
     Answered = any HTTP status below 500 came back, including a 404 or a 401:
     those all prove a live process is on the other end whose job list can be
-    trusted. A timeout, a connection error, or a 502/503 from a container still
-    booting proves nothing about the jobs — so that worker is marked False and
-    its jobs are left alone this round.
+    trusted. A timeout, a connection error, or a generic 502/503 from a runner
+    still booting proves nothing, so its jobs wait. Render's explicit
+    "Service Suspended" page is different: the owner stopped that service, so
+    recovery can safely place those missing jobs on another online runner.
 
     Only workers that actually own a wanted job are probed, and the key is the
     row's own worker_url (None = "the default worker", which _runner_http
@@ -122,7 +123,11 @@ def _answered_workers(wanted: list) -> dict:
         try:
             resp = runner_client._runner_http("GET", "/health", worker=key)
             status = getattr(resp, "status_code", 0) or 0
-            out[key] = bool(0 < status < 500)
+            suspended = runner_client._is_owner_suspended(resp)
+            out[key] = bool(0 < status < 500 or suspended)
+            if suspended:
+                logger.warning("Recovery: runner %s is owner-suspended; missing jobs "
+                               "will be placed on an online runner", key or "default")
         except Exception as exc:
             logger.info("Recovery: worker %s did not answer (%s) — its jobs are "
                         "left alone until it does", key or "default", exc)

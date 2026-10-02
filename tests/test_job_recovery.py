@@ -124,6 +124,39 @@ def test_a_worker_that_does_not_answer_never_causes_a_duplicate(monkeypatch):
     assert job_recovery.recover_once() == 0
 
 
+def test_owner_suspended_runner_fails_over_missing_bot_to_online_pool(monkeypatch):
+    """An explicit Render suspension is safe to re-home, unlike a timeout."""
+    suspended_url = "https://suspended.example"
+    monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [
+        _row(id=13, runner_job_id="lost-on-suspended-runner", worker_url=suspended_url)])
+    monkeypatch.setattr(runner_client, "fleet_jobs", lambda refresh=True: {})
+
+    class OwnerSuspended:
+        status_code = 503
+        text = "Service Suspended — This service has been suspended by its owner."
+
+    calls = []
+
+    def call(method, path, body=None, worker=None):
+        calls.append((method, path, worker, body))
+        if path == "/health":
+            return OwnerSuspended()
+        return Response()
+
+    monkeypatch.setattr(runner_client, "_runner_http", call)
+    remembered = {}
+    monkeypatch.setattr(job_recovery, "_remember",
+                        lambda jid, rid, worker: remembered.update(
+                            job=jid, runner=rid, worker=worker))
+    monkeypatch.setattr(snapshots, "restore_snapshot", lambda *a, **k: {"restored": 0})
+
+    assert job_recovery.recover_once() == 0
+    assert calls[0][:3] == ("GET", "/health", suspended_url)
+    assert calls[1][0:3] == ("POST", "/internal/jobs", None)
+    assert remembered == {
+        "job": 13, "runner": "new-runner-id", "worker": "https://runner-two.example"}
+
+
 def test_recovered_bot_keeps_its_queen_flag(monkeypatch):
     """Recovery is a fresh create, so it has to carry 👑 with it."""
     monkeypatch.setattr(job_recovery, "_wanted_rows", lambda: [_row(id=12, user_id=77)])

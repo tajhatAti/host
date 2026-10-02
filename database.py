@@ -848,13 +848,14 @@ _SCHEMA_TABLES = [
     )
     """,
     """
-    -- Webhook delivery de-duplication. Telegram may retry an update when a
-    -- handler is slow or a connection is interrupted; the stored claim makes
-    -- a retry idempotent without copying message text or other user payloads.
+    -- Durable webhook delivery queue. A payload is held only while its handler
+    -- is pending; it is cleared on completion, leaving the ID/timestamps for
+    -- retry de-duplication without retaining message text.
     CREATE TABLE IF NOT EXISTS telegram_webhook_updates (
         update_id BIGINT PRIMARY KEY,
         claimed_at BIGINT NOT NULL,
-        completed_at BIGINT
+        completed_at BIGINT,
+        payload TEXT
     )
     """,
     """
@@ -1001,6 +1002,15 @@ def init_db():
         for ddl in _SCHEMA_TABLES:
             conn.execute(_translate_ddl(ddl))
 
+        # Existing installs already have the dedupe table; add the temporary
+        # payload column so webhook requests can be acknowledged only after the
+        # update is durably queued. Completed legacy rows carry no useful body.
+        if not _column_exists(conn, "telegram_webhook_updates", "payload"):
+            conn.execute("ALTER TABLE telegram_webhook_updates ADD COLUMN payload TEXT")
+        conn.execute("UPDATE telegram_webhook_updates SET payload=NULL "
+                     "WHERE completed_at IS NOT NULL AND payload IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_webhook_pending "
+                     "ON telegram_webhook_updates (completed_at, claimed_at)")
 
         # ------------------------------------------------------------------
         # MIGRATION 001 (developer-first pivot): the vault product is gone.
