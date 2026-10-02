@@ -520,14 +520,6 @@ JOB_SOFT_OVER_MB = int(os.getenv("JOB_SOFT_OVER_MB", "32"))
 # with reason "crash_loop", instead of thrashing the box forever.
 JOB_CRASH_WINDOW_S = float(os.getenv("JOB_CRASH_WINDOW_S", "120"))
 JOB_CRASH_LOOP_N = int(os.getenv("JOB_CRASH_LOOP_N", "4"))
-# Abuse throttle: a job that crash-loops this many separate TIMES within
-# ABUSE_WINDOW_S is treated as someone deliberately hammering /restart to
-# hang or crash the runner, not an unlucky bug — so /restart itself gets
-# locked out for ABUSE_LOCK_S instead of letting them immediately try again.
-# The sliding window means a job that behaves for a while is forgiven.
-ABUSE_LOOP_EPISODES_N = int(os.getenv("ABUSE_LOOP_EPISODES_N", "2"))
-ABUSE_WINDOW_S = float(os.getenv("ABUSE_WINDOW_S", "3600"))
-ABUSE_LOCK_S = float(os.getenv("ABUSE_LOCK_S", "1800"))
 
 _jobs: dict = {}                                    # id -> job record
 _jobs_lock = threading.Lock()
@@ -580,6 +572,26 @@ LIVE_PORT_MAX = int(os.getenv("LIVE_PORT_MAX", "11099"))
 LIVE_RATE_LIMIT = int(os.getenv("LIVE_RATE_LIMIT", "60"))      # req per minute per visitor IP per job
 LIVE_RATE_WINDOW_S = 60
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")  # e.g. https://codenest-runner.onrender.com
+# A free-tier Render web service sleeps after ~15 min with no inbound HTTP.
+# The main site's own recovery sweep pings this runner too, but only when
+# it has something to check — if every job here is already fine, nothing
+# calls out for a while and the runner goes back to sleep anyway, killing
+# every running bot on it. Pinging our own public URL is real inbound
+# traffic from Render's point of view, so this alone keeps the runner up
+# without needing an external monitor (UptimeRobot etc.) configured by hand.
+SELF_PING_INTERVAL_S = int(os.getenv("SELF_PING_INTERVAL_S", "600"))
+
+
+def _self_ping_loop():
+    import urllib.request
+    while True:
+        time.sleep(SELF_PING_INTERVAL_S)
+        try:
+            urllib.request.urlopen(PUBLIC_BASE_URL + "/health", timeout=15).read()
+        except Exception as exc:                                   # noqa: BLE001
+            # Expected occasionally (deploy mid-ping, DNS blip) — never fatal,
+            # the loop just tries again next interval.
+            logger.info("self-ping failed (will retry): %s", exc)
 
 _live_hits: dict = {}        # (slug, ip) -> deque[timestamps]  (in-memory rate limiter)
 _live_hits_lock = threading.Lock()
@@ -1531,6 +1543,13 @@ def _prepare_and_run(j: dict, reqs: list, is_repo: bool = False) -> None:
     try:
         have = set(j.get("libs") or [])
         j["libs"] = sorted(have | {_pkg_display_name(x) for x in (reqs or [])})
+        # Full specs (with version pins), not just display names — this is
+        # what lets a later /restart re-check/re-install the exact same
+        # versions instead of only knowing bare package names.
+        specs = {_pypi_normalize(_pkg_display_name(x)): x for x in (j.get("install_specs") or [])}
+        for x in (reqs or []):
+            specs[_pypi_normalize(_pkg_display_name(x))] = x
+        j["install_specs"] = sorted(specs.values())
     except Exception:
         pass
     # Repo-mode: install requirements.txt / package.json / Gemfile first
@@ -1588,6 +1607,23 @@ def _prepare_and_run(j: dict, reqs: list, is_repo: bool = False) -> None:
                 failed = spec
                 break
             name = _pkg_display_name(spec)
+            # Skip if already present — matters most on a manual /restart:
+            # pylibs survives an in-place restart (only a full container
+            # rebuild wipes it), so re-running pip for everything on every
+            # restart was pure wasted time with the bot offline the whole
+            # wait. A version-pinned spec still re-installs (pip itself
+            # no-ops instantly if that exact version is already there, but
+            # this skips even the subprocess for the common unpinned case).
+            if "==" not in spec:
+                chk = subprocess.run(
+                    ["python3", "-c", f"import {name}"],
+                    capture_output=True,
+                    env=dict(os.environ, PYTHONPATH=j["pylibs"] + os.pathsep + os.environ.get("PYTHONPATH", "")),
+                    timeout=8,
+                )
+                if chk.returncode == 0:
+                    j["log"].append(f"[system] ✓ {name} already present")
+                    continue
             tout, terr, tcode, ttimed = _run_subprocess(
                 ["python3", "-m", "pip", "install", "--quiet", "--target", j["pylibs"], spec],
                 j["dir"], None, remain,
@@ -2071,11 +2107,6 @@ def _job_public(j: dict) -> dict:
         "oom": bool(j.get("oom")),
         "web_slug": j.get("web_slug"),
         "web_public": bool(j.get("web_public", True)),
-        # >0 while /restart is throttled after repeated crash-loops (abuse
-        # protection); 0/absent means not locked. Seconds remaining, so the
-        # site/bot can show a live countdown instead of a fixed timestamp.
-        "restart_locked_s": (max(0, int((j.get("restart_locked_until") or 0) - time.time()))
-                              if (j.get("restart_locked_until") or 0) > time.time() else 0),
         # access_key only reaches the main site (this API is secret-guarded) —
         # it builds the private share-link ?key= for the job owner.
         "access_key": j.get("access_key") if not j.get("web_public", True) else None,
@@ -2286,6 +2317,45 @@ def _isolation_loop():
         time.sleep(max(1.0, JOB_WATCH_INTERVAL_S))
 
 
+def _ensure_deps(j: dict, budget_s: float = 60.0) -> None:
+    """Quick top-up before a restart: check each package this job needs is
+    actually importable, install any that aren't (full pinned spec, so a
+    version stays correct), skip the rest.
+
+    Why this exists: /restart used to just re-launch the process with
+    whatever was already on disk. That's right most of the time (pylibs
+    survives an in-place restart) but wrong exactly when it matters most —
+    a repo-imported bot whose first install was interrupted (runner slept
+    mid-install, timed out, etc.) stayed broken forever, because nothing
+    ever asked pip again after that first attempt. Restart now asks.
+    """
+    specs = j.get("install_specs") or []
+    if not specs or not j.get("pylibs"):
+        return
+    deadline = time.monotonic() + budget_s
+    for spec in specs:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        name = _pkg_display_name(spec)
+        try:
+            chk = subprocess.run(
+                ["python3", "-c", f"import {name}"],
+                capture_output=True,
+                env=dict(os.environ, PYTHONPATH=j["pylibs"] + os.pathsep + os.environ.get("PYTHONPATH", "")),
+                timeout=8,
+            )
+            if chk.returncode == 0:
+                continue
+        except Exception:
+            continue  # best-effort check — never block a restart over it
+        j["log"].append(f"[system] {name} missing — reinstalling before restart")
+        _run_subprocess(
+            ["python3", "-m", "pip", "install", "--quiet", "--target", j["pylibs"], spec],
+            j["dir"], None, max(5, int(remain)),
+        )
+
+
 def _spawn(j: dict) -> None:
 
     """(Re)start the job process + reader thread + supervisor thread."""
@@ -2443,22 +2513,7 @@ def _spawn(j: dict) -> None:
                         f"{int(JOB_CRASH_WINDOW_S)}s. Fix the code "
                         f"(`/logs` shows why) then `/restart`."
                     )
-                    # A SECOND (or later) crash-loop episode within ABUSE_WINDOW_S
-                    # means /restart itself is being used to keep re-triggering
-                    # the loop — lock it out for a cooldown instead of letting
-                    # that repeat forever.
-                    episodes = [t for t in (j.get("crash_loop_episodes") or [])
-                                if now - t < ABUSE_WINDOW_S]
-                    episodes.append(now)
-                    j["crash_loop_episodes"] = episodes
-                    if len(episodes) >= ABUSE_LOOP_EPISODES_N:
-                        j["restart_locked_until"] = now + ABUSE_LOCK_S
-                        mins = max(1, int(ABUSE_LOCK_S // 60))
-                        j["log"].append(
-                            f"[system] 🔒 {len(episodes)} crash-loops in "
-                            f"{int(ABUSE_WINDOW_S // 60)} min — /restart locked for "
-                            f"{mins} min. Fix the code and wait it out."
-                        )
+
 
             limit_mb = j.get("mem_limit_mb")
             if limit_mb is None:
@@ -3209,15 +3264,13 @@ def job_restart(job_id: str, authorization: Optional[str] = Header(None)):
     j = _jobs.get(job_id)
     if not j:
         raise HTTPException(404, detail="Job not found.")
-    locked_until = j.get("restart_locked_until") or 0
-    if locked_until > time.time():
-        remaining = int(locked_until - time.time())
-        mins, secs = divmod(remaining, 60)
-        raise HTTPException(
-            status_code=423,
-            detail=f"Restart locked for {mins}m {secs}s — repeated crash-loops. "
-                   f"Fix the code and wait it out, or ask an admin to unlock it.",
-        )
+    # NOTE: this used to hard-block /restart for 30 min after repeated
+    # crash-loops. On a free-tier runner that sleeps and cold-boots
+    # constantly, crash-loops happen from plain infra flakiness as often as
+    # from an actual bad deploy — the lock was catching legitimate repo
+    # bots, not abuse. Replaced by a soft per-command rate-limit in the bot
+    # itself (pingbot.py) that just asks someone to wait a few seconds
+    # instead of refusing the action outright.
     # Stop current process (keeps dir)
     j["stop_requested"] = True
     _kill_job_tree(j)
@@ -3248,23 +3301,22 @@ def job_restart(job_id: str, authorization: Optional[str] = Header(None)):
         return _job_public(j)
 
     j["log"].append("[system] restarting in place (workspace preserved)")
-    _spawn(j)
+    if j.get("install_specs"):
+        # Dep check can take up to a minute — do it in the background and
+        # answer the HTTP call immediately (status "installing"), the same
+        # way a fresh create already works. Blocking here would blow past
+        # the site's request timeout and look like the restart itself failed
+        # even though it was still quietly working.
+        j["status"] = "installing"
+
+        def _restart_after_deps(job=j):
+            _ensure_deps(job)
+            _spawn(job)
+        threading.Thread(target=_restart_after_deps, daemon=True,
+                          name=f"job-restart-{job_id[:8]}").start()
+    else:
+        _spawn(j)
     logger.info("Job %s restarted in place (dir: %s)", job_id, j.get("dir"))
-    return _job_public(j)
-
-
-@app.post("/internal/jobs/{job_id}/unlock")
-def job_unlock(job_id: str, authorization: Optional[str] = Header(None)):
-    """Admin escape hatch: clear an abuse lock (and its crash-loop history)
-    early, for the case where the crash-loop was a real bug the owner has
-    now fixed rather than someone hammering /restart on purpose."""
-    _check_secret(authorization)
-    j = _jobs.get(job_id)
-    if not j:
-        raise HTTPException(404, detail="Job not found.")
-    j["restart_locked_until"] = 0
-    j["crash_loop_episodes"] = []
-    j["log"].append("[system] 🔓 Restart lock cleared by admin.")
     return _job_public(j)
 
 
@@ -3627,6 +3679,17 @@ def _startup_recover_jobs():
                     int(JOB_CRASH_WINDOW_S), JOB_CRASH_LOOP_N)
     except Exception as exc:                                       # noqa: BLE001
         logger.warning("could not start isolation loop: %s", exc)
+    try:
+        if SELF_PING_INTERVAL_S > 0 and PUBLIC_BASE_URL:
+            t = threading.Thread(target=_self_ping_loop, daemon=True, name="self-ping")
+            t.start()
+            logger.info("self-ping every %ss (keeps this free-tier runner from idling out "
+                        "between site requests — no external uptime monitor needed)",
+                        SELF_PING_INTERVAL_S)
+        elif SELF_PING_INTERVAL_S > 0:
+            logger.info("self-ping skipped: PUBLIC_BASE_URL not set, nothing to ping")
+    except Exception as exc:                                       # noqa: BLE001
+        logger.warning("could not start self-ping loop: %s", exc)
 
 
 if __name__ == "__main__":
