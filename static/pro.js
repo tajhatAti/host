@@ -756,7 +756,7 @@ async function _demoApi(path, method = "GET", body = null) {
   if (clean.startsWith("/admin/")) {
     const ov = {
       users: 128, verified: 111, suspended: 2, jobs_deployed: _demo.jobs.length,
-      telegram_linked: 12, bot_secrets_encrypted: true, runner_isolation: "embedded",
+      telegram_linked: 12, bot_secrets_storage: "plain-text", bot_secrets_legacy_rows: 0, runner_isolation: "embedded",
       mem_safe_mb: 512, mem_used_mb: 37, mem_pct: 8, mem_total_mb: 512, runner_running: _demo.jobs.filter(j => j.status === "running").length,
       signups_daily: [], workers: [], workers_online: 0,
     };
@@ -769,6 +769,11 @@ async function _demoApi(path, method = "GET", body = null) {
     if (clean === "/admin/bot-usage") return { days: 14, events: [], bots: [] };
     if (clean === "/admin/telegram-jobs") return { detected: 1, running: _demo.jobs.filter(j => j.status === "running").length, events: [], bots: _demo.jobs.filter(j => j.telegram_bot_detected).map(j => ({ id: j.id, owner: "demo", name: j.name, telegram_bot_username: j.telegram_bot_username, status: j.status, telegram_framework: j.telegram_framework, telegram_update_mode: j.telegram_update_mode, telegram_check_status: j.telegram_check_status, uptime_s: j.uptime_s })) };
     if (clean === "/admin/runners") return { total_enabled: 1, environment_runners: [], runners: [], embedded: { online: true, jobs: _demo.jobs.filter(j => j.status === "running").length, capacity: 4, mem_mb: 24 } };
+    if (clean === "/admin/recover" && method === "POST") return { ok: true, unresolved: 0, message: "Recovery done. Unresolved: 0." };
+    const runnerTog = clean.match(/^\/admin\/runners\/(\d+)\/toggle$/);
+    if (runnerTog && method === "POST") return { message: (body && body.enabled) ? "Runner enabled." : "Runner drained.", id: Number(runnerTog[1]) };
+    const runnerDel = clean.match(/^\/admin\/runners\/(\d+)$/);
+    if (runnerDel && method === "DELETE") return { message: "Runner removed." };
     if (clean === "/admin/ip-clusters" || clean === "/admin/fingerprint-clusters" || clean === "/admin/signup-flags" || clean === "/admin/blocks") return { rows: [], clusters: [], flags: [] };
     if (clean === "/admin/bot-usage?") return { events: [], bots: [] };
   }
@@ -781,7 +786,12 @@ async function api(path, method = "POST", body = null, auth = false,
   // UI can be reviewed without the Python backend.
   if (_demo.on) return _demoApi(path, method, body);
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = {};
+  // Only set JSON content-type when we actually send a body. A bare POST/DELETE
+  // with Content-Type: application/json and no body made some gateways answer
+  // 422/400, which the UI turned into a useless "Something went wrong" toast
+  // on admin buttons (Online, Recover, Remove).
+  if (body != null) headers["Content-Type"] = "application/json";
   // Remember WHICH token this request went out with. A 401 only means "the
   // session is dead" if the token is still the current one — see below.
   const sentToken = authToken;
@@ -917,8 +927,43 @@ async function api(path, method = "POST", body = null, auth = false,
   }
   _serverUp();  // any well-formed response = the backend is alive again
 
-  if (!res.ok) throw new Error(data.detail || "Something went wrong");
+  if (!res.ok) throw new Error(_fmtApiDetail(data, res.status));
   return data;
+}
+
+/** Turn FastAPI `detail` (string | list | object) into one readable line.
+ *  The old `throw new Error(data.detail || …)` produced "Something went wrong"
+ *  whenever detail was an array (422 validation) or object — the classic
+ *  Admin "Online / Enable" button failure mode. */
+function _fmtApiDetail(data, status) {
+  const d = data && data.detail;
+  if (d == null || d === "") {
+    if (status === 404) return "Not found. Refresh the panel and try again.";
+    if (status === 401) return "Session expired — sign in again.";
+    if (status === 403) return "Not allowed.";
+    if (status === 409) return "Conflict — try again.";
+    if (status >= 500) return "Server error (" + status + "). Try again in a moment.";
+    return "Something went wrong" + (status ? " (HTTP " + status + ")" : "");
+  }
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    return d.map(function (item) {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        var loc = Array.isArray(item.loc) ? item.loc.filter(function (x) {
+          return x !== "body" && x !== "query" && x !== "path";
+        }).join(".") : "";
+        var msg = item.msg || item.message || JSON.stringify(item);
+        return loc ? (loc + ": " + msg) : String(msg);
+      }
+      return String(item);
+    }).filter(Boolean).join("; ") || "Request failed";
+  }
+  if (typeof d === "object") {
+    try { return d.message || d.error || d.msg || JSON.stringify(d); }
+    catch (e) { return "Request failed"; }
+  }
+  return String(d);
 }
 
 /* ---------------- SERVER-UP BANNER ----------------
@@ -3847,7 +3892,7 @@ function _setJobsStatus(status) {
     const t = emp.querySelector(".rs-empty-title");
     const s = emp.querySelector(".rs-empty-sub");
     if (t) t.textContent = "No bots yet";
-    if (s) s.textContent = "Verify a BotFather token, paste the bot code, then run it 24/7.";
+    if (s) s.textContent = "Paste a BotFather token (Env tab OR in the code), deploy, and it stays up — even after runner restart.";
     if (list) list.innerHTML = '<div class="rs-empty-sm" style="padding:16px 12px;text-align:center">No saved jobs yet.</div>';
   } else if (status === "error") {
     // NEVER hide the workspace here. A failed background refresh used to set
@@ -3911,6 +3956,7 @@ async function loadJobs() {
 
   try {
     const data = await api("/api/jobs", "GET", null, true);
+    _reflectAccountFlags(data);
     const jobs = (data && data.jobs) || [];
     _saveBotCache(jobs);
     const sig = jobs.map(j => [j.id, j.status, j.restarts, j.web ? 1 : 0, j.web_public === false ? 0 : 1,
@@ -4772,7 +4818,7 @@ function renderInspector() {
   const list = document.getElementById("inspEnvList");
   if (list) {
     if (!keys.length) {
-      list.innerHTML = '<p class="rs-insp-none">No variables set.</p>';
+      list.innerHTML = '<p class="rs-insp-none">No Env vars — fine if BOT_TOKEN is in the source.</p>';
     } else {
       // textContent per node — a key is user data and must never be parsed
       // as HTML.
@@ -5070,6 +5116,38 @@ function _langIcon(lang) {
 /** Refresh ONLY the sidebar list + count. Never touches the editor panes.
  *  Used while the user is composing a new job or has unsaved edits, so the
  *  job list stays live without their typing being wiped. */
+// ─── Account flags (👑) ────────────────────────────────────────────────
+// The jobs response already carries what this account is allowed, so the
+// sidebar can show it without a second request. A queen grant used to be
+// invisible here: the chat bot knew, the runner knew, and the page the owner
+// actually looks at showed nothing — so "no memory ceiling" and "bigger
+// uploads" were things you had to be told about instead of seeing.
+function _reflectAccountFlags(data) {
+  if (!data) return;
+  window._rsIsQueen = !!data.is_queen;
+  window._rsJobLimit = data.max_per_user || null;
+  window._rsZipMaxMb = data.zip_max_mb || null;
+  const badge = document.getElementById("txQueenBadge");
+  if (badge) {
+    badge.hidden = !data.is_queen;
+    if (data.is_queen) {
+      const bits = ["Queen access:", "no memory ceiling on your apps"];
+      if (data.zip_max_mb) bits.push(data.zip_max_mb + "MB zip uploads");
+      bits.push("/projects in the Telegram bot for one-tap deploys");
+      badge.title = bits.join(" · ");
+    }
+  }
+  const countEl = document.getElementById("txJobCount");
+  if (countEl && data.max_per_user) {
+    // The number itself stays a plain count (other code reads it); the slots
+    // rule goes in the tooltip, where "why can't I add another?" is answered.
+    const running = (data.jobs || []).filter(j =>
+      String(j.desired_state || j.status || "").toLowerCase() !== "stopped").length;
+    countEl.title = running + " running of " + data.max_per_user +
+      " allowed — a stopped app keeps its place but frees its slot";
+  }
+}
+
 function _renderJobList(jobs) {
   window._lastJobs = jobs || [];
   const countEl = document.getElementById("txJobCount");
@@ -6027,7 +6105,7 @@ function _jdEnvSave() {
       await api("/api/jobs/" + id, "PATCH", { env: _jdEnvCollect() }, true);
       const job = (window._lastJobs || []).find(x => String(x.id) === String(id));
       if (job) job.env = _jdEnvCollect();
-      _jdText("jdEnvHint", "Saved · applies on the next restart.");
+      _jdText("jdEnvHint", "Saved · applies on next restart. Token in code is also OK.");
     } catch (e) {
       _jdText("jdEnvHint", "Could not save: " + (e.message || "error"));
     }
@@ -6043,7 +6121,7 @@ function _jdEnvLoad() {
   const keys = Object.keys(data);
   if (!keys.length) list.appendChild(_jdEnvRow("", ""));
   else keys.forEach(k => list.appendChild(_jdEnvRow(k, data[k])));
-  _jdText("jdEnvHint", "Changes apply on the next restart.");
+  _jdText("jdEnvHint", "Changes apply on the next restart. BOT_TOKEN may also live in the code — recovery finds both.");
 }
 
 /* ---- downloads ------------------------------------------------------ */
@@ -7017,7 +7095,7 @@ async function loadAdminPanel(force) {
     });
     _wireAdminBotUsage();
     _wireAdminRisk();
-    _wireAdminRunners();
+    _wireAdminRunners();_wireAdminRecover();
     _admMarkFresh();
     stats.dataset.loaded = "1";
   } catch (e) {
@@ -7147,19 +7225,75 @@ function renderAdminRunners(data) {
   if(embedded){const card=document.createElement("article");card.className="adm-runner-card"+(embedded.online?" is-online":" is-offline");const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b","Embedded engine"),_botText("span","Main website container · existing/local jobs"));const metrics=document.createElement("div");metrics.className="adm-runner-metrics";metrics.append(_botText("span",embedded.online?"online":"offline","adm-pill"+(embedded.online?" ok":" warn")),_botText("span",`${embedded.jobs||0}/${embedded.capacity||0} jobs`),_botText("span",`${Math.round(embedded.mem_mb||0)}MB used`));card.append(main,metrics,_botText("span","Add a remote runner to isolate new bot deployments.","adm-hint"));list.appendChild(card);}
   rows.forEach(r=>{
     const card=document.createElement("article");card.className="adm-runner-card"+(r.online?" is-online":" is-offline");
-    const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b",r.label),_botText("span",r.url));
+    const main=document.createElement("div");main.className="adm-runner-main";const runnerLink=document.createElement("a");runnerLink.href=(r.health_url||r.url.replace(/\/$/,"")+"/health");runnerLink.target="_blank";runnerLink.rel="noopener noreferrer";runnerLink.textContent=r.url;main.append(_botText("b",r.label),runnerLink);
     const metrics=document.createElement("div");metrics.className="adm-runner-metrics";metrics.append(_botText("span",r.online?"online":"offline","adm-pill"+(r.online?" ok":" warn")),_botText("span",`${r.jobs||0}/${r.capacity||0} jobs`),_botText("span",`${Math.round(r.mem_mb||0)}MB used`),_botText("span",`${r.assigned_jobs||0} assigned`));
     const actions=document.createElement("div");actions.className="adm-runner-card-actions";
-    const toggle=document.createElement("button");toggle.className="btn-ghost sm";toggle.textContent=r.enabled?"Drain":"Enable";toggle.onclick=()=>_admToggleRunner(r.id,!r.enabled);actions.appendChild(toggle);
+    const toggle=document.createElement("button");toggle.className="btn-ghost sm"+(r.enabled?"":" primary-ish");
+    toggle.textContent=r.enabled?"Online · tap to drain":"Offline · tap to enable";
+    toggle.title=r.enabled?"Taking new jobs — tap to drain (stop new placements)":"Drained — tap to bring online";
+    toggle.onclick=()=>_admToggleRunner(r.id,!r.enabled);actions.appendChild(toggle);
+    const details=document.createElement("button");details.className="btn-ghost sm";details.textContent="Runner details";details.onclick=()=>window.openAdminRunner&&window.openAdminRunner(r.id);actions.appendChild(details);
+    const wake=document.createElement("button");wake.className="btn-ghost sm";wake.textContent="Check / wake + recover";wake.title="Ping this runner; if it answers, queue safe bot recovery";wake.onclick=()=>window.wakeAdminRunner&&window.wakeAdminRunner(r.id,wake);actions.appendChild(wake);
     if(!r.assigned_jobs){const del=document.createElement("button");del.className="btn-ghost sm danger";del.textContent="Remove";del.onclick=()=>_admDeleteRunner(r.id);actions.appendChild(del);}
     card.append(main,metrics,actions);list.appendChild(card);
   });
-  envRows.forEach(url=>{const card=document.createElement("article");card.className="adm-runner-card";const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b","Environment runner"),_botText("span",url));card.append(main,_botText("span","managed in Render environment","adm-hint"));list.appendChild(card);});
+  envRows.forEach(url=>{const card=document.createElement("article");card.className="adm-runner-card";const main=document.createElement("div");main.className="adm-runner-main";const link=document.createElement("a");link.href=url.replace(/\/$/,"")+"/health";link.target="_blank";link.rel="noopener noreferrer";link.textContent=url;main.append(_botText("b","Environment runner"),link);const actions=document.createElement("div");actions.className="adm-runner-card-actions";const details=document.createElement("button");details.className="btn-ghost sm";details.textContent="Runner details";details.onclick=()=>window.openAdminRunner&&window.openAdminRunner(url);actions.appendChild(details);const wake=document.createElement("button");wake.className="btn-ghost sm";wake.textContent="Check / wake + recover";wake.onclick=()=>window.wakeAdminRunner&&window.wakeAdminRunner(url,wake);actions.appendChild(wake);card.append(main,_botText("span","managed in Render environment","adm-hint"),actions);list.appendChild(card);});
   if(!rows.length&&!envRows.length&&!embedded)list.appendChild(_botText("div","No runner engine is available.","adm-empty"));
 }
 
-async function _admToggleRunner(id,enabled){try{await api(`/admin/runners/${id}/toggle`,"POST",{enabled},true);toast(enabled?"Runner enabled":"Runner drained","success");loadAdminPanel(true);}catch(e){toast(e.message,"error");}}
-async function _admDeleteRunner(id){if(!confirm("Remove this runner from the registry?"))return;try{await api(`/admin/runners/${id}`,"DELETE",null,true);toast("Runner removed","success");loadAdminPanel(true);}catch(e){toast(e.message,"error");}}
+function _admFriendlyErr(e, fallback) {
+  var msg = (e && e.message) ? String(e.message) : "";
+  if (!msg || msg === "Something went wrong" || /^Something went wrong/.test(msg)) {
+    return fallback + " — check you are signed in as admin, then ↻ Refresh.";
+  }
+  if (/Not found/i.test(msg)) {
+    return fallback + " — that item may be gone. Tap ↻ Refresh.";
+  }
+  return msg;
+}
+
+async function _admToggleRunner(id, enabled) {
+  if (id == null || id === "" || id === "embedded") {
+    toast("The embedded engine stays on with the website — add a remote runner to drain/enable.", "info");
+    return;
+  }
+  try {
+    const d = await api(`/admin/runners/${encodeURIComponent(id)}/toggle`, "POST", {enabled: !!enabled}, true);
+    toast((d && d.message) || (enabled ? "Runner online" : "Runner drained"), "success");
+    await loadAdminPanel(true);
+  } catch (e) {
+    toast(_admFriendlyErr(e, "Could not update runner"), "error");
+  }
+}
+async function _admDeleteRunner(id) {
+  if (id == null || id === "" || id === "embedded") {
+    toast("The embedded engine cannot be removed.", "info");
+    return;
+  }
+  if (!confirm("Remove this runner from the registry?")) return;
+  try {
+    await api(`/admin/runners/${encodeURIComponent(id)}`, "DELETE", null, true);
+    toast("Runner removed", "success");
+    await loadAdminPanel(true);
+  } catch (e) {
+    toast(_admFriendlyErr(e, "Could not remove runner"), "error");
+  }
+}
+
+async function _admRecoverNow(){
+  const btn=document.getElementById("admRecoverNow");
+  try{
+    if(btn){btn.disabled=true;btn.textContent="♻️ Working…";}
+    const d=await api("/admin/recover","POST",{},true);
+    toast((d&&d.message)||"Recovery done","success");
+    await loadAdminPanel(true);
+  }catch(e){toast(_admFriendlyErr(e,"Recovery failed"),"error");}
+  finally{if(btn){btn.disabled=false;btn.textContent="♻️ Recover bots";}}
+}
+function _wireAdminRecover(){
+  const btn=document.getElementById("admRecoverNow");
+  if(btn&&!btn.dataset.wired){btn.dataset.wired="1";btn.onclick=()=>_admRecoverNow();}
+}
 
 function _wireAdminRunners(){
   const setup=document.getElementById("admRunnerSetup");
@@ -7361,7 +7495,17 @@ function renderAdminStats(ov) {
     chip("suspended", ov.suspended ?? 0, ov.suspended ? "warn" : "") +
     chip("apps live", ov.jobs_deployed ?? 0) +
     chip("on telegram", ov.telegram_linked ?? 0) +
-    chip("bot secrets", ov.bot_secrets_encrypted ? "encrypted" : "NOT ENCRYPTED", ov.bot_secrets_encrypted ? "" : "warn") +
+    // Bot variables are stored as plain JSON in the owner's own database, so
+    // this is a fact, not a warning. Two numbers are worth flagging: rows still
+    // in the old wrapped form (a startup migration rewrites them to 0), and rows
+    // this site could not read at all — those are restored from the runner's own
+    // copy at boot, so "being restored" is a state, not an error.
+    chip("bot secrets", ov.bot_secrets_unreadable_rows
+        ? `${ov.bot_secrets_unreadable_rows} row(s) being restored`
+        : (ov.bot_secrets_legacy_rows
+            ? `${ov.bot_secrets_legacy_rows} old row(s) to refresh`
+            : "plain text"),
+      (ov.bot_secrets_unreadable_rows || ov.bot_secrets_legacy_rows) ? "warn" : "") +
     chip("runner", ov.runner_isolation === "remote" ? "isolated service" : "embedded", ov.runner_isolation === "remote" ? "" : "warn") +
     chip("runner memory used", ov.mem_safe_mb != null
         ? `${Math.round(ov.mem_used_mb ?? 0)}MB used`
@@ -7467,8 +7611,12 @@ function renderAdminJobs(jobs) {
 const ADM_EXIT_REASON = {
   oom: "Stopped — it used more memory than it is allowed.",
   crash: "Crashed with a non-zero exit code — see the log below.",
+  crash_loop: "Stopped after repeated crashes to protect the runner; fix the log cause before restarting.",
   manual: "Stopped on request.",
+  limit: "Stopped to protect the runner because host memory was over its safe limit.",
+  isolation: "Stopped by the runner's per-job isolation guard; sibling bots were left running.",
   exit: "Finished on its own and exited cleanly.",
+  "workspace missing": "The runner could not find this app's saved workspace after recovery.",
 };
 
 function _admRow(label, value, cls) {
@@ -7569,10 +7717,14 @@ function renderAdminJobDetail(d) {
     _admRow("CPU", j.cpu_pct != null ? j.cpu_pct + "%" : "—"),
     _admRow("Uptime", j.uptime_s ? _fmtUptime(j.uptime_s) : "—"),
     _admRow("Restarts", j.restarts != null ? String(j.restarts) : "—"),
-    _admRow("Worker", j.worker),
     _admRow("Created", (j.created_at || "").slice(0, 16)),
   );
-  if (j.web_slug) t.appendChild(_admRow("Public URL", "/live/" + j.web_slug + "/"));
+  const runnerCell=document.createElement("span");runnerCell.textContent=j.worker||j.runner_url||"primary";
+  const healthUrl=j.runner_health_url||j.runner_url;
+  if(healthUrl){try{const u=new URL(healthUrl);if(u.protocol==="https:"||u.protocol==="http:"){const a=document.createElement("a");a.className="adm-link";a.href=u.href;a.target="_blank";a.rel="noopener noreferrer";a.textContent="Open runner health";runnerCell.append(document.createElement("br"),a);}}catch(_e){}}
+  t.appendChild(_admRow("Runner",runnerCell));
+  if (j.web_url) { const a=document.createElement("a");a.className="adm-link";a.href=j.web_url;a.target="_blank";a.rel="noopener noreferrer";a.textContent=j.web_url;t.appendChild(_admRow("Public URL",a)); }
+  else if (j.web_slug) t.appendChild(_admRow("Public URL", "The runner URL is private or this app is not listening yet."));
   if (j.telegram_bot_detected) {
     t.appendChild(_admRow("Telegram bot", j.telegram_bot_username ? `@${j.telegram_bot_username}` : "detected"));
     t.appendChild(_admRow("Telegram check", j.telegram_check_status || "unverified"));
@@ -7591,6 +7743,14 @@ function renderAdminJobDetail(d) {
   }
   if ((j.libs || []).length) t.appendChild(_admRow("Packages", j.libs.join(", ")));
   body.appendChild(t);
+
+  const revealBox=document.createElement("div");revealBox.className="adm-job-settings-reveal";
+  const revealHint=document.createElement("p");revealHint.className="adm-hint";revealHint.textContent="Saved source and secret values stay hidden unless you explicitly reveal them here.";revealBox.appendChild(revealHint);
+  const revealButton=document.createElement("button");revealButton.type="button";revealButton.className="btn-ghost sm";revealButton.textContent="Show & copy saved code, settings & secrets";
+  const revealField=document.createElement("textarea");revealField.id=`admAdminJobSettings${j.id}`;revealField.className="input-text adm-runner-secret-settings adm-admin-job-settings";revealField.readOnly=true;revealField.rows=7;revealField.hidden=true;revealField.setAttribute("aria-label","Saved source, settings and secrets — shown only after explicit reveal");
+  revealButton.disabled=!j.id||typeof window.revealAdminJobSettings!=="function";
+  revealButton.onclick=(event)=>window.revealAdminJobSettings&&window.revealAdminJobSettings(j.id,revealField,event.currentTarget);
+  revealBox.append(revealButton,revealField);body.appendChild(revealBox);
 
   body.appendChild(_admSubhead("Deployment versions", "healthy and failed candidates"));
   const versions=document.createElement("div");versions.className="adm-version-list";

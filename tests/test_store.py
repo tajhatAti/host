@@ -153,7 +153,7 @@ def test_install_requires_a_session_and_hands_over_the_whole_file():
     item = result.json()["item"]
     assert item["code"].strip().startswith("# requirements:")
     compile(item["code"], "installed.py", "exec")
-    assert 'os.getenv("BOT_TOKEN")' in item["code"]
+    assert "BOT_TOKEN" in item["code"] and ("os.getenv" in item["code"] or "os.environ" in item["code"])
     assert any(field["key"] == "ADMIN_CLAIM_CODE" for field in item["env_fields"])
     after = client.get("/api/store/complete-file-share").json()["install_count"]
     assert after == before + 1

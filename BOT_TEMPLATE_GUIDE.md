@@ -30,7 +30,7 @@ Add Bot is token-first and stays simple: paste the BotFather token â†’ verify â†
 
 ## Admin identity
 
-Products that need a private owner receive an encrypted generated `ADMIN_CLAIM_CODE`. The post-deploy **Go to bot** link opens with `?start=claim_<code>` and claims the first owner without asking for a numeric Telegram ID.
+Products that need a private owner receive a random, one-time `ADMIN_CLAIM_CODE`. The post-deploy **Go to bot** link opens with `?start=claim_<code>` and claims the first owner without asking for a numeric Telegram ID.
 
 ## Telegram limitations
 

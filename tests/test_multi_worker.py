@@ -381,4 +381,5 @@ lm = open(os.path.join(ROOT, "services/limits.py"), encoding="utf-8").read()
 check("the abuse limiter counts jobs on every worker", "fleet_jobs()" in lm)
 
 print(f"\ntest_multi_worker: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

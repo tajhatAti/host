@@ -87,9 +87,9 @@ def set_job_limit_override(user_id: int, limit) -> None:
         conn.close()
 
 
-# ── Broadcast — new, not on the website ─────────────────────────────────
-# Sending happens in pingbot.py (it already owns _send/rate limiting to
-# Telegram's API); this just hands back who to send to.
+# ── Broadcast — legacy, main-branch implementation ─────────────────────
+# Sending happens in pingbot.py (it owns the Telegram API call); this returns
+# the active, linked recipients. Kept unchanged while the health fix is merged.
 
 def all_linked_telegram_ids() -> list:
     conn = get_db_connection()
@@ -766,9 +766,6 @@ def admin_logs(job_id: int, lines: int = 40) -> dict:
     if not row:
         return {"ok": False, "error": "No such job."}
     return bot_ops.logs(row["user_id"], str(row["id"]), lines=lines)
-
-
-
 
 
 # ── Audit log — mirrors GET /admin/audit-log ────────────────────────────

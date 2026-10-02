@@ -32,7 +32,12 @@ log = logging.getLogger("pingbot")
 
 # ---- config -----------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-DEFAULT_TARGET = os.environ.get("PING_DEFAULT_TARGET", "https://ahadorg.onrender.com")
+# A bare /ping measures YOUR site. The default used to be one hardcoded foreign
+# host, so anyone who copied this sample pinged somebody else's server and got a
+# timeout that looked like their own bot was broken.
+DEFAULT_TARGET = (os.environ.get("PING_DEFAULT_TARGET", "").strip()
+                  or os.environ.get("SITE_BASE_URL", "").strip()
+                  or "https://api.telegram.org")
 REQUEST_TIMEOUT_S = float(os.environ.get("PING_TIMEOUT_S", "5"))
 USER_AGENT = "CodeNest-PingBot/1.0 (+https://codenest.dev)"
 

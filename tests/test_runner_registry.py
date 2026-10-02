@@ -1,4 +1,4 @@
-import os,sys,tempfile
+import json,os,sys,tempfile
 sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DB_PATH"]=tempfile.mktemp(suffix=".db")
 os.environ["DATA_DIR"]=tempfile.mkdtemp()
@@ -44,7 +44,7 @@ def test_admin_can_verify_add_drain_and_keep_secret_private(monkeypatch):
     data=client.get("/admin/runners",headers=headers()).json()
     assert data["runners"][0]["url"]==URL and SECRET not in repr(data) and "secret" not in data["runners"][0]
     c=database.get_db_connection();raw=c.execute("SELECT encrypted_secret FROM runner_nodes").fetchone()["encrypted_secret"];old_worker=c.execute("SELECT worker_url FROM jobs WHERE name='embedded-old'").fetchone()["worker_url"];c.close()
-    assert raw.startswith("enc:v1:") and SECRET not in raw and old_worker=="embedded"
+    assert json.loads(raw)["secret"]==SECRET and old_worker=="embedded"   # plain JSON at rest, still never returned by the API
     runner_client.invalidate_runner_registry()
     assert URL in runner_client.runner_pool()
 

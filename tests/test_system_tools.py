@@ -171,4 +171,5 @@ for tool in ("ffmpeg", "imagemagick", "git"):
 check("UI explains the no-apt policy", "cannot be installed per job" in HTML)
 
 print(f"\ntest_system_tools: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

@@ -13,7 +13,7 @@ This is a **Docker** web service (`runtime: docker` in `render.yaml`). Do **not*
 | Health check | `/health` |
 | Build Command | leave Render's Docker default (the image builds itself) |
 
-Set `DATABASE_URL`, `JOB_SECRETS_KEY`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard.
+Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. That is the whole list — bot secrets are stored as plain JSON in your own database; no additional secret-storage variable is required.
 
 The default `claude` branch of the old repo shipped a truncated `index.html` stub that never loaded `pro.js`/`miniapp.js`, so the boot overlay stayed on **“Securing your session…”** forever. This copy uses the full shell and hides that splash after 2.5s even if JS fails.
 
@@ -28,7 +28,7 @@ Supported analysis signals include aiogram, python-telegram-bot, pyTelegramBotAP
 
 The Add Bot flow includes 21 searchable, categorized starters rather than demo snippets: a master channel-referral/reward system, Livegram-style two-way support, simpler referral modes, self-claimed admin broadcasts, channel posting, channel join gates, group welcome/rules/warnings, order notifications, deep-link file sharing, inline menus, polls, reminders, SQLite notes, URL checks, and Python/Node foundations.
 
-Admin-capable templates do not ask users to discover a numeric Telegram ID. The wizard generates an encrypted one-time `ADMIN_CLAIM_CODE`, then puts it into the **Go to bot** deep link after deployment. Pressing Start through that link makes the bot store the sender's real Telegram user ID and refuse future claims—no ID or command needs to be typed. The Master Referral template follows the requested first-opener rule instead.
+Admin-capable templates do not ask users to discover a numeric Telegram ID. The wizard generates a random, one-time `ADMIN_CLAIM_CODE`, then puts it into the **Go to bot** deep link after deployment. Pressing Start through that link makes the bot store the sender's real Telegram user ID and refuse future claims—no ID or command needs to be typed. The Master Referral template follows the requested first-opener rule instead.
 
 ## Bot Store
 
@@ -47,13 +47,16 @@ Full details in `STORE.md`.
 - Telegram Mini App sign-in verification
 - Code-first bot hosting wizard with Python/Node starter templates
 - Bot Store: curated + community listings, each one raw Python file
-- Encrypted bot environment secrets at rest
+- Bot environment variables stored in your own database, masked in every API response and log line
 - Duplicate-token deployment prevention
 - Polling/webhook diagnostics and duplicate-poller detection
 - Run/stop/restart, live logs, CPU/memory and uptime
 - Immutable deployment versions, failed-candidate isolation, and one-click rollback
 - Per-job URLs and direct `t.me` links
 - Bot workspace snapshots and restore
+- 👑 Queen accounts: no memory ceiling, larger zip bundles, and `/projects` one-tap deploys
+- GitHub import with branch support — `/import owner/repo/tree/<branch>` clones that branch
+- Bot variables this site cannot read are restored from the runner's own copy at startup
 - Admin bot inventory, usage history, abuse controls, and audit log
 - SQLite locally; PostgreSQL/Supabase in production
 - Embedded runner for development and remote runner pool support
@@ -62,7 +65,7 @@ Full details in `STORE.md`.
 
 - Raw BotFather tokens are never returned in bot/admin metadata.
 - Secret-looking environment values are write-only in owner APIs.
-- `JOB_SECRETS_KEY` encrypts bot environments at rest with Fernet.
+- Bot environments (`BOT_TOKEN`, API keys) are stored as plain JSON in your own database and masked in every API response and log line. When upgrading an older installation, keep its existing `JOB_SECRETS_KEY` for one startup so legacy rows can be rewritten; remove it after `/health` reports zero legacy rows.
 - A keyed token fingerprint prevents the same Telegram token from being deployed twice on CodeNest.
 - Verification proofs are authenticated, expire after 15 minutes, and are consumed after creation.
 - Admin routes are 404-stealth for non-admin callers.
@@ -102,13 +105,11 @@ RUNNER_MODE=embedded \
 .venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-For encrypted local bot secrets, also set a stable key:
+No additional secret-storage variable is needed for a new installation. If you are upgrading and already have `JOB_SECRETS_KEY` set, keep its current value for **one** boot so startup can migrate old rows to plain text; then remove it:
 
 ```bash
-export JOB_SECRETS_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+curl -s https://your-service/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["bot_secrets_legacy_rows"])'   # 0 = done
 ```
-
-Do not rotate or lose this key while encrypted bot environments exist.
 
 ## Adding runner capacity
 
@@ -120,7 +121,7 @@ Admins can add runners from **Admin → Runners → Add runner** without editing
 4. Deploy the Render service.
 5. Paste its public URL and the same secret into CodeNest; **Test & add runner** verifies health and authentication before enabling placement.
 
-Runner credentials are encrypted with `JOB_SECRETS_KEY` and never returned by the API. **Drain** removes a runner from new-job placement while keeping existing assigned jobs addressable. Deletion is blocked until no deployed jobs remain. When the first remote runner is added, already-running embedded jobs are explicitly pinned to the embedded engine while new bots use the remote pool. Environment-configured runners continue to work beside database-managed runners.
+Runner credentials are stored in your database and never returned by the API. **Drain** removes a runner from new-job placement while keeping existing assigned jobs addressable. Deletion is blocked until no deployed jobs remain. When the first remote runner is added, already-running embedded jobs are explicitly pinned to the embedded engine while new bots use the remote pool. Environment-configured runners continue to work beside database-managed runners.
 
 ## Production topology
 
@@ -142,7 +143,7 @@ Required/important environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Durable PostgreSQL database |
-| `JOB_SECRETS_KEY` | Encrypt hosted-bot environment secrets |
+| `JOB_SECRETS_KEY` | Only to unlock `enc:v1:` rows from an older version; then delete |
 | `ADMIN_EMAILS` | Comma-separated platform owners |
 | `RUNNER_SERVICE_URL` | Remote execution service |
 | `RUNNER_SERVICE_SECRET` | Shared main-site/runner credential |
@@ -152,12 +153,16 @@ Required/important environment variables:
 | `BREVO_API_KEY` | Email OTP delivery |
 | `SENDER_EMAIL` | Verified email sender |
 | `CORS_ALLOWED_ORIGINS` | Optional comma-separated trusted external origins |
+| `QUEEN_PROJECTS_REPO` / `QUEEN_PROJECTS_BRANCH` | Repo and branch `/projects` offers 👑 accounts |
+| `QUEEN_PROJECTS_NAME` | App name a `/projects` deploy uses (default: the repo name) |
+| `ZIP_MAX_MB` / `QUEEN_ZIP_MAX_MB` | Unzipped bundle ceiling, normal and 👑 accounts |
+| `PING_DEFAULT_TARGET` | What a bare `/ping` measures (default: this site's own URL) |
 
-`render.yaml` generates `JOB_SECRETS_KEY`; configure the remaining secret values in Render.
+`render.yaml` needs no additional secret-storage variable; configure the remaining secret values in Render.
 
 ## Safe deployments and rollback
 
-Every successful creation/update is stored as an immutable source revision. An update remains a `building` candidate until the runner accepts it; a rejected candidate is marked `failed` and never replaces the last healthy source. The Versions tab lists status/error history and can restore any healthy revision. Rollback reuses the current encrypted environment secrets and preserves the bot workspace.
+Every successful creation/update is stored as an immutable source revision. An update remains a `building` candidate until the runner accepts it; a rejected candidate is marked `failed` and never replaces the last healthy source. The Versions tab lists status/error history and can restore any healthy revision. Rollback reuses the stored environment secrets and preserves the bot workspace.
 
 ## Bot health
 
@@ -171,9 +176,78 @@ The owner bot card separates:
 
 “Process running” is not presented as proof that every command handler works.
 
+## 👑 Queen accounts
+
+`/queen <username>` (admin-only, in the control bot) sets `users.mem_unlimited`.
+What that flag actually changes:
+
+| | normal account | 👑 account |
+|---|---|---|
+| Per-job memory ceiling | runner's `MAX_MEM_MB` | none (`mem_limit_mb=0`, the runner skips the RLIMIT) |
+| Zip bundle | `ZIP_MAX_MB` (default 5 MB unzipped, `ZIP_MAX_FILES` files) | `QUEEN_ZIP_MAX_MB` / `QUEEN_ZIP_MAX_FILES` (default 60 MB, 5000 files) |
+| `.zip` upload in chat | needs `/admin allowzip` | allowed |
+| `/projects` | explains what it is | lists the project repo and deploys it on one tap |
+| `/start` and `/help` in chat | the standard screen | their own screen, leading with the one-tap deploy |
+| Keyboard under `/start` | `🚀 Open CodeNest` | `👑 Queen panel` · `📦 Projects` · `🚀 Open CodeNest` |
+| `/limits` | what the account may do, and how to ask for more | the 👑 Queen panel: live slots, allowances, and the buttons |
+| Running-app limit | `MAX_JOBS_PER_USER` | the same, unless `/admin limit` raises it |
+
+The runner still enforces its own hard ceiling (`ZIP_BUNDLE_CEILING_BYTES`,
+default 200 MB) no matter what a request asks for, and the shared-box admission
+check still applies to memory: 👑 lifts the *per-job* cap, not the machine's
+limits.
+
+### The 👑 interface in Telegram
+
+A queen account does not get everybody else's help with a paragraph appended —
+it gets a different screen. `/start` and `/help` open with *Run a project in one
+tap* (the steps, the branch, where the token goes), then the privileges, then
+the commands everybody shares. Under it sit two buttons a normal account never
+sees: **👑 Queen panel** and **📦 Projects**.
+
+The panel repeats the account's *actual* allowances — running slots, memory,
+zip size, GitHub access — read from `bot_ops.account_privileges()`, the same
+single call the website dashboard uses, so chat cannot quote a limit the site
+does not enforce. `/limits` shows it, and so does `/queen` typed by an account
+that already holds the flag (for everyone else `/queen` stays silent, exactly
+like `/admin`). Every one of those buttons re-checks the flag when pressed:
+`callback_data` is attacker-supplied, so a button existing proves nothing.
+
+`/projects` uses only the optional `QUEEN_PROJECTS_REPO` and
+`QUEEN_PROJECTS_BRANCH` settings; both are empty by default. When configured, it
+loads the repo's real contents from the GitHub API (cached for 15 minutes),
+names the file the runner will start, and deploys through the same `/import`
+path as everything else — so a queen deploy obeys the same caps and slug rules.
+
+Telegram can only hand a bot a 20 MB file, so a heavier bundle goes through the
+website; the dashboard shows the 👑 badge and the limit that applies.
+
+A repo import names no language: the runner clones first and takes the language
+from the entry file it finds (`main.py`, `index.js`, `bot.lua`, a static
+`index.html` served over HTTP, and the rest of `_ENTRY_CANDIDATES`), installing
+whatever manifest the checkout declares. That is why `/import` works for a
+project in any supported language without the sender having to know what it is
+written in — an empty language on a repo job is expected, not an error.
+
+## Bot variables that go missing
+
+If the site ever cannot read a bot's stored variables, the bot is **not** lost:
+the runner keeps its own copy in the job's `job.json` manifest, and
+`services/env_rescue.py` reads it back and repairs the database row. That runs
+
+- at startup, for every unreadable row (`bot_secrets_rescued_at_boot` in `/health`);
+- on the recovery interval, before bots are recreated from the database;
+- on any start, restart, or Env edit — an edit on an unreadable row used to read
+  it as empty and then save that, silently deleting every other variable.
+
+`/health` and the admin overview report `bot_secrets_unreadable_rows`: after a
+boot with the runner reachable it should be 0. When a variable is genuinely gone
+from both sides, the owner is told where to put it back (the app's Env tab)
+instead of being shown a storage error.
+
 ## Persistence
 
-Bot source and encrypted environment configuration live in the main database. Runtime workspaces live on the runner. A snapshot service stores bot-generated SQLite/JSON/data files for cold-start recovery. For larger production workloads, move snapshot payloads from PostgreSQL to object storage.
+Bot source and bot environment variables live in the main database (plain JSON, masked on the wire). Runtime workspaces live on the runner. A snapshot service stores bot-generated SQLite/JSON/data files for cold-start recovery. For larger production workloads, move snapshot payloads from PostgreSQL to object storage.
 
 ## Tests
 

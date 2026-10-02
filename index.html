@@ -365,7 +365,7 @@
 <footer class="foot">
   <div class="foot-inner">
     <div class="brand"><div class="brand-mark sm"><object type="image/svg+xml" data="/static/codenest-mark.svg?v=20260724m" aria-label="CodeNest"></object></div><span class="brand-text">CodeNest</span></div>
-    <p>© 2026 CodeNest · <a href="/terms">Terms</a> · <a href="/report-abuse">Report abuse</a></p>
+    <p>© 2026 CodeNest · <a href="/guides">Guides</a> · <a href="/terms">Terms</a> · <a href="/report-abuse">Report abuse</a></p>
   </div>
 </footer>
 
@@ -1062,6 +1062,10 @@
           <div class="rs-side-head">
             <span class="rs-side-title">Bots</span>
             <span class="rs-count" id="txJobCount">0</span>
+            <!-- 👑 shown only for an account the owner granted queen access to
+                 (users.mem_unlimited). Hidden by default: a crown that is not
+                 yours should never flash on screen. -->
+            <span class="rs-crown" id="txQueenBadge" hidden aria-label="Queen access">👑</span>
             <button type="button" class="rs-ghost-btn rs-sq rs-side-new" id="btnNew" title="Add Bot (Ctrl+N)" aria-label="Add Bot">
               <svg viewBox="0 0 16 16" class="rs-ic-sm" fill="currentColor" aria-hidden="true"><path d="M7.25 2.75a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5Z"/></svg>
             </button>
@@ -1149,6 +1153,11 @@
             <div class="rs-meta" hidden aria-hidden="true">
               <input class="rs-inp" id="jobName" type="text" maxlength="60" autocomplete="off" aria-label="Bot name">
             </div>
+            <aside class="rs-bot-callout" id="rsBotCallout" hidden aria-live="polite">
+              <span class="rs-bot-logo" aria-hidden="true">➤</span>
+              <span class="rs-bot-copy"><b id="rsBotName">Telegram bot</b><span id="rsBotState">Checking status…</span></span>
+              <a class="rs-bot-go" id="rsBotGo" target="_blank" rel="noopener noreferrer" hidden>Go to your bot</a>
+            </aside>
             <section class="rs-bot-wizard" id="rsTgSetup" aria-label="Add Telegram bot">
               <div class="rs-wizard-steps" aria-label="Setup progress">
                 <span class="is-active" data-rs-step="connect"><b>1</b> Connect bot</span>
@@ -1983,7 +1992,8 @@
 <!-- BEFORE pro.js: it sets window.__inTelegram and window.__tgAutoLogin,
      which pro.js's boot path checks to decide whether to sign in first. -->
 <script src="/static/miniapp.js?v=20260729a"></script>
-<script src="/static/pro.js?v=20260910d"></script>
+<script src="/static/pro.js?v=20261002-runner"></script>
+<script src="/static/admin_runner.js?v=20261002a"></script>
 <script src="/static/terminal.js?v=20260724m"></script>
 <script>
 /* Live activity — EasySell-style ticker/toasts, CodeNest copy (deploys, not money). */

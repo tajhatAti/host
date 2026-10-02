@@ -71,6 +71,15 @@ PG_SSLMODE = os.getenv("PG_SSLMODE", "prefer")
 # '@', spaces) that were not percent-encoded, so the URL parser glues password
 # fragments onto the hostname. Catch that HERE, at startup, and fail with an
 # actionable message instead of a 50-line stack trace.
+
+def _safe_ident(name: str) -> str:
+    """SQL identifier allowlist — letters, digits, underscore only."""
+    name = (name or "").strip()
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return name
+
+
 def _validate_database_url(url: str) -> None:
     from urllib.parse import urlparse
 
@@ -168,11 +177,23 @@ def _translate_sql(sql: str) -> str:
     """Translate a qmark-style (? placeholders) statement to the active dialect.
 
     PostgreSQL's psycopg2 driver uses %s placeholders. Literal '%' is not used
-    anywhere in the app's SQL (no LIKE with %), so a straight swap is safe.
+    anywhere in the app's SQL (no LIKE with %), so a straight swap is safe —
+    EXCEPT inside `--` comments, where a plain English "?" ("is there a newer
+    version?") used to become `%s` and then crash boot with
+    `IndexError: tuple index out of range` the moment init_db ran CREATE TABLE
+    jobs against Postgres. Comments keep their text; only real bind slots change.
     """
     if DIALECT != "postgres":
         return sql
-    sql = sql.replace("?", "%s")
+    # Protect `-- …` comment tails so a rhetorical "?" cannot become a bind slot.
+    parts = []
+    for line in sql.splitlines(keepends=True):
+        if "--" in line:
+            code, dash, comment = line.partition("--")
+            parts.append(code.replace("?", "%s") + dash + comment)
+        else:
+            parts.append(line.replace("?", "%s"))
+    sql = "".join(parts)
     # SQLite's upsert spelling. The module docstring has always claimed this
     # was translated; it never was, and Postgres answers
     #   syntax error at or near "OR"
@@ -206,14 +227,28 @@ def _translate_sql(sql: str) -> str:
 
 
 def _translate_ddl(ddl: str) -> str:
-    """Translate SQLite-specific CREATE TABLE syntax to PostgreSQL."""
+    """Translate SQLite-specific CREATE TABLE syntax to PostgreSQL.
+
+    Also neutralises `?` inside `--` comments. DDL goes through the same
+    execute() path as queries, so a comment question mark would otherwise be
+    rewritten to `%s` and crash init_db on Postgres with
+    `IndexError: tuple index out of range` — that is what took the live site
+    down after the repo_commit migration shipped.
+    """
     if DIALECT != "postgres":
         return ddl
     # Case-insensitive uniqueness mirrors SQLite's "COLLATE NOCASE".
     ddl = ddl.replace("TEXT NOT NULL UNIQUE COLLATE NOCASE", "CITEXT NOT NULL UNIQUE")
     # Auto-increment integer PK -> SERIAL.
     ddl = ddl.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-    return ddl
+    fixed = []
+    for line in ddl.splitlines(keepends=True):
+        if "--" in line:
+            code, dash, comment = line.partition("--")
+            fixed.append(code + dash + comment.replace("?", "."))
+        else:
+            fixed.append(line)
+    return "".join(fixed)
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +636,14 @@ _SCHEMA_TABLES = [
         telegram_framework TEXT,
         telegram_update_mode TEXT,
         telegram_token_source TEXT,
+        -- Where a deployed app came from, so "is there a newer version" is a
+        -- comparison instead of an archaeology project. repo_commit is the SHA
+        -- the runner actually cloned; repo_entry is the file inside the repo
+        -- that runs, because one repo can hold more than one runnable thing.
+        repo_url TEXT,
+        repo_entry TEXT,
+        repo_commit TEXT,
+        auto_deploy INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -624,6 +667,20 @@ _SCHEMA_TABLES = [
         admin_id INTEGER NOT NULL,
         action TEXT NOT NULL,
         target TEXT,
+        details TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    -- Operational runner/job actions, separate from user analytics and deploy
+    -- metrics. Stores only redacted reasons/identifiers, never source or env.
+    CREATE TABLE IF NOT EXISTS runner_action_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        runner_url TEXT NOT NULL,
+        job_id INTEGER,
+        job_name TEXT,
+        actor TEXT NOT NULL DEFAULT 'system',
+        action TEXT NOT NULL,
         details TEXT,
         created_at TEXT NOT NULL
     )
@@ -739,8 +796,10 @@ _SCHEMA_TABLES = [
     )
     """,
     """
-    -- Dynamically managed runner services. Secrets are Fernet-encrypted; the
-    -- admin API never returns them after registration.
+    -- Dynamically managed runner services. The secret is stored as plain JSON
+    -- (see services/secrets_store.py); the admin API never returns it after
+    -- registration. The column keeps its old name so no schema migration is
+    -- needed for a change in how the value is encoded.
     CREATE TABLE IF NOT EXISTS runner_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         label TEXT NOT NULL,
@@ -755,7 +814,7 @@ _SCHEMA_TABLES = [
     """,
     """
     -- Immutable source revisions. Environment secrets are deliberately not
-    -- duplicated here; rollback reuses the job's current encrypted env.
+    -- duplicated here; rollback reuses the job's current stored env.
     CREATE TABLE IF NOT EXISTS bot_revisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER NOT NULL,
@@ -786,6 +845,17 @@ _SCHEMA_TABLES = [
         expires_at TEXT NOT NULL,
         consumed_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    -- Durable webhook delivery queue. A payload is held only while its handler
+    -- is pending; it is cleared on completion, leaving the ID/timestamps for
+    -- retry de-duplication without retaining message text.
+    CREATE TABLE IF NOT EXISTS telegram_webhook_updates (
+        update_id BIGINT PRIMARY KEY,
+        claimed_at BIGINT NOT NULL,
+        completed_at BIGINT,
+        payload TEXT
     )
     """,
     """
@@ -917,7 +987,7 @@ def _column_exists(conn: _Connection, table: str, column: str) -> bool:
             (table, column),
         ).fetchone()
         return bool(row)
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    rows = conn.execute(f"PRAGMA table_info({_safe_ident(table)})").fetchall()
     return any(r["name"] == column for r in rows)
 
 
@@ -932,6 +1002,15 @@ def init_db():
         for ddl in _SCHEMA_TABLES:
             conn.execute(_translate_ddl(ddl))
 
+        # Existing installs already have the dedupe table; add the temporary
+        # payload column so webhook requests can be acknowledged only after the
+        # update is durably queued. Completed legacy rows carry no useful body.
+        if not _column_exists(conn, "telegram_webhook_updates", "payload"):
+            conn.execute("ALTER TABLE telegram_webhook_updates ADD COLUMN payload TEXT")
+        conn.execute("UPDATE telegram_webhook_updates SET payload=NULL "
+                     "WHERE completed_at IS NOT NULL AND payload IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_webhook_pending "
+                     "ON telegram_webhook_updates (completed_at, claimed_at)")
 
         # ------------------------------------------------------------------
         # MIGRATION 001 (developer-first pivot): the vault product is gone.
@@ -947,7 +1026,7 @@ def init_db():
             "user_servers", "user_recovery", "api_keys", "notifications",
         )
         for _t in _DROPPED_VAULT_TABLES:
-            conn.execute(f"DROP TABLE IF EXISTS {_t}")
+            conn.execute(f"DROP TABLE IF EXISTS {_safe_ident(_t)}")
 
         # Legacy-DB migration: ensure the `role` column exists on users.
         if not _column_exists(conn, "users", "role"):
@@ -1041,7 +1120,20 @@ def init_db():
             ("telegram_token_source", "TEXT"),
         ):
             if not _column_exists(conn, "jobs", _col):
-                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_ddl}")
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_safe_ident(_col)} {_ddl}")
+
+        # GitHub-backed apps: what they were built from, and whether they follow
+        # the branch by themselves. Existing rows stay NULL/0 — a job with no
+        # repo_url is simply not a repo job, which is what every row was before
+        # this existed, so the migration cannot change how an old app behaves.
+        for _col, _ddl in (
+            ("repo_url", "TEXT"),
+            ("repo_entry", "TEXT"),
+            ("repo_commit", "TEXT"),
+            ("auto_deploy", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if not _column_exists(conn, "jobs", _col):
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_safe_ident(_col)} {_ddl}")
 
         # Same story for the sessions table.
         if not _column_exists(conn, "sessions", "fingerprint"):
@@ -1066,6 +1158,10 @@ def init_db():
                      "ON bot_revisions (job_id, version)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_nodes_enabled "
                      "ON runner_nodes (enabled)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_action_events_runner "
+                     "ON runner_action_events (runner_url, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_action_events_job "
+                     "ON runner_action_events (job_id, created_at)")
 
         # Bot Store lookups: the catalog is filtered by status + sorted by
         # installs, and every detail/library call resolves a listing by slug.

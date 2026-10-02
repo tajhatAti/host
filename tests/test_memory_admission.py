@@ -236,4 +236,5 @@ check("admin UI still shows the job count alongside", "job${jobs === 1" in js)
 check("the old slot wording is gone", "slots used" not in js)
 
 print(f"\ntest_memory_admission: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

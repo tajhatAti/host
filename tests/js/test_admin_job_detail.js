@@ -70,6 +70,8 @@ const src = [
   'function closeModal(id){const m=document.getElementById(id); if(m)m.classList.add("hidden");}',
   REASONS[0],
   extract('_admRow'),
+  extract('_admSubhead'),
+  extract('_admEmpty'),
   extract('renderAdminJobs'),
   extract('renderAdminJobDetail'),
   'return {renderAdminJobs, renderAdminJobDetail, getOpened:()=>opened};',
@@ -180,6 +182,9 @@ ok('window was never touched', dom.window.__pwned === undefined);
 
 console.log('[6] detail: what must never appear');
 ok('env KEYS are listed', /BOT_TOKEN/.test(all));
+ok('saved code/secrets need an explicit reveal button',
+   !!body.querySelector('.adm-job-settings-reveal button') &&
+   body.querySelector('.adm-admin-job-settings').hidden);
 ok('the render only ever reads env_keys, never env',
    !/j\.env\b(?!_keys)/.test(extract('renderAdminJobDetail')));
 ok('the route never selects the code column',
@@ -204,27 +209,16 @@ ok('the empty log says why it is empty',
    /the worker did not answer/.test(d.querySelector('.adm-jd-log').textContent));
 
 console.log('[8] every reason the runner can emit has a sentence');
-// I wrote this map from memory the first time and invented two tokens the
-// runner never emits ("killed", "error"), which meant a real crash would have
-// printed the raw token. Read the tokens out of runner/app.py instead.
-const RUNNER = fs.readFileSync(path.join(ROOT, 'runner/app.py'), 'utf8');
-// Balance the parens by hand: j.get("stop_requested") closes one mid-way, so
-// a lazy /\)\n/ stops two tokens early and the check silently under-reads.
-const _a = RUNNER.indexOf('j["last_exit_reason"] = (');
-let _i = RUNNER.indexOf('(', _a), _dep = 0, _end = _i;
-for (let k = _i; k < RUNNER.length; k++) {
-  if (RUNNER[k] === '(') _dep++;
-  else if (RUNNER[k] === ')') { _dep--; if (!_dep) { _end = k; break; } }
-}
-const assign = _a < 0 ? null : [null, RUNNER.slice(_i, _end)];
-ok('the assignment is found in the runner', !!assign);
-const tokens = [...assign[1].matchAll(/"([a-z]+)"/g)].map(m => m[1]);
-ok('the runner emits the tokens we think it does',
-   tokens.length === 4, tokens.join(','));
-const mapped = [...REASONS[0].matchAll(/^\s{2}([a-z]+):/gm)].map(m => m[1]);
+// Read the runner-admin diagnostic vocabulary, not a hand-copied list: when a
+// new exit reason is introduced, the owner UI must explain it in plain words.
+const RUNNER_ADMIN = fs.readFileSync(path.join(ROOT, 'services/runner_admin.py'), 'utf8');
+const EXIT_BLOCK = /_EXIT_WORDS\s*=\s*\{([\s\S]*?)\n\}/.exec(RUNNER_ADMIN);
+ok('runner diagnostic reason table is found', !!EXIT_BLOCK);
+const tokens = [...EXIT_BLOCK[1].matchAll(/^\s*(?:"([^"]+)"|([a-z_]+))\s*:/gm)].map(m => m[1] || m[2]);
+const mapped = [...REASONS[0].matchAll(/^\s*(?:"([^"]+)"|([a-z_]+))\s*:/gm)].map(m => m[1] || m[2]);
 tokens.forEach(t => ok(`"${t}" has a human sentence`, mapped.includes(t), mapped.join(',')));
-ok('and no sentence is written for a token that cannot happen',
-   mapped.every(m => tokens.includes(m)), mapped.filter(m => !tokens.includes(m)).join(','));
+ok('the admin detail explains every known runner reason',
+   tokens.every(t => mapped.includes(t)), tokens.filter(t => !mapped.includes(t)).join(','));
 
 console.log('[9] the route itself');
 ok('a per-job route exists', /@router\.get\("\/admin\/jobs\/\{job_id\}"\)/.test(PYADMIN));

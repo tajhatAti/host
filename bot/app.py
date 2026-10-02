@@ -53,8 +53,17 @@ TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 POLL_TIMEOUT_S = 40          # long-poll wait per request (Telegram max ~50)
 ERROR_BACKOFF_S = 5          # wait before retrying after a network hiccup
 
-# Ping feature config (server-side, excludes Telegram API lag)
-PING_DEFAULT_TARGET = os.getenv("PING_DEFAULT_TARGET", "https://ahadorg.onrender.com").strip()
+# Ping feature config (server-side, excludes Telegram API lag).
+# A bare /ping measures THIS deployment. The default used to be one hardcoded
+# foreign host, so on every other install the command timed out and printed a
+# raw exception naming somebody else's server — which reads like a crash. Own
+# URL first, then the explicit override, then the one service every install here
+# actually depends on.
+PING_DEFAULT_TARGET = (os.getenv("PING_DEFAULT_TARGET", "").strip()
+                       or os.getenv("SITE_BASE_URL", "").strip()
+                       or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+                       or os.getenv("PUBLIC_BASE_URL", "").strip()
+                       or "https://api.telegram.org")
 PING_TIMEOUT_S = float(os.getenv("PING_TIMEOUT_S", "8"))
 PING_MAX_REDIRECTS = 3
 PING_UA = "CodeNest-TelegramBot/1.0 (+https://codenest.dev)"
@@ -89,7 +98,10 @@ def _ip_blocked(ip_str: str) -> bool:
 def _dns_safe(host: str) -> tuple[bool, str]:
     """Resolve host; return (ok, first_ip_or_error). Fails if any returned IP is internal."""
     try:
-        infos = socket.getaddrinfo(host, None, socket.SOCK_STREAM)
+        # Family/type left to the resolver: pinning SOCK_STREAM with no family
+        # raises "ai_family not supported" on some systems, which would report
+        # every domain as a DNS failure.
+        infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
         return False, f"DNS failed: {e.strerror or e}"
     for _f, _t, _p, _c, sa in infos:

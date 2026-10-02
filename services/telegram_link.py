@@ -206,8 +206,12 @@ def user_for_chat(telegram_id: int) -> dict:
         return None
     conn = get_db_connection()
     try:
+        # is_queen is users.mem_unlimited under the name the bot uses: every
+        # command handler already has this dict in hand, so the 👑 interface and
+        # the 👑 privileges cost one column here instead of a query per command.
         row = conn.execute(
-            "SELECT id, username, email, is_suspended, is_admin, can_upload_zip FROM users "
+            "SELECT id, username, email, is_suspended, is_admin, can_upload_zip, "
+            "mem_unlimited AS is_queen FROM users "
             "WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
     finally:
@@ -321,11 +325,14 @@ def set_unlimited_permission(user_id: int, value: bool) -> None:
 
 
 def list_admin_overview(limit: int = 30) -> list:
-    """Recent users with their admin/zip flags, newest first — for /admin users."""
+    """Recent users with their admin/zip/queen flags, newest first — for
+    /admin users. mem_unlimited is selected here because the panel marks a
+    👑 next to the name; without it the list could not show the flag at all."""
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended, "
+            "mem_unlimited "
             "FROM users ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     finally:
@@ -370,7 +377,8 @@ def get_user_by_id(user_id: int) -> dict:
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended "
+            "SELECT id, username, telegram_id, is_admin, can_upload_zip, is_suspended, "
+            "mem_unlimited "
             "FROM users WHERE id = ?", (user_id,)
         ).fetchone()
     finally:

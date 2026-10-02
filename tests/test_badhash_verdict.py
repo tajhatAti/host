@@ -224,4 +224,5 @@ check("the link is styled as a button (it is an <a>)",
 
 
 print(f"\ntest_badhash_verdict: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

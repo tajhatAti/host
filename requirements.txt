@@ -18,3 +18,4 @@ psycopg2-binary
 # bot id and not the token. Absent, the diagnosis degrades to "unavailable"
 # and nothing else changes.
 cryptography
+Pillow>=10.0.0

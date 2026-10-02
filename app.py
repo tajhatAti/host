@@ -8,6 +8,7 @@ import hashlib
 import os
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from services import secrets_store, runner_client
+from services import secrets_store, runner_client, env_rescue
 from database import DIALECT, init_db  # noqa: F401  (init_db already ran via routes.deps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -63,16 +64,50 @@ async def _self_ping_loop():
         delay = random.uniform(420, 480)
         await asyncio.sleep(delay)
 
+def _env_rescue_boot(env_rescue):
+    """Restore bot variables this site cannot read, from the runner's own copy.
+
+    Runs off the startup path because it is one HTTP call per broken row. A bot
+    whose row is unreadable cannot be started at all, so this has to happen
+    before the recovery pass gets to it — and it is the difference between
+    "those bots came back by themselves" and "those bots stayed dark until
+    someone re-typed their tokens".
+    """
+    try:
+        report = env_rescue.rescue_unreadable_rows()
+        if report.get("unreadable"):
+            logger.error("Env rescue at boot: %d row(s) unreadable, %d restored "
+                         "from the runner, %d still missing (%s)",
+                         report["unreadable"], report["rescued"],
+                         report["unavailable"], ", ".join(report["names"][:10]) or "-")
+    except Exception as exc:
+        logger.error("Env rescue sweep failed: %s", exc)
+
+
 @app.on_event("startup")
 async def startup_event():
-    # Encrypt any pre-existing plaintext bot environments before serving user
-    # traffic. Local SQLite remains zero-config; production health reports a
-    # missing key explicitly.
+    # Rewrite any pre-change `enc:v1:` env blobs as plain JSON BEFORE serving
+    # traffic (and before bot recovery below reads them). After one successful
+    # boot there is no ciphertext left, so a lost or rotated JOB_SECRETS_KEY can
+    # never again be the reason a restarted bot comes back without its token.
     try:
         from services import secrets_store
-        secrets_store.migrate_job_envs()
+        result = secrets_store.migrate_job_envs()
+        if result.get("unreadable"):
+            logger.error("%d env record(s) are unreadable — those bots need their "
+                         "secrets re-entered", result["unreadable"])
     except Exception as exc:
-        logger.error("Bot secret migration failed: %s", exc)
+        logger.error("Secret storage migration failed: %s", exc)
+    # Rows the migration could not read are not necessarily lost: the runner
+    # keeps its own copy of each job's env in the job's manifest, so read those
+    # back and repair the database. Runs in a thread because it is one HTTP call
+    # per broken row and startup must not wait on the runner being awake.
+    try:
+        from services import env_rescue
+        threading.Thread(target=_env_rescue_boot, args=(env_rescue,),
+                         name="env-rescue", daemon=True).start()
+    except Exception as exc:
+        logger.error("Env rescue sweep failed to start: %s", exc)
     try:
         from services import retention
         retention.cleanup()
@@ -85,6 +120,11 @@ async def startup_event():
     try:
         from services import job_recovery
         asyncio.create_task(job_recovery.recover_background())
+        # …and then KEEP doing it. The pass above only covers a restart of THIS
+        # service; when the RUNNER redeploys or wakes on its own, nothing else
+        # notices that every 24/7 bot just vanished. The reconciler re-checks on
+        # an interval, so a runner restart repairs itself with nobody involved.
+        job_recovery.start_reconciler()
     except Exception as exc:
         logger.warning("Bot recovery scheduler failed: %s", exc)
     # Telegram server-alive bot — starts automatically if TELEGRAM_PING_BOT_TOKEN is set
@@ -159,6 +199,70 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Fingerprint"],
 )
+
+
+@app.get("/guides", include_in_schema=False)
+def guides_page():
+    """Public how-to cartoons — same art the Telegram /guide command sends."""
+    from fastapi.responses import HTMLResponse
+    from pathlib import Path as _P
+    gdir = _P(__file__).resolve().parent / "static" / "guides"
+    cards = []
+    catalog = [
+        ("guide_start.png", "Start here", "Three taps from zero to a running bot", "/guide start"),
+        ("guide_code.png", "/code", "Create an app from chat", "/guide code"),
+        ("guide_update.png", "/update", "Replace code, keep the name", "/guide update"),
+        ("guide_import.png", "/import", "Public GitHub → live app", "/guide import"),
+        ("guide_apps.png", "/apps", "Your deployed apps", "/guide apps"),
+        ("guide_logs.png", "/logs", "See what the app printed", "/guide logs"),
+        ("guide_restart.png", "/restart", "Wake a stopped app", "/guide restart"),
+        ("guide_stop.png", "/stop", "Pause and free a slot", "/guide stop"),
+        ("guide_status.png", "/status", "Health of one app or all", "/guide status"),
+        ("guide_env.png", "/env", "Variables like BOT_TOKEN", "/guide env"),
+        ("guide_token.png", "BOT_TOKEN tips", "Env tab or inside the code", "/guide token"),
+        ("guide_id.png", "/id", "Copy-friendly numbers", "/id"),
+        ("guide_backup.png", "/backup", "Snapshot data files", "/guide backup"),
+        ("guide_history.png", "/history", "Past deploys", "/guide history"),
+        ("guide_projects.png", "/projects", "Repo apps in one place", "/guide projects"),
+        ("guide_link.png", "/link", "Connect this chat", "/guide link"),
+        ("guide_source.png", "/source", "Download current code", "/guide source"),
+        ("guide_delete.png", "/delete", "Remove an app", "/guide delete"),
+        ("guide_rename.png", "/rename", "Change the label", "/guide rename"),
+        ("guide_latest.png", "/latest", "Pull newest commit", "/guide latest"),
+    ]
+    for fn, title, sub, cmd in catalog:
+        if (gdir / fn).is_file():
+            cards.append(
+                f'<article class="g-card"><img src="/static/guides/{fn}" alt="{title}" loading="lazy"/>'
+                f'<h2>{title}</h2><p>{sub}</p>'
+                f'<code>{cmd}</code></article>'
+            )
+    body = "".join(cards) or "<p>Guides are being prepared.</p>"
+    html = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CodeNest · Guides</title>
+<style>
+body{{margin:0;font-family:system-ui,sans-serif;background:#0b1220;color:#e2e8f0}}
+header{{padding:28px 20px 8px;max-width:1100px;margin:0 auto}}
+header h1{{margin:0;font-size:1.6rem}}
+header p{{color:#94a3b8;margin:8px 0 0}}
+main{{display:grid;gap:20px;padding:20px;max-width:1100px;margin:0 auto;
+grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
+.g-card{{background:#111827;border:1px solid #1f2937;border-radius:16px;overflow:hidden;
+padding:0 0 16px;box-shadow:0 8px 24px #0006}}
+.g-card img{{width:100%;display:block;background:#0f172a}}
+.g-card h2{{margin:12px 16px 4px;font-size:1.1rem}}
+.g-card p{{margin:0 16px 10px;color:#94a3b8;font-size:.92rem}}
+.g-card code{{margin:0 16px;display:inline-block;background:#1e293b;padding:4px 10px;
+border-radius:8px;font-size:.85rem;color:#a5b4fc}}
+a.home{{color:#a5b4fc;text-decoration:none;font-size:.9rem}}
+</style></head><body>
+<header><a class="home" href="/">← CodeNest</a>
+<h1>How-to guides</h1>
+<p>Same cartoons the Telegram bot sends for <code>/guide</code>. Picture first, then the command.</p>
+</header><main>{body}</main></body></html>"""
+    return HTMLResponse(html)
+
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -491,7 +595,15 @@ def health():
         "status": "ok",
         "database": DIALECT,
         "runner": "embedded" if runner_client.embedded_mode() else "remote",
-        "bot_secrets_encrypted": secrets_store.configured(),
+        # Bot env vars live as plain JSON in your own database (see
+        # services/secrets_store.py for why). `legacy_rows` is how many rows are
+        # still in the old wrapped form and should be 0 after the first boot;
+        # `unreadable_rows` is how many this site cannot read at all, and those
+        # are rescued from the runner's own copy at startup (services/env_rescue).
+        "bot_secrets_storage": "plain-text",
+        "bot_secrets_legacy_rows": secrets_store.legacy_rows(),
+        "bot_secrets_unreadable_rows": env_rescue.unreadable_count(),
+        "bot_secrets_rescued_at_boot": env_rescue.LAST_SWEEP.get("rescued", 0),
         "production_isolation": "unsafe-embedded" if runner_client.embedded_mode() else "remote-runner",
         "ping_bot": "running" if bool(os.getenv("BOT_TOKEN", "").strip()
                                        or os.getenv("TELEGRAM_PING_BOT_TOKEN", "").strip()) else "not configured",

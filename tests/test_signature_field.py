@@ -217,4 +217,5 @@ check("HMAC and Ed25519 now agree on a genuine payload", _ok)
 
 
 print(f"\ntest_signature_field: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

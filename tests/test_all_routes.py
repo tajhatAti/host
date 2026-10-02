@@ -117,7 +117,32 @@ check("GET /code/s/{token} (legacy link healed)", r, (200, 301, 302, 307, 308))
 # Single-service mode activates automatically (no RUNNER_SERVICE_URL in the
 # sandbox), so these routes now exercise the in-process engine for real.
 r = c.get("/api/jobs", headers=H2); check("GET /api/jobs (200, runner state reported)", r)
-r = c.post("/api/jobs", json={"name": "j", "language": "python", "code": "print(1)"}, headers=H2)
+# The site requires a VERIFIED bot token before it will create a job at all —
+# even `print(1)` is refused without proof. That gate is the subject of
+# tests/test_telegram_job_detection.py; this matrix is about ROUTING, so it
+# satisfies the gate the way the real flow does (an unconsumed verification row
+# whose token hash matches) instead of reporting a 400 that says nothing about
+# the route under test.
+from datetime import datetime, timedelta, timezone              # noqa: E402
+import services.telegram_detector as _td                         # noqa: E402
+
+_conn = get_db_connection()
+_uid = _conn.execute("SELECT id FROM users WHERE username='matrix' "
+                     "OR email='mx@t.dev'").fetchone()["id"]
+_btok = "1234567890:AA" + "c" * 32
+_vid = "all-routes-ver-1"
+_created = datetime.now(timezone.utc)
+_conn.execute("INSERT INTO telegram_token_verifications "
+              "(id,user_id,token_hash,bot_username,bot_id,created_at,expires_at) "
+              "VALUES (?,?,?,?,?,?,?)",
+              (_vid, _uid, _td._token_hash(_btok), "AllRoutesBot", "700001",
+               _created.strftime("%Y-%m-%d %H:%M:%S"),
+               (_created + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")))
+_conn.commit()
+_conn.close()
+r = c.post("/api/jobs", json={"name": "j", "language": "python", "code": "print(1)",
+                              "env": {"BOT_TOKEN": _btok},
+                              "telegram_verification_id": _vid}, headers=H2)
 check("POST /api/jobs (embedded: real 201)", r, (200, 201))
 r = c.post("/api/execute", json={"language": "python", "code": "print(1)"}, headers=H2)
 check("POST /api/execute (embedded: real 200)", r)
@@ -168,4 +193,5 @@ fails = [x for x in results if not x[2]]
 print(f"\n================ {len(results)-len(fails)} pass, {len(fails)} fail ================")
 if fails:
     for name, code, _ in fails: print(f"  … {name} [{code}]")
-sys.exit(1 if fails else 0)
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

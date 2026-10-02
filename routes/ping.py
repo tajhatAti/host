@@ -21,16 +21,27 @@ log = logging.getLogger("codenest.ping")
 
 router = APIRouter()
 
-DEFAULT_TARGET = os.getenv("PING_DEFAULT_TARGET", "https://ahadorg.onrender.com").strip()
-TIMEOUT_S = float(os.getenv("PING_TIMEOUT_S", "8"))
-UA = "CodeNest-Ping/1.0"
-ALLOWED_SCHEMES = ("http://", "https://")
+def default_target() -> str:
+    """What a bare /ping measures: this site, unless the owner says otherwise.
+
+    Read per request, not at import, so a config change (or a test) is seen
+    without a restart. The default used to be one hardcoded foreign host, which
+    meant every other installation measured somebody else's server and showed a
+    timeout as though the site itself were broken.
+    """
+    for var in ("PING_DEFAULT_TARGET", "SITE_BASE_URL", "RENDER_EXTERNAL_URL",
+                "PUBLIC_BASE_URL"):
+        val = os.getenv(var, "").strip()
+        if val:
+            return val
+    # The one service every install here genuinely depends on.
+    return "https://api.telegram.org"
 
 
 def _normalise(url: str) -> str:
     url = (url or "").strip()
     if not url:
-        url = DEFAULT_TARGET
+        url = default_target()
     if not url.startswith(ALLOWED_SCHEMES):
         url = "https://" + url
     return url
@@ -78,13 +89,18 @@ async def _ping(url: str) -> dict:
     except httpx.SSLError as e:
         return {"ok": False, "target": url, "error": f"TLS error: {e}"}
     except Exception as e:  # noqa: BLE001
+        # The full exception is in the log; what the caller gets is one short
+        # phrase. "ConnectError: [Errno 111] Connection refused" and its friends
+        # read like a crash report, and the person pressing the button cannot do
+        # anything with an errno.
         log.exception("ping failed: %s", url)
-        return {"ok": False, "target": url, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "target": url,
+                "error": f"{p.hostname} didn't answer — {type(e).__name__}"}
 
 
 @router.get("/api/ping")
 async def api_ping(url: str | None = Query(default=None)):
-    return JSONResponse(await _ping(url or DEFAULT_TARGET))
+    return JSONResponse(await _ping(url or ""))
 
 
 # Minimal human-facing page — one input, one button, big number.

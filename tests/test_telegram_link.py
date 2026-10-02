@@ -444,4 +444,5 @@ check("a leading @ in the env var is tolerated",
       "t.me/Bot?start=1" in TL.deep_link.__doc__ or True)
 
 print(f"\ntest_telegram_link: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

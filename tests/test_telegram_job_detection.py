@@ -1,3 +1,4 @@
+import json
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DB_PATH"] = tempfile.mktemp(suffix=".db")
@@ -110,7 +111,13 @@ def test_run_records_safe_bot_metadata_and_admin_can_open_it(monkeypatch):
     assert old_token not in sent[0]["code"] and TOKEN not in sent[0]["code"]
     assert 'os.getenv("BOT_TOKEN")' in sent[0]["code"] and sent[0]["env"]["BOT_TOKEN"]==TOKEN
     db=database.get_db_connection(); stored=db.execute("SELECT env FROM jobs WHERE name='demo-bot'").fetchone()["env"]; db.close()
-    assert stored.startswith("enc:v1:") and TOKEN not in stored
+    # Stored as PLAIN JSON in the site's own database — the deliberate end of
+    # JOB_SECRETS_KEY encryption, because a key that can be lost or rotated was
+    # the reason a restarted bot came back without its token. What must still
+    # hold is that the token never leaves the server: the assertions above check
+    # the API response and the runner payload, and the mask in _public_env is
+    # what keeps it out of the Env tab.
+    assert json.loads(stored)["BOT_TOKEN"] == TOKEN
     job_id=r.json()["job_db_id"]
     health=client.get(f"/api/jobs/{job_id}/telegram-health",headers=headers)
     assert health.status_code==200 and health.json()["process_status"]=="running"
@@ -145,7 +152,11 @@ def test_run_records_safe_bot_metadata_and_admin_can_open_it(monkeypatch):
     fourth_token="423456789:AA"+"w"*32
     fourth=client.post("/api/telegram-bot/verify",headers=headers,json={"token":fourth_token}).json()["telegram_verification_id"]
     denied=client.post("/api/jobs",headers=headers,json={"name":"bot-4","language":"python","code":"TOKEN='example'","env":{"BOT_TOKEN":fourth_token},"telegram_verification_id":fourth})
-    assert denied.status_code==429 and "3 Telegram bots" in denied.text
+    # 429 plus the two numbers that matter (how many are running, what the limit
+    # is). The wording is deliberately not asserted: the message used to say
+    # "Telegram bots" and to quote the GLOBAL default even for an account an
+    # admin had raised, which is how /apps came to claim "5/3 running slots".
+    assert denied.status_code==429 and "3 of 3" in denied.text
     assert client.get("/admin/telegram-jobs").status_code==404
     admin=client.get("/admin/telegram-jobs",headers=headers)
     assert admin.status_code==200

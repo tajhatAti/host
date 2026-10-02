@@ -149,11 +149,12 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
        squares.length <= 2, squares.map(b => b.id).join(', '));
     // And each one must actually do something.
     for (const b of squares) {
-      const before = d.body.className + '|' +
-        (d.getElementById('rsMoreMenu') || {}).hidden;
+      const state = () => b.id === 'rsReqChip'
+        ? `${d.getElementById('rsReqRow')?.style.display}|${b.getAttribute('aria-expanded')}`
+        : `${d.body.className}|${(d.getElementById('rsMoreMenu') || {}).hidden}`;
+      const before = state();
       click(w, b); await wait(150);
-      const after = d.body.className + '|' +
-        (d.getElementById('rsMoreMenu') || {}).hidden;
+      const after = state();
       ok(`#${b.id} does something when clicked`, before !== after,
          'clicked and nothing changed');
       click(w, b); await wait(120);   // put it back

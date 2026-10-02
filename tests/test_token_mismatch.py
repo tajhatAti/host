@@ -206,4 +206,5 @@ check("token_fingerprint is not consulted on the auth path",
 
 
 print(f"\ntest_token_mismatch: {_pass} passed, {_fail} failed")
-sys.exit(1 if _fail else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _fail else 0)

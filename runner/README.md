@@ -11,9 +11,10 @@ Separate service for running user-submitted code in a sandboxed subprocess.
    - `RUNNER_SERVICE_SECRET` — a strong random string (generate with
      `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`).
      When adding the runner from **Admin → Runners**, paste this exact value
-     into the add form; it is encrypted per runner. Only legacy runners set
-     through the main service's `RUNNER_SERVICE_URL` environment variable must
-     share the main service's `RUNNER_SERVICE_SECRET`.
+     into the add form; it is stored as plain text in your own database and sent
+     only to that runner. Only legacy runners set through the main service's
+     `RUNNER_SERVICE_URL` environment variable must share the main service's
+     `RUNNER_SERVICE_SECRET`.
    - `MAX_EXECUTION_TIME_MS` — default `10000` (10 seconds per run).
    - `MAX_MEMORY_MB` — default `256`.
 4. Deploy. The health endpoint is `/health`.

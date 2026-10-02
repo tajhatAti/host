@@ -64,11 +64,13 @@ services:
       # ── Auth / admin ─────────────────────────────────────
       - key: ADMIN_EMAILS        # comma-separated owner emails → auto-granted admin
         sync: false
-      # Encrypts hosted-bot BOT_TOKEN and other environment secrets at rest.
-      # Render generates a stable random value; never rotate without migrating
-      # existing encrypted secrets first.
+      # Bot secrets are stored as plain JSON in your own database. New installs
+      # do not need a separate storage key. Existing installs may keep their
+      # current JOB_SECRETS_KEY for one startup so legacy rows can be migrated;
+      # sync:false preserves the value. Remove it after /health reports zero
+      # legacy rows.
       - key: JOB_SECRETS_KEY
-        generateValue: true
+        sync: false
 
       # ── Email (OTP) ──────────────────────────────────────
       - key: BREVO_API_KEY

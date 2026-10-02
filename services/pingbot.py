@@ -247,7 +247,6 @@ def _admin_job_detail_text(j: dict) -> str:
         lines.append(f"Last exit: `{j['last_exit_reason']}`"
                      + (f" (code {j['last_exit_code']})"
                         if j.get("last_exit_code") not in (None, "") else ""))
-
     rid = j.get("runner_job_id") or "—"
     rurl = j.get("runner_url") or "(embedded / default pool)"
     lines += ["", f"Runner job id: `{rid}`", f"Runner URL: `{rurl}`"]
@@ -291,10 +290,10 @@ def _admin_job_kb(j: dict) -> dict:
          {"text": "🔑 Set env", "callback_data": f"admin:jobenv:{jid}"}],
         [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{jid}"},
          {"text": "🗑 Delete…", "callback_data": f"admin:jobdelconfirm:{jid}"}],
+        [{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}],
     ]
     if j.get("telegram_bot_username"):
         rows.append([{"text": "🤖 Open bot", "url": f"https://t.me/{j['telegram_bot_username']}"}])
-    rows.append([{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}])
     nav = []
     if uid:
         nav.append({"text": "👤 Owner", "callback_data": f"admin:user:{uid}"})
@@ -524,6 +523,48 @@ def cmd_see(chat_id, telegram_user_id, arg):
             pass
 
 
+_ADMIN_RECOVERY_COMMAND_LOCK = threading.Lock()
+
+
+def _admin_recovery_worker(chat_id):
+    try:
+        from services import job_recovery
+        unresolved = job_recovery.recover_once()
+        _send(chat_id,
+              f"✅ Recovery pass done. Unresolved (still missing token/source): *{unresolved}*.",
+              reply_markup={"inline_keyboard": [
+                  [{"text": "🩺 Health", "callback_data": "admin:health"},
+                   {"text": "🖥 Runners", "callback_data": "admin:runners"}],
+                  [{"text": "⬅️ Menu", "callback_data": "admin:menu"}],
+              ]})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("manual admin recovery failed")
+        try:
+            _send(chat_id, f"❌ Recovery failed: {type(exc).__name__}: {exc}")
+        except Exception:
+            logger.exception("could not report manual recovery failure")
+    finally:
+        _ADMIN_RECOVERY_COMMAND_LOCK.release()
+
+
+def _start_admin_recovery(chat_id, message_id=None):
+    """Queue exactly one admin-requested sweep without blocking update handling."""
+    if not _ADMIN_RECOVERY_COMMAND_LOCK.acquire(blocking=False):
+        _edit_or_send(chat_id, message_id,
+                      "♻️ A recovery pass is already running. I won't start another copy.")
+        return False
+    try:
+        _edit_or_send(chat_id, message_id,
+                      "♻️ Recovery started once. I'll send one result when it finishes.")
+        thread = threading.Thread(target=_admin_recovery_worker, args=(chat_id,),
+                                  daemon=True, name="admin-recovery")
+        thread.start()
+        return True
+    except Exception:
+        _ADMIN_RECOVERY_COMMAND_LOCK.release()
+        raise
+
+
 def cmd_admin(chat_id, telegram_user_id, arg):
     """/admin — inline-button panel for most things; a few actions also have
     typed shortcuts (all support a bare, no-args form that starts a
@@ -609,32 +650,10 @@ def cmd_admin(chat_id, telegram_user_id, arg):
               reply_markup=_admin_menu_kb())
         return
 
-    
     if sub in ("recover", "rescue", "reconcile"):
-        # Force the same recovery pass the interval loop runs — answer to
-        # "runner just woke up, bring every bot back NOW".
-        _send(chat_id, "♻️ Running recovery sweep…")
-        try:
-            from services import job_recovery
-            unresolved = job_recovery.recover_once()
-            sweep = job_recovery.auto_deploy_sweep(force=True)
-        except Exception as exc:  # noqa: BLE001
-            _send(chat_id, f"❌ Recovery failed: {type(exc).__name__}: {exc}")
-            return
-        extra = ""
-        if isinstance(sweep, dict) and not sweep.get("disabled") and not sweep.get("waiting"):
-            extra = (f"\nAuto-deploy: checked {sweep.get('checked', 0)}, "
-                     f"updated {sweep.get('updated', 0)}, "
-                     f"failed {sweep.get('failed', 0)}.")
-        _send(chat_id,
-              f"✅ Recovery pass done. Unresolved (still missing token/source): "
-              f"*{unresolved}*." + extra,
-              reply_markup={"inline_keyboard": [
-                  [{"text": "🩺 Health", "callback_data": "admin:health"},
-                   {"text": "🖥 Runners", "callback_data": "admin:runners"}],
-                  [{"text": "♻️ Run again", "callback_data": "admin:recovernow"},
-                   {"text": "⬅️ Menu", "callback_data": "admin:menu"}],
-              ]})
+        # One recovery only; code updates are a separate, explicit action.
+        # Queue the work so the Telegram poller/webhook remains responsive.
+        _start_admin_recovery(chat_id)
         return
 
     if sub in ("overview", "stats", "dash"):
@@ -1122,16 +1141,7 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         return
 
     if action == "recovernow":
-        _send(chat_id, "♻️ Running recovery sweep…")
-        try:
-            from services import job_recovery
-            unresolved = job_recovery.recover_once()
-            _send(chat_id, f"✅ Recovery done. Unresolved: *{unresolved}*.",
-                  reply_markup={"inline_keyboard": [
-                      [{"text": "🩺 Health", "callback_data": "admin:health"},
-                       {"text": "⬅️ Menu", "callback_data": "admin:menu"}]]})
-        except Exception as exc:  # noqa: BLE001
-            _send(chat_id, f"❌ {type(exc).__name__}: {exc}")
+        _start_admin_recovery(chat_id, message_id)
         return
 
     if action == "autodepnow":
@@ -5384,6 +5394,8 @@ def handle_update(upd):
 # ==================== MAIN LOOP ====================
 import hashlib
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from services import telegram_webhook_queue
 
 # secret_token Telegram echoes back in the X-Telegram-Bot-Api-Secret-Token
 # header on every webhook delivery — derived from BOT_TOKEN itself so no
@@ -5391,6 +5403,18 @@ from fastapi import APIRouter, Request
 _WEBHOOK_SECRET = hashlib.sha256((BOT_TOKEN or "unset").encode()).hexdigest()[:32]
 
 webhook_router = APIRouter()
+_WEBHOOK_UPDATE_LEASE_NS = telegram_webhook_queue.LEASE_NS
+_WEBHOOK_UPDATE_KEEP = telegram_webhook_queue.KEEP_UPDATES
+_WEBHOOK_UPDATE_REUSE_NS = telegram_webhook_queue.REUSE_AFTER_NS
+
+
+def _claim_webhook_update(update_id: int, payload=None):
+    """Compatibility wrapper around the durable webhook queue's claim."""
+    return telegram_webhook_queue.claim_update(update_id, payload)
+
+
+def _complete_webhook_update(update_id: int, claim: int) -> None:
+    telegram_webhook_queue.complete_update(update_id, claim)
 
 
 @webhook_router.post("/telegram/webhook")
@@ -5408,9 +5432,9 @@ async def telegram_webhook(request: Request):
 
     A webhook flips the direction: Telegram POSTs the update TO this
     endpoint. That POST *is* incoming HTTP traffic, so it wakes a sleeping
-    dyno itself, and even a slow cold-start response just makes THIS
-    delivery slow — Telegram retries automatically, and the retry lands on
-    an already-warm process in well under a second.
+    dyno itself. The update is saved in the site's database before the fast
+    acknowledgement; a worker handles it afterward and resumes pending work
+    after a process restart.
     """
     got = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if got != _WEBHOOK_SECRET:
@@ -5419,11 +5443,17 @@ async def telegram_webhook(request: Request):
         upd = await request.json()
     except Exception:
         return {"ok": False}
-    try:
-        handle_update(upd)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("webhook handle_update failed: %s", exc)
-    return {"ok": True}  # Telegram only cares that this came back fast
+    # Store the update in the site's database before acknowledging it. The
+    # handler runs on the queue's worker, so runner/GitHub calls cannot consume
+    # Telegram's webhook timeout; a process restart can still resume the saved
+    # payload after its short claim lease expires.
+    queued = telegram_webhook_queue.enqueue(upd, handle_update)
+    if queued == "unavailable":
+        # No durable write means we must not acknowledge it; Telegram will retry.
+        return JSONResponse(status_code=503, content={"ok": False})
+    if queued == "invalid":
+        return JSONResponse(status_code=400, content={"ok": False})
+    return {"ok": True}
 
 
 def enable_webhook():
@@ -5546,6 +5576,11 @@ def start_bot():
     if not BOT_TOKEN:
         print("TELEGRAM_PING_BOT_TOKEN not set")
         return
+
+    try:
+        telegram_webhook_queue.start(handle_update)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Telegram webhook queue did not start (%s)", type(exc).__name__)
 
     # ASK TELEGRAM WHO WE ARE, ONCE, AT BOOT.
     #

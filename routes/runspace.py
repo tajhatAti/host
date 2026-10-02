@@ -225,13 +225,92 @@ def _remember_worker(job_db_id: int, resp) -> None:
         conn.close()
 
 
-def _row_env(row) -> dict:
-    """Env vars saved for a job row (empty when unset / unparsable)."""
+def _row_env(row, rescue: bool = True) -> dict:
+    """Env vars saved for a job row (empty when unset / unparsable).
+
+    Mirrors bot_ops._row_env, including the rescue: a row this site cannot
+    decode is repaired from the runner's own copy instead of being read as
+    empty. Empty is what the Env tab would then show — and what a Save would
+    then write, silently deleting every other variable the app had.
+
+    Also promotes a BOT_TOKEN found in the source file into the returned map
+    when Env has none — Telegram-board deploys often skip the Env tab. This is
+    in-memory only; the DB row is not rewritten.
+
+    Pass rescue=False where this runs in a loop over many jobs (a list
+    endpoint): the rescue is one HTTP call per broken row, and a list must not
+    stall on a runner that is asleep.
+    """
     try:
         raw = dict(row).get("env")
-        return secrets_store.unpack_env(raw)
     except Exception:
-        return {}
+        values, readable = {}, True
+    else:
+        values, readable = secrets_store.read_env(raw)
+    if not readable and rescue:
+        try:
+            from services import env_rescue
+            got, _outcome = env_rescue.rescue_job_env(row)
+            if got:
+                values = got
+        except Exception:
+            pass
+    try:
+        from services import bot_ops
+        values = bot_ops.ensure_bot_token_in_env(row, values)
+    except Exception:
+        pass
+    return values
+
+
+def _account_flags(user_id: int) -> dict:
+    """What this account is allowed, for the dashboard to show.
+
+    The 👑 flag travels with the one call the page already makes (/api/jobs), so
+    no extra request and no second source of truth. Before this a queen grant
+    was invisible on the website: the chat bot knew, the runner knew, and the
+    page the owner actually looks at did not — which is how "no memory ceiling"
+    stays an abstraction instead of something you can see.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.account_privileges(user_id)
+    except Exception:
+        return {"is_queen": False, "job_limit": MAX_JOBS_PER_USER,
+                "mem_limit_mb": None, "zip_max_mb": None, "zip_max_files": None}
+
+
+def _job_limit_for(user_id: int) -> int:
+    """How many apps this account may have RUNNING.
+
+    bot_ops owns the rule (global default + the per-user override an admin sets
+    with /admin limit). This endpoint used to check the global constant, so an
+    override granted in chat applied to bots created from chat and quietly NOT
+    to the same person's bots created from the browser — the website told them
+    they were full at 3 while the bot happily made a 4th.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.effective_job_limit(user_id)
+    except Exception:
+        return MAX_JOBS_PER_USER
+
+
+def _mem_limit_for(user_id: int):
+    """The 👑 (users.mem_unlimited) flag in the runner's terms: 0 means "no
+    per-job memory ceiling", None means "runner default".
+
+    bot_ops owns the rule and the Telegram bot already sent it on every
+    deploy — the web editor sent nothing at all, so a 👑 granted by an admin
+    applied to bots created from chat and quietly NOT to the same person's
+    bots created from the browser. One shared helper is the fix; two copies of
+    the rule is how they would drift apart again.
+    """
+    try:
+        from services import bot_ops
+        return bot_ops.mem_limit_for(user_id)
+    except Exception:
+        return None
 
 
 def _restore_then_restart(job_id: int, info: dict, worker: str = None) -> dict:
@@ -441,12 +520,14 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
             active = sum(1 for r in rows if dict(r).get("runner_job_id") in live_ids)
         else:
             active = sum(1 for r in rows if dict(r).get("desired_state") != "stopped")
-        if active >= MAX_JOBS_PER_USER:
+        limit = _job_limit_for(user["id"])
+        if active >= limit:
             conn.close()
             raise HTTPException(
                 status_code=429,
-                detail=(f"You already have {active} of {MAX_JOBS_PER_USER} Telegram bots "
-                        f"running — stop one before adding another bot."),
+                detail=(f"You already have {active} of {limit} apps running — "
+                        f"stop one before adding another. A stopped app stays "
+                        f"yours and frees its slot."),
             )
     except HTTPException:
         raise
@@ -469,6 +550,7 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
         "code": canonical_code,
         "name": f"u{user['id']}-{name}",
         "env": env_map,
+        "mem_limit_mb": _mem_limit_for(user["id"]),
     }
     if repo_url:
         body["repo_url"] = repo_url
@@ -493,13 +575,21 @@ def create_job(payload: JobCreateRequest, request: Request, authorization: Optio
             INSERT INTO jobs (user_id, name, language, code, runner_job_id, env,
                 telegram_bot_detected,telegram_bot_username,telegram_bot_id,
                 telegram_check_status,telegram_verified_at,telegram_token_fingerprint,
-                telegram_framework,telegram_update_mode,telegram_token_source,created_at,updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                telegram_framework,telegram_update_mode,telegram_token_source,
+                repo_url,repo_entry,repo_commit,created_at,updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (user["id"], name, payload.language, canonical_code, info["id"],
              secrets_store.pack_env(env_map), *_telegram_columns(bot_meta), token_fingerprint,
              code_analysis["framework"], code_analysis["update_mode"],
-             code_analysis["token_source"], now, now),
+             code_analysis["token_source"],
+             # Which repo this was built from and the commit that was checked
+             # out. The runner reports both; storing them is what lets the chat
+             # offer ⬆️ "deploy latest" for a job created on the WEBSITE too, so
+             # there is one answer to "what is running?" whichever door it came
+             # through.
+             (repo_url or None), (info.get("repo_entry") or entry or None),
+             (info.get("repo_commit") or None), now, now),
         )
         revision_id, version = _create_revision(
             conn, user["id"], cursor.lastrowid, payload.language, canonical_code,
@@ -548,11 +638,18 @@ def list_jobs(authorization: Optional[str] = Header(None)):
         row = dict(stored)
         row["status"] = "stopped" if row.get("desired_state") == "stopped" else "running"
         row["status_stale"] = True
-        row["env"] = _public_env(_row_env(row))
+        row["env"] = _public_env(_row_env(row, rescue=False))
         _attach_telegram_public(row)
         row.pop("code", None)
         jobs.append(row)
-    return {"jobs": jobs, "runner": "background", "max_per_user": MAX_JOBS_PER_USER}
+    flags = _account_flags(user["id"])
+    out = {"jobs": jobs, "runner": "background",
+           # The limit this ACCOUNT has (an admin can raise it per user), not the
+           # global default — the dashboard and the cap check now quote the same
+           # number, which is what "5/3 running slots" was really about.
+           "max_per_user": flags.get("job_limit") or MAX_JOBS_PER_USER}
+    out.update(flags)
+    return out
 
 
 @router.get("/api/jobs/{job_id}")
@@ -574,7 +671,7 @@ def telegram_job_health(job_id: int, authorization: Optional[str] = Header(None)
     row = dict(_get_own_job(job_id, user))
     token = str(_row_env(row).get("BOT_TOKEN") or "").strip()
     if not token:
-        raise HTTPException(status_code=404, detail="This bot has no configured BOT_TOKEN.")
+        raise HTTPException(status_code=404, detail="No BOT_TOKEN in Env or source. Paste one in Env, or put BOT_TOKEN=... in the code.")
     health = telegram_detector.telegram_delivery_health(
         token, row.get("telegram_update_mode") or "unknown")
     health.update({"process_status": "offline", "runtime_conflict": False,
@@ -650,7 +747,8 @@ def rollback_bot_revision(job_id: int, revision_id: int,
         raise HTTPException(status_code=409, detail="Restart this bot once before rolling it back.")
     env = _row_env(row)
     body = {"name": row["name"], "language": rev["language"],
-            "code": rev["code"], "env": env}
+            "code": rev["code"], "env": env,
+            "mem_limit_mb": _mem_limit_for(user["id"])}
     try:
         resp = runner_client._runner_http("PATCH", f"/internal/jobs/{rid}", body,
                                           worker=_worker_of(row))
@@ -1126,6 +1224,7 @@ def restart_job(job_id: int, request: Request, authorization: Optional[str] = He
             # Replay saved env, otherwise a cold restart silently loses the
             # job's API keys / bot tokens and it crash-loops.
             "env": _row_env(row),
+            "mem_limit_mb": _mem_limit_for(user["id"]),
         })
         if resp.status_code == 201:
             info = resp.json()
@@ -1290,7 +1389,11 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
         logger.warning("pre-update snapshot failed for job %s: %s", job_id, exc)
 
     # Forward to runner for in-place update (same dir, same slug, same port).
-    patch_body = {"name": new_name, "language": new_lang, "code": new_code, "env": new_env}
+    patch_body = {"name": new_name, "language": new_lang, "code": new_code, "env": new_env,
+                  # Re-sync 👑 on every redeploy, so a grant made after this
+                  # bot's first deploy reaches the running process instead of
+                  # waiting for the next cold start.
+                  "mem_limit_mb": _mem_limit_for(user["id"])}
     if new_repo:
         patch_body["repo_url"] = new_repo
         if new_entry: patch_body["entry"] = new_entry
@@ -1306,7 +1409,8 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
     elif resp.status_code == 404:
         # Runner restarted — fall back to cold-start Restart path.
         create_body = {"language": new_lang, "code": new_code,
-                       "name": f"u{user['id']}-{new_name}", "env": new_env}
+                       "name": f"u{user['id']}-{new_name}", "env": new_env,
+                       "mem_limit_mb": _mem_limit_for(user["id"])}
         if new_repo:
             create_body["repo_url"] = new_repo
             if new_entry: create_body["entry"] = new_entry
@@ -1345,6 +1449,16 @@ def update_job(job_id: int, payload: JobUpdateRequest, request: Request, authori
              code_analysis["framework"], code_analysis["update_mode"],
              code_analysis["token_source"], now, job_id),
         )
+        if new_repo:
+            # Record which revision this redeploy built, and which file in it
+            # runs. Without this the chat's ⬆️ "deploy latest" button keeps
+            # offering an update the website already applied — one job, two
+            # different answers about what is running.
+            conn.execute(
+                "UPDATE jobs SET repo_url=?, repo_entry=?, repo_commit=? WHERE id=?",
+                (new_repo, info.get("repo_entry") or new_entry or None,
+                 info.get("repo_commit") or None, job_id),
+            )
         conn.execute("UPDATE bot_revisions SET status='healthy',error=NULL,promoted_at=? WHERE id=?",
                      (now, revision_id))
         _record_deploy_event(conn, user["id"], job_id, "update", new_name, bot_meta, now)
