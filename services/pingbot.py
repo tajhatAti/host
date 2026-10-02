@@ -43,6 +43,23 @@ logger = logging.getLogger("codenest-app")
 SUPER_ADMIN_TG_ID = 8768764605
 
 
+# Soft per-chat command debounce: NOT a punishment, not a lock on any
+# action — just "please wait a sec" for someone mashing a button fast
+# (double-tapping /restart, spamming /logs). Admins (/queen) are exempt,
+# since they legitimately act across many bots back to back.
+_CMD_RATE_WINDOW_S = float(os.getenv("CMD_RATE_LIMIT_WINDOW_S", "4"))
+_CMD_RATE_N = int(os.getenv("CMD_RATE_LIMIT_N", "3"))
+_cmd_times: dict = {}
+
+
+def _rate_limited(chat_id) -> bool:
+    now = time.time()
+    hist = [t for t in _cmd_times.get(chat_id, []) if now - t < _CMD_RATE_WINDOW_S]
+    hist.append(now)
+    _cmd_times[chat_id] = hist
+    return len(hist) > _CMD_RATE_N
+
+
 def _is_admin(user, telegram_user_id=None) -> bool:
     if telegram_user_id == SUPER_ADMIN_TG_ID:
         return True
@@ -230,9 +247,7 @@ def _admin_job_detail_text(j: dict) -> str:
         lines.append(f"Last exit: `{j['last_exit_reason']}`"
                      + (f" (code {j['last_exit_code']})"
                         if j.get("last_exit_code") not in (None, "") else ""))
-    if j.get("restart_locked_s"):
-        m, s = divmod(int(j["restart_locked_s"]), 60)
-        lines.append(f"🔒 Restart locked: {m}m {s}s left (repeated crash-loops) — ⬇️ Unlock to override")
+
     rid = j.get("runner_job_id") or "—"
     rurl = j.get("runner_url") or "(embedded / default pool)"
     lines += ["", f"Runner job id: `{rid}`", f"Runner URL: `{rurl}`"]
@@ -277,8 +292,6 @@ def _admin_job_kb(j: dict) -> dict:
         [{"text": "📜 Revisions", "callback_data": f"admin:revisions:{jid}"},
          {"text": "🗑 Delete…", "callback_data": f"admin:jobdelconfirm:{jid}"}],
     ]
-    if j.get("restart_locked_s"):
-        rows.append([{"text": "🔓 Unlock restart", "callback_data": f"admin:jobunlock:{jid}"}])
     if j.get("telegram_bot_username"):
         rows.append([{"text": "🤖 Open bot", "url": f"https://t.me/{j['telegram_bot_username']}"}])
     rows.append([{"text": "🔄 Refresh", "callback_data": f"admin:job:{jid}"}])
@@ -1278,8 +1291,7 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         kb = []
         lines = [f"📦 *Jobs* ({total} total) — tap 🔗 to open the hidden link:"]
         for j in rows:
-            lock = " 🔒" if j.get("restart_locked_s") else ""
-            lines.append(f"#{j['id']} · {j['name']} · uid `{j.get('owner_id') or '?'}`{lock}")
+            lines.append(f"#{j['id']} · {j['name']} · uid `{j.get('owner_id') or '?'}`")
             kb.append([{"text": f"🔗 #{j['id']} {j['name']}"[:60],
                         "callback_data": f"admin:job:{j['id']}"}])
         nav = []
@@ -1434,18 +1446,6 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
             _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
             return
         _edit_or_send(chat_id, message_id, f"✅ {'Restarted' if action == 'jobrestart' else 'Stopped'}.")
-        handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id), message_id)
-        return
-
-    if action == "jobunlock":
-        job_id = int(ref) if ref.isdigit() else None
-        if not job_id:
-            _edit_or_send(chat_id, message_id, "Bad job id.")
-            return
-        res = telegram_admin_ext.admin_unlock_job(job_id)
-        if not res.get("ok"):
-            _edit_or_send(chat_id, message_id, f"❌ {res['error']}")
-            return
         handle_admin_callback(chat_id, telegram_user_id, "job", str(job_id), message_id)
         return
 
@@ -5132,6 +5132,11 @@ def handle_update(upd):
                          telegram_user_id=msg.get("from", {}).get("id"))
             linked = telegram_link.user_for_chat(chat_id)
             event["user_id"] = _row_id(linked)
+
+            if command and not _is_admin(linked, tg_uid_early) and _rate_limited(chat_id):
+                _send(chat_id, f"⏳ একটু wait করো ({int(_CMD_RATE_WINDOW_S)}s)")
+                event.update(outcome="rate_limited")
+                return
 
             if command == "/cancel" and chat_id in _admin_flow:
                 _admin_flow.pop(chat_id, None)
