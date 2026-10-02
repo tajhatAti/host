@@ -769,7 +769,7 @@ async function _demoApi(path, method = "GET", body = null) {
     if (clean === "/admin/bot-usage") return { days: 14, events: [], bots: [] };
     if (clean === "/admin/telegram-jobs") return { detected: 1, running: _demo.jobs.filter(j => j.status === "running").length, events: [], bots: _demo.jobs.filter(j => j.telegram_bot_detected).map(j => ({ id: j.id, owner: "demo", name: j.name, telegram_bot_username: j.telegram_bot_username, status: j.status, telegram_framework: j.telegram_framework, telegram_update_mode: j.telegram_update_mode, telegram_check_status: j.telegram_check_status, uptime_s: j.uptime_s })) };
     if (clean === "/admin/runners") return { total_enabled: 1, environment_runners: [], runners: [], embedded: { online: true, jobs: _demo.jobs.filter(j => j.status === "running").length, capacity: 4, mem_mb: 24 } };
-    if (clean === "/admin/recover" && method === "POST") return { ok: true, unresolved: 0, message: "Recovery done. Unresolved: 0.", auto_deploy: { checked: 0 } };
+    if (clean === "/admin/recover" && method === "POST") return { ok: true, unresolved: 0, message: "Recovery done. Unresolved: 0." };
     const runnerTog = clean.match(/^\/admin\/runners\/(\d+)\/toggle$/);
     if (runnerTog && method === "POST") return { message: (body && body.enabled) ? "Runner enabled." : "Runner drained.", id: Number(runnerTog[1]) };
     const runnerDel = clean.match(/^\/admin\/runners\/(\d+)$/);
@@ -7225,17 +7225,19 @@ function renderAdminRunners(data) {
   if(embedded){const card=document.createElement("article");card.className="adm-runner-card"+(embedded.online?" is-online":" is-offline");const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b","Embedded engine"),_botText("span","Main website container · existing/local jobs"));const metrics=document.createElement("div");metrics.className="adm-runner-metrics";metrics.append(_botText("span",embedded.online?"online":"offline","adm-pill"+(embedded.online?" ok":" warn")),_botText("span",`${embedded.jobs||0}/${embedded.capacity||0} jobs`),_botText("span",`${Math.round(embedded.mem_mb||0)}MB used`));card.append(main,metrics,_botText("span","Add a remote runner to isolate new bot deployments.","adm-hint"));list.appendChild(card);}
   rows.forEach(r=>{
     const card=document.createElement("article");card.className="adm-runner-card"+(r.online?" is-online":" is-offline");
-    const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b",r.label),_botText("span",r.url));
+    const main=document.createElement("div");main.className="adm-runner-main";const runnerLink=document.createElement("a");runnerLink.href=(r.health_url||r.url.replace(/\/$/,"")+"/health");runnerLink.target="_blank";runnerLink.rel="noopener noreferrer";runnerLink.textContent=r.url;main.append(_botText("b",r.label),runnerLink);
     const metrics=document.createElement("div");metrics.className="adm-runner-metrics";metrics.append(_botText("span",r.online?"online":"offline","adm-pill"+(r.online?" ok":" warn")),_botText("span",`${r.jobs||0}/${r.capacity||0} jobs`),_botText("span",`${Math.round(r.mem_mb||0)}MB used`),_botText("span",`${r.assigned_jobs||0} assigned`));
     const actions=document.createElement("div");actions.className="adm-runner-card-actions";
     const toggle=document.createElement("button");toggle.className="btn-ghost sm"+(r.enabled?"":" primary-ish");
     toggle.textContent=r.enabled?"Online · tap to drain":"Offline · tap to enable";
     toggle.title=r.enabled?"Taking new jobs — tap to drain (stop new placements)":"Drained — tap to bring online";
     toggle.onclick=()=>_admToggleRunner(r.id,!r.enabled);actions.appendChild(toggle);
+    const details=document.createElement("button");details.className="btn-ghost sm";details.textContent="Runner details";details.onclick=()=>window.openAdminRunner&&window.openAdminRunner(r.id);actions.appendChild(details);
+    const wake=document.createElement("button");wake.className="btn-ghost sm";wake.textContent="Check / wake + recover";wake.title="Ping this runner; if it answers, queue safe bot recovery";wake.onclick=()=>window.wakeAdminRunner&&window.wakeAdminRunner(r.id,wake);actions.appendChild(wake);
     if(!r.assigned_jobs){const del=document.createElement("button");del.className="btn-ghost sm danger";del.textContent="Remove";del.onclick=()=>_admDeleteRunner(r.id);actions.appendChild(del);}
     card.append(main,metrics,actions);list.appendChild(card);
   });
-  envRows.forEach(url=>{const card=document.createElement("article");card.className="adm-runner-card";const main=document.createElement("div");main.className="adm-runner-main";main.append(_botText("b","Environment runner"),_botText("span",url));card.append(main,_botText("span","managed in Render environment","adm-hint"));list.appendChild(card);});
+  envRows.forEach(url=>{const card=document.createElement("article");card.className="adm-runner-card";const main=document.createElement("div");main.className="adm-runner-main";const link=document.createElement("a");link.href=url.replace(/\/$/,"")+"/health";link.target="_blank";link.rel="noopener noreferrer";link.textContent=url;main.append(_botText("b","Environment runner"),link);const actions=document.createElement("div");actions.className="adm-runner-card-actions";const details=document.createElement("button");details.className="btn-ghost sm";details.textContent="Runner details";details.onclick=()=>window.openAdminRunner&&window.openAdminRunner(url);actions.appendChild(details);const wake=document.createElement("button");wake.className="btn-ghost sm";wake.textContent="Check / wake + recover";wake.onclick=()=>window.wakeAdminRunner&&window.wakeAdminRunner(url,wake);actions.appendChild(wake);card.append(main,_botText("span","managed in Render environment","adm-hint"),actions);list.appendChild(card);});
   if(!rows.length&&!envRows.length&&!embedded)list.appendChild(_botText("div","No runner engine is available.","adm-empty"));
 }
 
@@ -7609,8 +7611,12 @@ function renderAdminJobs(jobs) {
 const ADM_EXIT_REASON = {
   oom: "Stopped — it used more memory than it is allowed.",
   crash: "Crashed with a non-zero exit code — see the log below.",
+  crash_loop: "Stopped after repeated crashes to protect the runner; fix the log cause before restarting.",
   manual: "Stopped on request.",
+  limit: "Stopped to protect the runner because host memory was over its safe limit.",
+  isolation: "Stopped by the runner's per-job isolation guard; sibling bots were left running.",
   exit: "Finished on its own and exited cleanly.",
+  "workspace missing": "The runner could not find this app's saved workspace after recovery.",
 };
 
 function _admRow(label, value, cls) {
@@ -7711,10 +7717,14 @@ function renderAdminJobDetail(d) {
     _admRow("CPU", j.cpu_pct != null ? j.cpu_pct + "%" : "—"),
     _admRow("Uptime", j.uptime_s ? _fmtUptime(j.uptime_s) : "—"),
     _admRow("Restarts", j.restarts != null ? String(j.restarts) : "—"),
-    _admRow("Worker", j.worker),
     _admRow("Created", (j.created_at || "").slice(0, 16)),
   );
-  if (j.web_slug) t.appendChild(_admRow("Public URL", "/live/" + j.web_slug + "/"));
+  const runnerCell=document.createElement("span");runnerCell.textContent=j.worker||j.runner_url||"primary";
+  const healthUrl=j.runner_health_url||j.runner_url;
+  if(healthUrl){try{const u=new URL(healthUrl);if(u.protocol==="https:"||u.protocol==="http:"){const a=document.createElement("a");a.className="adm-link";a.href=u.href;a.target="_blank";a.rel="noopener noreferrer";a.textContent="Open runner health";runnerCell.append(document.createElement("br"),a);}}catch(_e){}}
+  t.appendChild(_admRow("Runner",runnerCell));
+  if (j.web_url) { const a=document.createElement("a");a.className="adm-link";a.href=j.web_url;a.target="_blank";a.rel="noopener noreferrer";a.textContent=j.web_url;t.appendChild(_admRow("Public URL",a)); }
+  else if (j.web_slug) t.appendChild(_admRow("Public URL", "The runner URL is private or this app is not listening yet."));
   if (j.telegram_bot_detected) {
     t.appendChild(_admRow("Telegram bot", j.telegram_bot_username ? `@${j.telegram_bot_username}` : "detected"));
     t.appendChild(_admRow("Telegram check", j.telegram_check_status || "unverified"));
@@ -7733,6 +7743,14 @@ function renderAdminJobDetail(d) {
   }
   if ((j.libs || []).length) t.appendChild(_admRow("Packages", j.libs.join(", ")));
   body.appendChild(t);
+
+  const revealBox=document.createElement("div");revealBox.className="adm-job-settings-reveal";
+  const revealHint=document.createElement("p");revealHint.className="adm-hint";revealHint.textContent="Saved source and secret values stay hidden unless you explicitly reveal them here.";revealBox.appendChild(revealHint);
+  const revealButton=document.createElement("button");revealButton.type="button";revealButton.className="btn-ghost sm";revealButton.textContent="Show & copy saved code, settings & secrets";
+  const revealField=document.createElement("textarea");revealField.id=`admAdminJobSettings${j.id}`;revealField.className="input-text adm-runner-secret-settings adm-admin-job-settings";revealField.readOnly=true;revealField.rows=7;revealField.hidden=true;revealField.setAttribute("aria-label","Saved source, settings and secrets — shown only after explicit reveal");
+  revealButton.disabled=!j.id||typeof window.revealAdminJobSettings!=="function";
+  revealButton.onclick=(event)=>window.revealAdminJobSettings&&window.revealAdminJobSettings(j.id,revealField,event.currentTarget);
+  revealBox.append(revealButton,revealField);body.appendChild(revealBox);
 
   body.appendChild(_admSubhead("Deployment versions", "healthy and failed candidates"));
   const versions=document.createElement("div");versions.className="adm-version-list";

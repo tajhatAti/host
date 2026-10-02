@@ -36,7 +36,7 @@ def invalidate_runner_registry():
 
 
 def managed_runner_nodes(refresh=False) -> list:
-    """Enabled DB-managed runners with decrypted server-side credentials."""
+    """Enabled DB-managed runners with server-side credentials loaded from the DB."""
     now = time.time()
     if not refresh and now - _registry_cache["at"] < 10:
         return list(_registry_cache["nodes"])
@@ -163,8 +163,8 @@ def _embedded_client():
 # ---------------------------------------------------------------------------
 # WORKER REGISTRY  —  cached health, least-loaded placement
 # ---------------------------------------------------------------------------
-# The pool is the union of environment-configured URLs and encrypted,
-# admin-managed runner_nodes. Registry/health caches keep placement fast while
+# The pool is the union of environment-configured URLs and DB-managed runner
+# nodes. Registry/health caches keep placement fast while
 # allowing an owner to add capacity without redeploying the main site.
 _HEALTH_TTL_S = int(os.getenv("WORKER_HEALTH_TTL_S", "45"))
 _health_cache = {}          # url -> {"at": ts, "free": int, "load": float, "online": bool}

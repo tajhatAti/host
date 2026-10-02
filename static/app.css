@@ -1662,6 +1662,31 @@ body.signed-out-in .hero {
 .adm-runner-main span { overflow:hidden; text-overflow:ellipsis; color:var(--fg-3); font-size:var(--fs-2); }
 .adm-runner-metrics,.adm-runner-card-actions,.adm-runner-actions { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
 .adm-runner-metrics > span:not(.adm-pill) { color:var(--fg-3); font-size:var(--fs-2); }
+#admRunnerModal .ah-modal-card { max-width:900px; max-height:88vh; overflow:auto; }
+.adm-runner-detail-summary,.adm-runner-detail-links,.adm-runner-detail-actions,.adm-runner-job-head,.adm-runner-job-facts,.adm-runner-job-links,.adm-runner-job-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.adm-runner-detail-summary { padding:10px; border:1px solid var(--line); border-radius:var(--r-row); background:var(--card-2); }
+.adm-runner-detail-links,.adm-runner-detail-actions { margin:10px 0; }
+.adm-runner-diagnosis { margin:10px 0; color:var(--fg-2); overflow-wrap:anywhere; }
+.adm-runner-diagnosis.warn,.adm-runner-job-reason.warn { color:var(--warn); }
+.adm-runner-detail-stats { margin:12px 0; }
+.adm-runner-detail-section-head { margin:18px 0 8px; }
+.adm-runner-detail-section-head h3 { margin:0; }
+.adm-runner-job-list { display:grid; grid-template-columns:1fr; gap:10px; }
+.adm-runner-job { min-width:0; padding:12px; border:1px solid var(--line); border-radius:var(--r-row); background:var(--card-2); }
+.adm-runner-job-head { justify-content:space-between; }
+.adm-runner-job-name { display:flex; flex-direction:column; min-width:0; }
+.adm-runner-job-name b { overflow-wrap:anywhere; }
+.adm-runner-job-facts { margin:10px 0; color:var(--fg-3); font-size:var(--fs-2); }
+.adm-runner-job-reason { margin:8px 0; overflow-wrap:anywhere; }
+.adm-runner-job-links { margin:8px 0; }
+.adm-runner-job-history { margin:8px 0; color:var(--fg-3); }
+.adm-runner-job-history summary { cursor:pointer; }
+.adm-runner-job-history ul { max-height:160px; overflow:auto; padding-left:22px; }
+.adm-runner-history { max-height:260px; overflow:auto; padding-left:24px; color:var(--fg-2); }
+.adm-runner-history li { padding:4px 0; overflow-wrap:anywhere; }
+.adm-runner-secret-settings { display:block; width:100%; margin:10px 0; min-height:100px; resize:vertical; font-family:var(--mono); font-size:12px; white-space:pre; }
+.adm-job-settings-reveal { margin:14px 0; padding:12px; border:1px solid var(--line); border-radius:var(--r-row); background:var(--card-2); }
+.adm-job-settings-reveal p { margin:0 0 8px; }
 .adm-runner-setup { margin-top:12px; padding:14px; border:1px solid #7c5cff; border-radius:var(--r-row); background:var(--card-2); }
 .adm-runner-setup ol { margin:8px 0 14px; padding-left:20px; color:var(--fg-2); }
 .adm-runner-fields { display:grid; grid-template-columns:1fr 2fr 2fr; gap:10px; }

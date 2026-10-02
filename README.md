@@ -13,7 +13,7 @@ This is a **Docker** web service (`runtime: docker` in `render.yaml`). Do **not*
 | Health check | `/health` |
 | Build Command | leave Render's Docker default (the image builds itself) |
 
-Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. That is the whole list — bot secrets are stored as plain JSON in your own database, so there is no encryption key to generate or lose.
+Set `DATABASE_URL`, `SITE_BASE_URL` (or rely on `RENDER_EXTERNAL_URL`), and `TELEGRAM_PING_BOT_TOKEN` in the dashboard. That is the whole list — bot secrets are stored as plain JSON in your own database; no additional secret-storage variable is required.
 
 The default `claude` branch of the old repo shipped a truncated `index.html` stub that never loaded `pro.js`/`miniapp.js`, so the boot overlay stayed on **“Securing your session…”** forever. This copy uses the full shell and hides that splash after 2.5s even if JS fails.
 
@@ -28,7 +28,7 @@ Supported analysis signals include aiogram, python-telegram-bot, pyTelegramBotAP
 
 The Add Bot flow includes 21 searchable, categorized starters rather than demo snippets: a master channel-referral/reward system, Livegram-style two-way support, simpler referral modes, self-claimed admin broadcasts, channel posting, channel join gates, group welcome/rules/warnings, order notifications, deep-link file sharing, inline menus, polls, reminders, SQLite notes, URL checks, and Python/Node foundations.
 
-Admin-capable templates do not ask users to discover a numeric Telegram ID. The wizard generates an encrypted one-time `ADMIN_CLAIM_CODE`, then puts it into the **Go to bot** deep link after deployment. Pressing Start through that link makes the bot store the sender's real Telegram user ID and refuse future claims—no ID or command needs to be typed. The Master Referral template follows the requested first-opener rule instead.
+Admin-capable templates do not ask users to discover a numeric Telegram ID. The wizard generates a random, one-time `ADMIN_CLAIM_CODE`, then puts it into the **Go to bot** deep link after deployment. Pressing Start through that link makes the bot store the sender's real Telegram user ID and refuse future claims—no ID or command needs to be typed. The Master Referral template follows the requested first-opener rule instead.
 
 ## Bot Store
 
@@ -65,7 +65,7 @@ Full details in `STORE.md`.
 
 - Raw BotFather tokens are never returned in bot/admin metadata.
 - Secret-looking environment values are write-only in owner APIs.
-- Bot environments (`BOT_TOKEN`, API keys) are stored as plain JSON in your own database. They are still masked in every API response and every log line. An older version Fernet-encrypted them with `JOB_SECRETS_KEY`; those rows are still readable and are rewritten as plain text on the first startup — see `services/secrets_store.py` for why a key that can be lost was worse than no key.
+- Bot environments (`BOT_TOKEN`, API keys) are stored as plain JSON in your own database and masked in every API response and log line. When upgrading an older installation, keep its existing `JOB_SECRETS_KEY` for one startup so legacy rows can be rewritten; remove it after `/health` reports zero legacy rows.
 - A keyed token fingerprint prevents the same Telegram token from being deployed twice on CodeNest.
 - Verification proofs are authenticated, expire after 15 minutes, and are consumed after creation.
 - Admin routes are 404-stealth for non-admin callers.
@@ -105,7 +105,7 @@ RUNNER_MODE=embedded \
 .venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-No encryption key is needed. If you are upgrading from a version that set `JOB_SECRETS_KEY`, keep the old value for **one** boot so the startup migration can rewrite the `enc:v1:` rows as plain text, then delete it:
+No additional secret-storage variable is needed for a new installation. If you are upgrading and already have `JOB_SECRETS_KEY` set, keep its current value for **one** boot so startup can migrate old rows to plain text; then remove it:
 
 ```bash
 curl -s https://your-service/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["bot_secrets_legacy_rows"])'   # 0 = done
@@ -158,7 +158,7 @@ Required/important environment variables:
 | `ZIP_MAX_MB` / `QUEEN_ZIP_MAX_MB` | Unzipped bundle ceiling, normal and 👑 accounts |
 | `PING_DEFAULT_TARGET` | What a bare `/ping` measures (default: this site's own URL) |
 
-`render.yaml` needs no encryption key; configure the remaining secret values in Render.
+`render.yaml` needs no additional secret-storage variable; configure the remaining secret values in Render.
 
 ## Safe deployments and rollback
 
@@ -213,12 +213,11 @@ that already holds the flag (for everyone else `/queen` stays silent, exactly
 like `/admin`). Every one of those buttons re-checks the flag when pressed:
 `callback_data` is attacker-supplied, so a button existing proves nothing.
 
-`/projects` points at `QUEEN_PROJECTS_REPO` / `QUEEN_PROJECTS_BRANCH`
-(default `https://github.com/tajhatAti/b`, branch `arena/01a0ba14-b`). It lists
-the repo's real contents from the GitHub API (cached 15 minutes, and a rate
-limit degrades to "here is how to run it" rather than an empty list), names the
-file the runner will start, and deploys through the same `/import` path as
-everything else — so a queen deploy obeys the same caps and slug rules.
+`/projects` uses only the optional `QUEEN_PROJECTS_REPO` and
+`QUEEN_PROJECTS_BRANCH` settings; both are empty by default. When configured, it
+loads the repo's real contents from the GitHub API (cached for 15 minutes),
+names the file the runner will start, and deploys through the same `/import`
+path as everything else — so a queen deploy obeys the same caps and slug rules.
 
 Telegram can only hand a bot a 20 MB file, so a heavier bundle goes through the
 website; the dashboard shows the 👑 badge and the limit that applies.

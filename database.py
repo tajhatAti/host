@@ -672,6 +672,20 @@ _SCHEMA_TABLES = [
     )
     """,
     """
+    -- Operational runner/job actions, separate from user analytics and deploy
+    -- metrics. Stores only redacted reasons/identifiers, never source or env.
+    CREATE TABLE IF NOT EXISTS runner_action_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        runner_url TEXT NOT NULL,
+        job_id INTEGER,
+        job_name TEXT,
+        actor TEXT NOT NULL DEFAULT 'system',
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
     -- Telegram-level ban: blocks a raw Telegram user id from the bot
     -- entirely (before /link, before any account exists). Nothing like
     -- this exists on the website — is_suspended there always requires an
@@ -831,6 +845,16 @@ _SCHEMA_TABLES = [
         expires_at TEXT NOT NULL,
         consumed_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    -- Webhook delivery de-duplication. Telegram may retry an update when a
+    -- handler is slow or a connection is interrupted; the stored claim makes
+    -- a retry idempotent without copying message text or other user payloads.
+    CREATE TABLE IF NOT EXISTS telegram_webhook_updates (
+        update_id BIGINT PRIMARY KEY,
+        claimed_at BIGINT NOT NULL,
+        completed_at BIGINT
     )
     """,
     """
@@ -1124,6 +1148,10 @@ def init_db():
                      "ON bot_revisions (job_id, version)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_nodes_enabled "
                      "ON runner_nodes (enabled)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_action_events_runner "
+                     "ON runner_action_events (runner_url, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runner_action_events_job "
+                     "ON runner_action_events (job_id, created_at)")
 
         # Bot Store lookups: the catalog is filtered by status + sorted by
         # installs, and every detail/library call resolves a listing by slug.

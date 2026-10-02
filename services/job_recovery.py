@@ -52,6 +52,20 @@ RECOVERY_INTERVAL_S = int(os.getenv("JOB_RECOVERY_INTERVAL_S", "300") or "0")
 
 _reconciler_started = False
 _reconciler_lock = threading.Lock()
+_recovery_once_lock = threading.Lock()
+
+
+def _record_recovery_action(row: dict, action: str, details: str, worker: str = "") -> None:
+    """Best-effort operational trail; never shares deploy/analytics counters."""
+    try:
+        from services import runner_admin
+        runner_url = (worker or row.get("worker_url") or "").strip()
+        if not runner_url:
+            runner_url = runner_client.runner_cfg()[0] or "embedded"
+        runner_admin.record_action(runner_url, action, details,
+                                  job_id=row.get("id"), job_name=row.get("name") or "")
+    except Exception as exc:
+        logger.debug("Recovery action history unavailable (%s)", type(exc).__name__)
 
 
 def _wanted_rows():
@@ -162,6 +176,12 @@ def _recovery_body(row: dict, env: dict) -> dict | None:
 
 
 def recover_once():
+    """Run one serialized recovery pass; overlapping callers never double-start jobs."""
+    with _recovery_once_lock:
+        return _recover_once_serial()
+
+
+def _recover_once_serial():
     """Recreate missing desired-running jobs. Returns unresolved count."""
     rows = _wanted_rows()
     if not rows:
@@ -210,6 +230,8 @@ def recover_once():
             # Truly nothing — not env, not code. Skip once; don't crash-loop.
             logger.error("Recovery skipped bot %s: no BOT_TOKEN in env or source",
                          row["id"])
+            _record_recovery_action(row, "Automatic recovery blocked",
+                                    "The saved environment and source contain no BOT_TOKEN.")
             unresolved += 1
             continue
         body = _recovery_body(row, env)
@@ -221,6 +243,8 @@ def recover_once():
                 "Recovery skipped bot %s (%s): no source stored and no repo_url "
                 "to re-clone — owner must /update or re-import",
                 row["id"], row.get("name"))
+            _record_recovery_action(row, "Automatic recovery blocked",
+                                    "No source code or repository URL is saved for this job.")
             unresolved += 1
             continue
         try:
@@ -232,23 +256,35 @@ def recover_once():
                     detail = response.text[:200]
                 logger.error("Recovery rejected for bot %s: runner returned %s — %s",
                              row["id"], response.status_code, detail)
+                _record_recovery_action(row, "Automatic recovery failed",
+                                        f"Runner rejected the saved job with HTTP {response.status_code}.")
                 unresolved += 1
                 continue
             info = response.json()
             placed = getattr(response, "placed_on", None)
             _remember(row["id"], info["id"], placed)
+            snapshot_restored = False
             try:
                 from services import snapshots
                 restored = snapshots.restore_snapshot(
                     row["id"], info["id"], overwrite=True, worker=placed)
-                if restored.get("restored"):
+                snapshot_restored = bool(restored.get("restored"))
+                if snapshot_restored:
                     runner_client._runner_http(
                         "POST", f"/internal/jobs/{info['id']}/restart", worker=placed)
             except Exception as exc:
                 logger.warning("Recovery snapshot failed for bot %s: %s", row["id"], exc)
+            _record_recovery_action(
+                row, "Automatic recovery succeeded",
+                f"Restored as runner job {info.get('id')}; "
+                f"workspace {'snapshot restored' if snapshot_restored else 'left as saved on runner'}.",
+                placed or "",
+            )
             recovered += 1
         except Exception as exc:
             logger.warning("Recovery start failed for bot %s: %s", row["id"], exc)
+            _record_recovery_action(row, "Automatic recovery failed",
+                                    f"Recovery raised {type(exc).__name__}; will retry on the next sweep.")
             unresolved += 1
     if recovered:
         logger.info("Recovered %d desired-running bot(s)", recovered)

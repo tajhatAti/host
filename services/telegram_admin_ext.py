@@ -87,21 +87,6 @@ def set_job_limit_override(user_id: int, limit) -> None:
         conn.close()
 
 
-# ── Broadcast — new, not on the website ─────────────────────────────────
-# Sending happens in pingbot.py (it already owns _send/rate limiting to
-# Telegram's API); this just hands back who to send to.
-
-def all_linked_telegram_ids() -> list:
-    conn = get_db_connection()
-    try:
-        rows = conn.execute(
-            "SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL AND is_suspended = 0"
-        ).fetchall()
-        return [r["telegram_id"] for r in rows]
-    finally:
-        conn.close()
-
-
 # ── Admin-level job control — new, not on the website ───────────────────
 # routes/admin.py's job views are read-only (list + detail). An admin
 # could not restart, stop, or delete someone ELSE's job without going
@@ -766,9 +751,6 @@ def admin_logs(job_id: int, lines: int = 40) -> dict:
     if not row:
         return {"ok": False, "error": "No such job."}
     return bot_ops.logs(row["user_id"], str(row["id"]), lines=lines)
-
-
-
 
 
 # ── Audit log — mirrors GET /admin/audit-log ────────────────────────────

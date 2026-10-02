@@ -2,7 +2,7 @@
 public abuse inbox. Moderation actions are session-authenticated and audited."""
 from typing import Optional, List
 import secrets as _secrets
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import ipaddress
 import socket
 import time
@@ -13,9 +13,11 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from routes.deps import *  # shared kernel (config, helpers, models)
 
 
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from services import runner_client
+from services import runner_admin
+from services import telegram_admin_ext
 from services import limits
 from services import secrets_store, env_rescue
 from services.runner_client import MAX_JOBS_PER_USER
@@ -161,12 +163,90 @@ def admin_runners(authorization: Optional[str] = Header(None)):
                         "safe_mb": h.get("safe_mb", 0)}
         except Exception:
             embedded = {"online": False, "jobs": 0, "capacity": 0, "mem_mb": 0, "safe_mb": 0}
+    for row in rows:
+        row["health_url"] = row["url"].rstrip("/") + "/health"
     return {"runners": rows, "environment_runners": env_nodes,
             "embedded": embedded,
             "total_enabled": sum(1 for r in rows if r["enabled"]) + len(env_nodes) + (1 if embedded else 0),
             "setup": {"root_directory": "runner", "runtime": "Docker",
                       "health_path": "/health", "secret_variable": "RUNNER_SERVICE_SECRET",
                       "public_url_variable": "PUBLIC_BASE_URL"}}
+
+
+@router.get("/admin/runners/by-url")
+def admin_runner_detail_by_url(url: str, authorization: Optional[str] = Header(None)):
+    """The same diagnostics for an environment-configured URL in runner_pool()."""
+    require_admin(authorization)
+    result = runner_admin.runner_detail_for_url(url)
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private"})
+
+
+@router.get("/admin/runners/by-url/secret")
+def admin_runner_reveal_configured_secret(url: str, authorization: Optional[str] = Header(None)):
+    admin, _ = require_admin(authorization)
+    result = runner_admin.reveal_runner_secret_for_url(url)
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    if not result.get("secret"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "Runner secret is unavailable.")
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "runner_secret_reveal", result["url"],
+                     "Admin explicitly requested saved runner settings; value not written to the audit log.")
+        conn.commit()
+    finally:
+        conn.close()
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
+
+
+@router.post("/admin/runners/by-url/wake")
+def admin_runner_wake_by_url(url: str, authorization: Optional[str] = Header(None)):
+    admin, _ = require_admin(authorization)
+    result = runner_admin.wake_runner_for_url(url, admin["id"])
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private"})
+
+
+@router.get("/admin/runners/{node_id}")
+def admin_runner_detail(node_id: int, authorization: Optional[str] = Header(None)):
+    """Fresh health diagnosis, every assigned bot, and this runner's action history."""
+    require_admin(authorization)
+    result = runner_admin.runner_detail(node_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private"})
+
+
+@router.get("/admin/runners/{node_id}/secret")
+def admin_runner_reveal_secret(node_id: int, authorization: Optional[str] = Header(None)):
+    """Explicit, audited reveal for the owner to copy the saved runner setting again."""
+    admin, _ = require_admin(authorization)
+    result = runner_admin.reveal_runner_secret(node_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    if not result.get("secret"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "Runner secret is unavailable.")
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "runner_secret_reveal", result["url"],
+                     "Admin explicitly requested saved runner settings; value not written to the audit log.")
+        conn.commit()
+    finally:
+        conn.close()
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
+
+
+@router.post("/admin/runners/{node_id}/wake")
+def admin_runner_wake(node_id: int, authorization: Optional[str] = Header(None)):
+    """Ping /health (wakes a sleeping service where supported), then queue safe bot recovery."""
+    admin, _ = require_admin(authorization)
+    result = runner_admin.wake_runner(node_id, admin["id"])
+    if not result:
+        raise HTTPException(status_code=404, detail="Runner not found.")
+    return JSONResponse(result, headers={"Cache-Control": "no-store, private"})
 
 
 @router.post("/admin/runners/generate-secret")
@@ -311,21 +391,13 @@ def admin_toggle_runner(node_id: int, payload: AdminRunnerToggle,
 
 @router.post("/admin/recover")
 def admin_recover_now(authorization: Optional[str] = Header(None)):
-    """Force one recovery + auto-deploy pass (same as Telegram /recover).
-
-    Brings desired-running bots back after a runner wake/redeploy. Token may
-    live in Env or in source — both are accepted.
-    """
+    """Run one serialized recovery pass; code deploys remain a separate action."""
     admin, _ = require_admin(authorization)
     from services import job_recovery
     try:
         unresolved = job_recovery.recover_once()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Recovery failed: {type(exc).__name__}: {exc}")
-    try:
-        sweep = job_recovery.auto_deploy_sweep(force=True)
-    except Exception as exc:  # noqa: BLE001
-        sweep = {"error": f"{type(exc).__name__}: {exc}"}
     conn = get_db_connection()
     try:
         _admin_audit(conn, admin["id"], "recover_now", "fleet",
@@ -333,7 +405,7 @@ def admin_recover_now(authorization: Optional[str] = Header(None)):
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "unresolved": unresolved, "auto_deploy": sweep,
+    return {"ok": True, "unresolved": unresolved,
             "message": f"Recovery done. Unresolved: {unresolved}."}
 
 
@@ -781,6 +853,89 @@ def admin_jobs_route(authorization: Optional[str] = Header(None)):
     return {"jobs": jobs}
 
 
+@router.get("/admin/jobs/{job_id}/settings")
+def admin_reveal_job_settings(job_id: int, authorization: Optional[str] = Header(None)):
+    """Explicit owner-admin reveal of a saved job's source and environment values."""
+    admin, _ = require_admin(authorization)
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id,user_id,name,language,code,env,desired_state,created_at,updated_at,"
+            "repo_url,repo_entry,repo_commit,auto_deploy FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        item = dict(row)
+    finally:
+        conn.close()
+
+    env_values, readable = secrets_store.read_env(item.get("env"))
+    if not readable:
+        # If an old unreadable row still has the runner's manifest copy, repair
+        # the DB from that authoritative copy before returning the settings.
+        try:
+            env_values, outcome = env_rescue.rescue_job_env(item)
+            readable = outcome in (env_rescue.FINE, env_rescue.LEGACY_OK, env_rescue.RESCUED)
+        except Exception:
+            logger.exception("admin settings reveal could not restore env for job %s", job_id)
+            env_values, readable = {}, False
+
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "admin_job_settings_reveal", f"job:{job_id}",
+                     "Admin explicitly requested saved source/settings; secret values omitted from the audit log.")
+        conn.commit()
+    finally:
+        conn.close()
+    item.pop("env", None)
+    item.pop("user_id", None)
+    return JSONResponse({"job": item, "env": env_values or {}, "env_readable": bool(readable)},
+                        headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
+
+
+@router.post("/admin/jobs/{job_id}/restart")
+def admin_restart_job_route(job_id: int, authorization: Optional[str] = Header(None)):
+    """Admin restart through the job's assigned runner; missing ids cold-start safely."""
+    admin, _ = require_admin(authorization)
+    row = telegram_admin_ext.admin_find_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    result = telegram_admin_ext.admin_restart_job(job_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result.get("error") or "The job could not be restarted.")
+    worker = (row.get("worker_url") or "primary")
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "admin_job_restart", f"job:{job_id}",
+                     f"name={row.get('name') or ''}; runner={worker}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "job_id": job_id, "name": row.get("name"),
+            "message": f"Restart requested for {row.get('name') or 'job'}; its workspace is preserved."}
+
+
+@router.post("/admin/jobs/{job_id}/stop")
+def admin_stop_job_route(job_id: int, authorization: Optional[str] = Header(None)):
+    """Admin stop through the job's assigned runner, preserving its workspace."""
+    admin, _ = require_admin(authorization)
+    row = telegram_admin_ext.admin_find_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    result = telegram_admin_ext.admin_stop_job(job_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result.get("error") or "The job could not be stopped.")
+    conn = get_db_connection()
+    try:
+        _admin_audit(conn, admin["id"], "admin_job_stop", f"job:{job_id}",
+                     f"name={row.get('name') or ''}; runner={row.get('worker_url') or 'primary'}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "job_id": job_id, "name": row.get("name"),
+            "message": f"{row.get('name') or 'Job'} stopped. Its files are preserved."}
+
+
 @router.get("/admin/jobs/{job_id}")
 def admin_job_detail_route(job_id: int, authorization: Optional[str] = Header(None)):
     """One app, in full — everything that explains why it is behaving that way.
@@ -835,7 +990,19 @@ def admin_job_detail_route(job_id: int, authorization: Optional[str] = Header(No
     job["telegram_bot_url"] = f"https://t.me/{bot_username}" if bot_username else None
     job.pop("owner_telegram", None)
     worker = job.get("worker_url") or None
-    job["worker"] = worker or "primary"
+    if worker and worker != "embedded":
+        runner_url = worker.rstrip("/")
+    elif worker == "embedded":
+        runner_url = (os.getenv("SITE_BASE_URL", "").strip()
+                      or os.getenv("SITE_BASE", "").strip()
+                      or os.getenv("PUBLIC_BASE_URL", "").strip()
+                      or os.getenv("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
+    else:
+        pool = runner_client.runner_pool()
+        runner_url = pool[0].rstrip("/") if pool else runner_client.public_base_url().rstrip("/")
+    job["worker"] = runner_url or ("embedded engine" if worker == "embedded" else "primary")
+    job["runner_url"] = runner_url
+    job["runner_health_url"] = f"{runner_url}/health" if runner_url else None
 
     # Ask the worker that actually holds this job. Going to pool[0] would
     # report a perfectly healthy app on an overflow worker as missing.
@@ -861,6 +1028,10 @@ def admin_job_detail_route(job_id: int, authorization: Optional[str] = Header(No
               "last_exit_reason", "started_at"):
         job[k] = live.get(k)
     job["libs"] = live.get("libs") or []
+    if live.get("web_slug") and live.get("web_public", True) and runner_url:
+        job["web_url"] = f"{runner_url}/live/{quote(str(live['web_slug']).strip('/'), safe='')}/"
+    else:
+        job["web_url"] = None
     # Env VALUES hold bot tokens. Only the key names are ever returned, and
     # this is the one place the distinction matters enough to name it.
     job["env_keys"] = live.get("env_keys") or []

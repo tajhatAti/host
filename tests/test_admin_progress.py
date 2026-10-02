@@ -134,7 +134,8 @@ def test_admin_job_card_shows_runner_and_source(monkeypatch):
         assert needle in text, needle
 
     kb = pingbot._admin_job_kb(j)
-    data = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+    data = [b["callback_data"] for row in kb["inline_keyboard"]
+            for b in row if b.get("callback_data")]
     for need in ("admin:jobrestart:11", "admin:jobstop:11", "admin:joblogs:11",
                  "admin:jobsource:11", "admin:jobedit:11", "admin:jobenv:11",
                  "admin:jobdelconfirm:11", "admin:user:7"):

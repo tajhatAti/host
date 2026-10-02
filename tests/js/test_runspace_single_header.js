@@ -174,7 +174,7 @@ for (const width of [320, 375, 414, 768, 1280]) {
   const strays = [...head.querySelectorAll('button')]
     .filter(b => !b.closest('.rs-menu') && !b.closest('#rsIdentity'))
     .map(b => b.id);
-  const allowed = ['wbMenuBtn', 'btnRunQuick', 'btnSaveQuick', 'rsMoreBtn'];
+  const allowed = ['wbMenuBtn', 'btnRunQuick', 'btnSaveQuick', 'rsReqChip', 'rsMoreBtn'];
   ok(`[${width}] only the unified kebab remains in the row`,
      strays.every(id => allowed.includes(id)) && strays.includes('rsMoreBtn'),
      strays.join(','));

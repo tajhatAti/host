@@ -122,9 +122,9 @@ def _unpack_with_key_index(value):
             except Exception:
                 continue
         if text is None:
-            logger.error("Legacy encrypted env could not be decrypted with any "
-                         "configured key — set JOB_SECRETS_KEY to the value this "
-                         "row was written with, or re-enter the secrets by hand")
+            logger.error("Legacy env data could not be read with any configured key — set "
+                         "JOB_SECRETS_KEY to the value this row was written with, "
+                         "or re-enter the secrets by hand")
             return {}, None
     try:
         parsed = json.loads(text)
@@ -202,7 +202,7 @@ def migrate_job_envs():
             if _is_legacy(item.get("env")):
                 if key_index is None:
                     unreadable += 1
-                    logger.error("Job %s still holds an undecryptable env blob; "
+                    logger.error("Job %s still has unreadable environment data; "
                                  "its BOT_TOKEN must be re-entered", item["id"])
                     continue
                 updates.append("env=?")
@@ -234,8 +234,8 @@ def migrate_job_envs():
             values, key_index = _unpack_with_key_index(item.get("encrypted_secret"))
             if key_index is None:
                 unreadable += 1
-                logger.error("Runner #%s has an undecryptable secret; re-add the "
-                             "runner or set JOB_SECRETS_KEY to the old value", item["id"])
+                logger.error("Runner #%s has unreadable secret data; re-add the runner "
+                             "or set JOB_SECRETS_KEY to its previous value", item["id"])
                 continue
             conn.execute("UPDATE runner_nodes SET encrypted_secret=? WHERE id=?",
                          (pack_env(values), item["id"]))

@@ -68,8 +68,9 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   for (const el of d.querySelectorAll('[onclick]')) {
     for (const m of String(el.getAttribute('onclick')).matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
       const f = m[1];
-      if (['event', 'window', 'document', 'if', 'else', 'open', 'click',
-           'getElementById', 'preventDefault', 'stopPropagation', 'newSnippet']
+      if (['event', 'window', 'document', 'if', 'else', 'function', 'open', 'click',
+           'getElementById', 'querySelector', 'setAttribute', 'remove', 'add',
+           'preventDefault', 'stopPropagation', 'newSnippet']
           .includes(f)) continue;
       used.add(f);
     }

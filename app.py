@@ -94,8 +94,8 @@ async def startup_event():
         from services import secrets_store
         result = secrets_store.migrate_job_envs()
         if result.get("unreadable"):
-            logger.error("%d env blob(s) could not be decrypted — those bots need "
-                         "their secrets re-entered", result["unreadable"])
+            logger.error("%d env record(s) are unreadable — those bots need their "
+                         "secrets re-entered", result["unreadable"])
     except Exception as exc:
         logger.error("Secret storage migration failed: %s", exc)
     # Rows the migration could not read are not necessarily lost: the runner
