@@ -40,17 +40,18 @@ Browser / Telegram Mini App / Telegram bot poller
 - **broadcast_campaigns / broadcast_recipients**, **store_items**, **bot_revisions**, **admin_audit_log**, **abuse_reports**, **term_homes**, etc.
 - Secrets: plain JSON in `jobs.env` (masked everywhere), legacy `enc:v1:` Fernet migrated on boot via `secrets_store.migrate_job_envs()`, rescued from runner `job.json` via `env_rescue`
 
-## Code Handling (runner/app.py)
-- **Entry Detection:** `_detect_entry()` → `main.py → bot.py → app.py → index.js → bot.js → main.js → …` + manifest-aware fallback; respects `entry` param from GitHub scan.
-- **ZIP Bundle:** `POST /internal/jobs {zip_b64, zip_max_mb/files, language}` → `_extract_zip_bundle` (zip-slip checked, `ZIP_BUNDLE_MAX_BYTES 5 MB` default, ceiling `200 MB` / `20000` entries) → respects `bot_ops.zip_limits_for(user_id)` (queen 150 MB)
-- **Repo Clone:** `repo_url` → `git clone --branch` exact branch from `/tree/branch` or `#branch`, records `commit`, installs root + up to 4 sub-project `requirements.txt`/`package.json`
+## Code Handling (runner/app.py) — telebotcreator.com equivalent, REAL code
+- **Entry Detection:** `_detect_entry()` exact order `python main.py→app.py→bot.py→server.py→index.py→run.py | node index.js→server.js→app.js→main.js→bot.js | ruby app.rb→main.rb | php index.php | bash start.sh` + fallback largest `*.py` (`*.js` if package.json) at root. Respects `entry` param from GitHub scan.
+- **ZIP .zip Structure (EXPLICIT — GitHub-like):** runner extracts WHOLE zip preserving folders (zip-slip checked) into `DATA_DIR/jobs/{id}/`. Recommended flat: `main.py (+ requirements.txt at ROOT) + utils/helpers.py`; also allowed nested `src/bot.py + src/requirements.txt` (entry `src/bot.py`). Limits normal `5 MB/500` unzipped, queen `150 MB/8000`, ceiling `200 MB/20000`. Do NOT zip `__MACOSX`, dotfiles, hardcode BOT_TOKEN; include `requirements.txt` pinned. Create via `zip -r bot.zip . -x "__pycache__/*" ".git/*"` then `base64 -w0 bot.zip` → `POST /api/jobs {name, zip_b64, zip_max_mb}`. See `llms-full.txt §5` for full tree examples.
+- **GitHub Repo Structure (EXPLICIT):** same layout as ZIP but `git clone --depth 1 --branch <branch> https://github.com/o/r.git DATA_DIR/jobs/{id}/`. URL forms `owner/repo`, `/tree/<branch>`, `/blob/<branch>/file`, `#branch` — preserved, branch may contain slashes. Repo must be PUBLIC, must contain entry candidate at root or subfolder. Records `repo_commit` SHA + `repo_entry`; queen `auto_deploy` follows branch. Multi-project repo: use `entry=bot-a/bot.py` + `deps=["bot-a/requirements.txt"]` (≤4). See `llms-full.txt §5` for both layouts.
+- **Repo Clone:** `repo_url` → `git clone --branch` exact branch, records `commit`, installs root + up to 4 sub-project `requirements.txt`/`package.json`
 - **Deps:** scans imports → `pip install` / `npm install` inside job dir `DATA_DIR/jobs/{id}`; `pylibs` + `install_specs` re-checked on `/restart`
 - **Execution:** `subprocess.Popen` with `RLIMIT_AS`, `PORT` env, log `deque(2000)`, `peak_mem_mb`, `restarts`, `last_exit_reason`, snapshot restore on cold start
 
-## RAM Management Detail
+## RAM Management Detail + Lifecycle Fix (Runner/Job still running bug)
 - `runner/app.py`: `TOTAL_MB` from `psutil`/`/proc/meminfo`, `MEM_SAFE_MB = int(total*0.82)`; `health()` reports `jobs, capacity, free, full, load, mem_mb/safe_mb/total_mb/free_mb`
 - `services/runner_client.py`: `worker_health(parallel ThreadPool, TTL 20s, 3s probe)` → `free_mb` drives placement; `fleet_jobs(parallel, memo FLEET_CACHE_MS 3000)` merges all workers; `_runner_http` retries `502/503/504` wakeups (`WAKE_RETRIES 2` × `4s`), respects `X-Runner-Full` rollover, suspend detection `"service suspended"`
-- `services/job_recovery.py`: `recover_background()` respawns `desired_state=running` jobs, `RECOVERY_INTERVAL_S` reconciler
+- `services/job_recovery.py`: `recover_background()` respawns `desired_state=running` jobs + `reap_orphans()` every 300s deletes fleet jobs not in DB (orphan) or DB `desired_state=stopped` but still `running` → fixes "Runner stopped / job deleted but bot still polls Telegram". `routes/runspace.py` now fleet-aware (`GET /api/jobs` no longer blind `running`), `POST stop` idempotent (marks DB stopped even when runner unreachable, reaper kills later). `services/bot_ops.py` same for Telegram stop.
 
 ## Telegram Integration (services/pingbot.py)
 - **Link:** `/link` → `telegram_link` table `chat_id → user_id`; webhook `telegram_webhook_queue.TelegramWebhookQueue` (durable DB `telegram_webhook_updates`, 3 workers, `poll_s 0.8`, lease 300s, `answerCallbackQuery` immediate before work)

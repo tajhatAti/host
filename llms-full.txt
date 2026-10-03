@@ -127,10 +127,103 @@ ZIP bundle (runner/app.py `_extract_zip_bundle`):
 - Checks: `BadZipFile`, base64 validate, file count > max_entries → `[system] ✗ zip has X files`, total uncompressed > max_bytes → `✗ zip too large`, zip-slip (`../../`, absolute) rejected, directories created via `Path.resolve` containment.
 - Logs to `deque(2000)` `[system] …` lines.
 
+★ .ZIP FILE STRUCTURE — telebotcreator-like, EXPLICIT (what the .zip must look like inside):
+
+  Like telebotcreator.com, the .zip is the project folder — not a single file dump.
+  The runner extracts the WHOLE zip preserving folders (zip-slip checked) into
+  `DATA_DIR/jobs/{runnerJobId}/` and then `_detect_entry()` picks the runnable file.
+
+  Recommended flat (simplest) — entry + requirements at ROOT:
+  ```
+  mybot.zip
+  ├─ main.py              ← REQUIRED entry (see candidates below) — must exist
+  ├─ requirements.txt     ← Python deps (or package.json / Gemfile / pyproject.toml)
+  ├─ config.json          ← optional
+  ├─ database.db          ← optional (snapshotted, will be restored on runner restart)
+  └─ utils/               ← optional subfolders — imports must be relative (`from utils import …`)
+      └─ helpers.py
+  ```
+
+  Also allowed — nested project / subfolder entry:
+  ```
+  mybot.zip
+  ├─ src/
+  │  ├─ bot.py            ← entry is src/bot.py (runner detects it; you may also pass entry="src/bot.py")
+  │  └─ requirements.txt  ← subfolder manifest: runner installs it because entry folder carries its own manifest (extra_deps ≤4)
+  ├─ README.md            ← ignored for entry detection (skips test_/setup prefixes)
+  └─ data/
+     └─ seed.json
+  ```
+
+  What NOT to do:
+  * Do NOT zip the parent folder twice (`mybot/mybot/main.py` nested zip-of-folder is OK but entry will be `mybot/main.py` — just avoid empty outer wrapper).
+  * Do NOT put `main.py` inside `__MACOSX/` or dotfiles — those are filtered out.
+  * Do NOT exceed limits: normal 5 MB / 500 files (uncompressed total), queen 150 MB / 8000 files, hard ceiling 200 MB / 20000 — `[system] ✗` will abort.
+  * Do NOT hardcode `BOT_TOKEN = "123:AA..."` in the zipped code — move it to Env tab (it will be written to `env` and injected as `os.environ["BOT_TOKEN"]`).
+
+  Entry candidates IN ORDER (runner/app.py `_ENTRY_CANDIDATES`):
+  ```
+  python: main.py → app.py → bot.py → server.py → index.py → run.py
+  node  : index.js → server.js → app.js → main.js → bot.js
+  ruby  : app.rb → main.rb → server.rb
+  php   : index.php → main.php
+  bash  : start.sh → run.sh → main.sh
+  html/static: index.html (no manifest) → synthesized python http.server launcher
+  ```
+  Fallback when none of the above exists at root: largest `*.py` (`*.js` if package.json present) at root, not `test_`/`_`/`.`.
+
+  Requirements detection:
+  * Root: any of `requirements.txt`, `pyproject.toml`, `package.json`, `Gemfile` at job root → installed (`pip install --target pylibs` or `npm install --omit=dev`).
+  * Plus up to 4 sub-project manifests: whatever folder the chosen entry lives in (`src/requirements.txt`) and any `deps:[...]` repo-relative paths the site scanned (`services/github_repo.py`).
+
+  ZIP creation checklist for AI/humans:
+  1. At your project folder run `zip -r mybot.zip . -x "__pycache__/*" ".git/*" "venv/*"`
+  2. `unzip -l mybot.zip` → must list `main.py` (or other candidate) at root or `src/bot.py`
+  3. `base64 -w0 mybot.zip` → paste as `zip_b64` in `POST /api/jobs {name, zip_b64, zip_max_mb, ...}` or via dashboard Upload ZIP / Telegram `.zip` file.
+
 GitHub import:
 - URL forms: `owner/repo`, `owner/repo/tree/<branch>`, `owner/repo#branch` — preserved via `_repo_branch_of` + `QUEEN_PROJECTS_REPO/BRANCH` handling; runner parses branch again on clone.
 - Services `github_repo.head_commit(owner,repo,branch)` verifies without token anonymous 60/h vs `GITHUB_TOKEN` 5000/h.
 - Deps: installs root manifest AND each chosen sub-project’s manifest up to 4 paths (`deps: [str]`), not just root.
+
+★ GITHUB REPO STRUCTURE — telebotcreator-like, EXPLICIT:
+
+  Like telebotcreator.com, the repo IS the project — same layout as the .zip, but cloned via `git clone --depth 1 --branch <branch> --single-branch https://github.com/o/r.git DATA_DIR/jobs/{runnerJobId}/`.
+
+  Branch selection:
+  * URL `https://github.com/owner/repo` → default branch (`main`/`master`, detected via `git ls-remote` fallback)
+  * `https://github.com/owner/repo/tree/dev` or `/blob/dev/file.py` or `https://github.com/owner/repo#dev` → exact branch `dev` (branch names may contain slashes e.g. `arena/01a-b` — longest-match tried).
+  * Subfolder view `https://github.com/owner/repo/tree/main/src` → branch `main`, but entry may be `src/bot.py` (use `entry` param to pin it).
+  * Commit recorded as `jobs.repo_commit` SHA; `is there a newer commit?` via `GET /api/jobs/{id}/telegram-health` or admin; queen `Auto deploy` toggles follow-branch (`jobs.auto_deploy`).
+
+  Expected repo layout (identical to ZIP, just git-tracked):
+  ```
+  owner/repo (branch main)
+  ├─ main.py              ← entry (candidates same as ZIP above)
+  ├─ requirements.txt     ← runner installs from here automatically
+  ├─ .env.example         ← never commit real BOT_TOKEN; set Env in CodeNest dashboard
+  └─ modules/
+     └─ handlers.py
+  ```
+
+  Or multi-project repo (two bots in one repo) — use `entry` + `deps`:
+  ```
+  owner/mega-repo
+  ├─ bot-a/
+  │  ├─ bot.py            ← entry=bot-a/bot.py
+  │  └─ requirements.txt  ← deps=["bot-a/requirements.txt"]
+  └─ bot-b/
+     ├─ main.py           ← entry=bot-b/main.py
+     └─ package.json
+  ```
+  When importing via site/Telegram, `services/github_repo.py` scans and offers a picker for which entry to run and which manifests to install — the chosen `entry` and `deps` are sent to the runner, which then clones and writes a `main.py` wrapper (`runpy.run_path`) so imports still resolve relative to the repo.
+
+  GitHub import checklist:
+  1. Repo must be PUBLIC (runner git clone has no auth); private → `[system] ✗ that repo is private`
+  2. Must contain an entry candidate at root or subfolder (or a `*.py` fallback)
+  3. Prefer `requirements.txt` pinned (`python-telegram-bot==21.4`, not `*`) — runner auto-detects imports but explicit is faster
+  4. `BOT_TOKEN` NOT in repo — use CodeNest Env tab / `PATCH /api/jobs/{id} {env:{BOT_TOKEN}}` (injected as `os.environ`)
+  5. Large assets (videos, model weights) → use queen runner (150 MB, exclusive 512 MB) or host externally — free runner disk is ephemeral but `database.db`/`session.json` are snapshotted.
 
 Dependency handling:
 - Runner scans imports (`_pkg_display_name` via `requirements.txt` / `import` regex), checks `python3 -c "import pkg"` per `install_specs` before restart (`_ensure_deps` 60s budget), then `pip install` with `install_specs` pinned spec if missing; Node via `npm install` similarly.
@@ -206,6 +299,8 @@ Webhook variant: `app.listen(process.env.PORT)` → runner assigns `https://…/
 - Queen exclusive: `mem_limit_mb=0` (no RLIMIT), `set_queen_pin(url, exclusive=1)` → other users `cat 2` avoid that runner; queen gets 512 MB alone. Heavy ZIP 150 MB uses that runner alone; video upload/download stays there.
 - Why heavy landed on loaded R2: old `_placement_order` used `free slots` not `free_mb`, and not exclusive. Fixed to `free_mb`.
 - Historical bug fixes: fleet reads saw only worker #1 (now parallel), web URL used primary (now worker), health missing `safe_mb` summed zero (now kept).
+- LIFECYCLE FIX 2026-10-03 ("Runner stopped / job deleted but bot still running" GHOST BOT BUG):
+  `services/job_recovery.reap_orphans()` every 300s compares `fleet_jobs()` vs DB `jobs.runner_job_id`: (1) orphan fleet job with no DB row (DELETE missed offline runner) → `DELETE /internal/jobs/{id}` on its worker; (2) DB `desired_state=stopped` but fleet status=running (STOP missed offline) → `POST /internal/jobs/{id}/stop`. `routes/runspace.GET /api/jobs` & `GET /api/jobs/{id}` are now fleet-aware (was blind `running` for all desired!=stopped — now true offline vs running via cached fleet, status_stale flag). `POST /api/jobs/{id}/stop` and `services/bot_ops._act stop` are idempotent: DB `desired_state=stopped` is set even when runner unreachable; reaper kills the live polling process when worker answers. `DELETE /api/jobs/{id}` removes DB row even when runner unreachable; reaper cleans the orphaned polling process within 5 min. Runner `job_stop` already clears manifest PID so `_recover_jobs` never respawns a stopped job; deleted jobs' manifests are removed via `rmtree`, orphan case only for offline delete handled by reaper.
 
 ────────────────────────────────────────────────────────────────
 8. TELEGRAM INTEGRATION (services/pingbot.py 6005 lines)
@@ -338,6 +433,7 @@ curl examples for AI:
 ────────────────────────────────────────────────────────────────
 16. CHANGELOG & GUARANTEES
 ────────────────────────────────────────────────────────────────
+- 2026-10-03 (later): GHOST BOT BUGFIX + telebotcreator ZIP/GitHub structure docs — `reap_orphans()` orphan/stale reaper, `GET /api/jobs` fleet-aware status (no more green while offline), `POST stop`/`DELETE` idempotent even when runner unreachable, ZIP layout (`main.py + requirements.txt` at root or `src/bot.py`) and GitHub repo layout (branch exact, `entry`+`deps`, `auto_deploy`) documented with trees & candidate order in §5 (telebotcreator-like explicit). Mirrored to `llms.txt`, `ai.txt`.
 - 2026-10-03: queen 512 exclusive + free_mb balancing + runner pin UI + health parallel + fleet parallel + webhook 3-workers + isolation no-kill queen + ZIP 150 MB + admin neat + llms.txt/ai.txt for LLM ingest (this doc). No env needed for new features.
 - Guarantees for AI: all paths above are real routes; paste the curl examples verbatim; respect `u{id}-` name prefix for placement; never return token; always check `/health` free_mb before assuming capacity; use `POST /internal/jobs` via main site, never direct to runner without secret.
 

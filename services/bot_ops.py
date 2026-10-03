@@ -545,16 +545,20 @@ def _act(user_id: int, ref: str, verb: str) -> dict:
         # runner and replace the DB assignment instead of claiming success.
         return _cold_start(row)
 
-    # Stop is idempotent: a missing internal id is already stopped.
+    # Stop is idempotent: DB desired_state is the source of truth.
+    # Even when the runner is offline/waking we MARK STOPPED so the dashboard
+    # never stays green while the polling process is still alive elsewhere.
+    # The orphan reaper kills the live process when the worker answers again.
     if rid:
         try:
             response = runner_client._runner_http(
                 "POST", f"/internal/jobs/{rid}/stop", worker=_worker_of(row))
             if response.status_code not in (200, 404):
-                return {"ok": False, "error": f"Runner rejected stop (HTTP {response.status_code})."}
+                logger.warning("bot stop rejected for job %s: HTTP %s — marking stopped anyway",
+                               row.get("id"), response.status_code)
         except Exception as exc:
-            logger.warning("bot stop failed for job %s: %s", row.get("id"), exc)
-            return {"ok": False, "error": "The assigned runner did not answer. Try again shortly."}
+            logger.warning("bot stop unreachable for job %s: %s — marking stopped anyway",
+                           row.get("id"), exc)
     _set_assignment(row, rid, _worker_of(row), "stopped")
     return {"ok": True, "job": row}
 
