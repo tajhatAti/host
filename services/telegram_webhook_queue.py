@@ -24,35 +24,56 @@ REUSE_AFTER_NS = 7 * 24 * 60 * 60 * 1_000_000_000
 
 
 class TelegramWebhookQueue:
-    """A single-threaded handler queue backed by the site's own database."""
+    """Durable handler queue — now concurrent (3 workers) for button responsiveness.
 
-    def __init__(self, *, lease_ns: int = LEASE_NS, poll_s: float = 2.0):
+    The old single-threaded queue serialized every callback + command. When one
+    handler probed 6 sleeping runners (18s) the next button tap queued behind
+    it and looked dead — that's the "inline buttons take long at night" bug.
+    Workers compete for the same DB-claimed queue so parallelism helps even
+    with the 5-10s cold-start stalls.
+    """
+
+    def __init__(self, *, lease_ns: int = LEASE_NS, poll_s: float = 0.8, workers: int = 3):
         self.lease_ns = int(lease_ns)
         self.poll_s = max(0.05, float(poll_s))
+        self.workers = max(1, int(workers))
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._handler: Callable | None = None
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
+        self._thread: threading.Thread | None = None  # compat alias for tests that check _thread
         self._stop = threading.Event()
 
     def start(self, handler: Callable) -> None:
-        """Start the worker once; safe to call from startup and each request."""
+        """Start workers once; safe to call from startup and each request."""
         with self._lock:
             self._handler = handler
-            if self._thread and self._thread.is_alive():
+            alive = [th for th in self._threads if th.is_alive()]
+            self._threads = alive
+            if alive:
                 return
             self._stop.clear()
-            self._thread = threading.Thread(
-                target=self._run, daemon=True, name="telegram-webhook-queue")
-            self._thread.start()
+            for i in range(self.workers):
+                th = threading.Thread(
+                    target=self._run, daemon=True, name=f"telegram-webhook-queue-{i}")
+                th.start()
+                self._threads.append(th)
+            self._thread = self._threads[0] if self._threads else None
 
     def stop(self, timeout: float = 2.0) -> None:
         """Test/process-shutdown hook; production workers are daemon threads."""
         self._stop.set()
-        self._queue.put(None)
-        thread = self._thread
-        if thread and thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, timeout))
+        # wake all workers
+        for _ in range(len(self._threads) or 1):
+            try:
+                self._queue.put(None, block=False)
+            except Exception:
+                pass
+        for th in list(self._threads):
+            if th and th is not threading.current_thread():
+                th.join(timeout=max(0.0, timeout / max(1, len(self._threads))))
+        self._threads = []
+        self._thread = None
 
     def enqueue(self, update: dict, handler: Callable) -> str:
         """Persist and queue a Telegram update; return queued/duplicate/invalid/unavailable."""

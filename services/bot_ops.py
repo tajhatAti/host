@@ -138,10 +138,10 @@ mem_limit_for = _mem_limit_for
 # whole project — assets, a vendored folder, a starter database. The runner
 # still enforces its own hard ceiling (ZIP_BUNDLE_CEILING_*), so these numbers
 # only decide what the site ASKS for on this account's behalf.
-ZIP_MAX_MB = int(os.getenv("ZIP_MAX_MB", "5"))
-ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
-QUEEN_ZIP_MAX_MB = int(os.getenv("QUEEN_ZIP_MAX_MB", "60"))
-QUEEN_ZIP_MAX_FILES = int(os.getenv("QUEEN_ZIP_MAX_FILES", "5000"))
+ZIP_MAX_MB = 5  # hard-coded (no env var) — queen gets the big box, see queen_runner_pins
+ZIP_MAX_FILES = 500
+QUEEN_ZIP_MAX_MB = 150  # heavy video projects need real room (runner ceiling is 200MB)
+QUEEN_ZIP_MAX_FILES = 8000
 
 
 def account_privileges(user_id: int) -> dict:

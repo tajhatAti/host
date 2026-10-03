@@ -31,6 +31,7 @@ from services import runner_client  # noqa: E402
 from services import bot_analytics
 from services import telegram_admin_ext  # noqa: E402
 from services import github_repo  # noqa: E402
+from services import pingbot_broadcast  # noqa: E402
 
 import logging
 logger = logging.getLogger("codenest-app")
@@ -105,30 +106,29 @@ def _admin_notify_loop():
 
 
 def _admin_menu_kb():
+    """Neat, grouped admin menu — core health first, bulk actions last."""
     return {"inline_keyboard": [
-        [{"text": "📊 Overview", "callback_data": "admin:overview"},
-         {"text": "👥 Users", "callback_data": "admin:users:0"}],
-        # First thing to open when something "doesn't work": it reads the
-        # webhook, the runners, the jobs table and both recovery loops live, and
-        # explains how a deploy is supposed to behave now.
-        [{"text": "🩺 Health & how it works", "callback_data": "admin:health"}],
+        # Top row: the two things an admin checks first at night when bots seem slow
+        [{"text": "🩺 Health", "callback_data": "admin:health"},
+         {"text": "📊 Overview", "callback_data": "admin:overview"}],
+        [{"text": "👥 Users", "callback_data": "admin:users:0"},
+         {"text": "👑 Queens", "callback_data": "admin:queens"}],
         [{"text": "🖥 Runners", "callback_data": "admin:runners"},
          {"text": "📦 Jobs", "callback_data": "admin:jobs:0"}],
-        [{"text": "📝 Audit log", "callback_data": "admin:audit"},
-         {"text": "🚩 Abuse reports", "callback_data": "admin:abuse"}],
-        [{"text": "🔍 Security", "callback_data": "admin:security"},
-         {"text": "🔗 Clusters", "callback_data": "admin:clusters"}],
-        [{"text": "⛔ Bans", "callback_data": "admin:bans"},
-         {"text": "📢 Broadcast", "callback_data": "admin:broadcast"}],
-        [{"text": "🔎 Search users", "callback_data": "admin:searchflow"},
-         {"text": "🆕 Signups", "callback_data": "admin:signups"}],
-        [{"text": "📤 Export", "callback_data": "admin:exportmenu"},
-         {"text": "🏪 Store queue", "callback_data": "admin:store"}],
-        [{"text": "📜 Terms status", "callback_data": "admin:terms"},
-         {"text": "🧑‍⚖️ Audit by admin", "callback_data": "admin:auditadmins"}],
-        [{"text": "👑 Queens", "callback_data": "admin:queens"},
+        [{"text": "📢 Broadcast", "callback_data": "admin:broadcast"},
          {"text": "♻️ Recover now", "callback_data": "admin:recovernow"}],
-        [{"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
+        [{"text": "🚩 Reports", "callback_data": "admin:abuse"},
+         {"text": "📝 Audit", "callback_data": "admin:audit"}],
+        [{"text": "🔎 Search", "callback_data": "admin:searchflow"},
+         {"text": "🆕 Signups", "callback_data": "admin:signups"}],
+        [{"text": "⛔ Bans", "callback_data": "admin:bans"},
+         {"text": "🔗 Clusters", "callback_data": "admin:clusters"}],
+        [{"text": "🔍 Security", "callback_data": "admin:security"},
+         {"text": "📜 Terms", "callback_data": "admin:terms"}],
+        [{"text": "📤 Export", "callback_data": "admin:exportmenu"},
+         {"text": "🏪 Store", "callback_data": "admin:store"}],
+        [{"text": "🧑‍⚖️ By admin", "callback_data": "admin:auditadmins"},
+         {"text": _maintenance_label(), "callback_data": "admin:togmaint"}],
     ]}
 
 
@@ -617,21 +617,68 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         return
 
     if sub == "broadcast":
+        # Rich broadcast — supports: /admin broadcast status, /admin broadcast cancel <id>, /admin broadcast <message>
+        low_rest = (rest or "").strip().lower()
+        if low_rest in ("status", "list", "queue"):
+            try:
+                from services import pingbot_broadcast as _pb
+                cands = _pb.list_campaigns(limit=5)
+                if not cands:
+                    _send(chat_id, "📢 No broadcasts yet.")
+                    return
+                lines = ["📢 *Recent broadcasts:*"]
+                for c in cands:
+                    lines.append(f"#{c['id']} · `{c['status']}` · {c.get('total_count',0)} users · {c.get('created_at','')[:10]}")
+                    lines.append(f"_{ (c.get('text') or '')[:80].replace(chr(10),' ') }_")
+                kb = {"inline_keyboard": [[{"text": f"📊 #{c['id']} status", "callback_data": f"admin:broadcast_status:{c['id']}" }] for c in cands[:4]] + [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]}
+                _send(chat_id, "\n".join(lines), reply_markup=kb)
+            except Exception as exc:
+                logger.exception("broadcast status failed")
+                _send(chat_id, f"❌ Status failed: {type(exc).__name__}")
+            return
+        if low_rest.startswith("cancel"):
+            bits = (rest or "").split(None, 1)
+            cid = bits[1].strip() if len(bits) > 1 else ""
+            if not cid.isdigit():
+                _send(chat_id, "Usage: `/admin broadcast cancel <id>` — or `status` to list.")
+                return
+            try:
+                from services import pingbot_broadcast as _pb
+                ok = _pb.cancel_campaign(int(cid))
+                _send(chat_id, f"✅ Broadcast #{cid} cancelled." if ok else f"❌ Could not cancel #{cid} (not found or already done).")
+                if ok:
+                    _send(chat_id, _pb.status_text(int(cid)), reply_markup=_pb.status_keyboard(int(cid)))
+            except Exception as exc:
+                _send(chat_id, f"❌ Cancel failed: {exc}")
+            return
         if not rest:
             _start_admin_flow(chat_id, "broadcast")
             return
-        ids = telegram_admin_ext.all_linked_telegram_ids()
-        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
-        sent = 0
-        for tid in ids:
-            try:
-                _send(tid, rest)
-                sent += 1
-            except Exception:
-                pass
-            time.sleep(0.05)  # stay well under Telegram's flood limits
-        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
-        return
+        # One-line broadcast with explicit preview + confirmation (new rich path).
+        # Keep legacy immediate-send as fallback if broadcast module unavailable.
+        try:
+            from services import pingbot_broadcast as _pb
+            cid = _pb.create_campaign(telegram_user_id or chat_id, rest, auto_start=False)
+            st = _pb.campaign_stats(cid)
+            # preview to admin with confirm/cancel buttons
+            _send(chat_id, _pb.preview_text(cid), reply_markup=_pb.preview_keyboard(cid))
+            _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+            return
+        except Exception as exc:
+            logger.exception("rich broadcast create failed, falling back to legacy")
+            # fallback legacy immediate
+            ids = telegram_admin_ext.all_linked_telegram_ids()
+            _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+            sent = 0
+            for tid in ids:
+                try:
+                    _send(tid, rest)
+                    sent += 1
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+            return
 
     if sub in ("health", "doctor", "diag", "diagnose"):
         # The same screen the 🩺 button shows: webhook, runners, jobs, the two
@@ -956,7 +1003,7 @@ def _admin_health_text() -> str:
         lines.append("\n*Runners*\nEmbedded mode — the runner lives inside this "
                      "service (no `RUNNER_SERVICE_URL`).")
     else:
-        health = runner_client.worker_health(refresh=True)
+        health = runner_client.worker_health(refresh=False, max_age_s=20)
         lines.append(f"\n*Runners* ({len(pool)})")
         for u in pool:
             h = health.get(u) or {}
@@ -1258,8 +1305,14 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         kb = []
         for r in data["runners"]:
             dot = "🟢" if r.get("online") else "⚪"
+            # neat admin view: free MB + exclusive owner makes the "heavy project landed on loaded runner" bug visible
+            free = r.get("free_mb")
+            total = r.get("total_mb")
+            mem_s = f" · {int(free or 0)}MB free" + (f" of {int(total)}MB" if total else "") if r.get("online") else ""
+            excl = r.get("exclusive_owner")
+            excl_s = f" · 🔒 queen #{excl}" if excl else ""
             lines.append(f"{dot} {r['label']} — {'enabled' if r['enabled'] else 'disabled'} "
-                         f"· {r.get('jobs', 0)}/{r.get('capacity', 0)} jobs")
+                         f"· {r.get('jobs', 0)}/{r.get('capacity', 0)} jobs{mem_s}{excl_s}")
             kb.append([{"text": f"{'Disable' if r['enabled'] else 'Enable'} {r['label']}",
                         "callback_data": f"admin:togrunner:{r['id']}"},
                        {"text": "🔑", "callback_data": f"admin:rotatesecretflow:{r['id']}"},
@@ -1671,6 +1724,52 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         _start_admin_flow(chat_id, "broadcast")
         return
 
+    if action in ("broadcast_confirm", "broadcast_cancel", "broadcast_status", "broadcast_preview"):
+        # Rich broadcast callbacks — explicit confirmation / cancel / status
+        try:
+            from services import pingbot_broadcast as _pb
+            # ref may contain campaign id; action already split? Some callbacks encode as admin:broadcast_confirm:123
+            # In _handle_admin_callback_inner, action is first part after 'admin:', ref is second. For broadcast_confirm:123, action==broadcast_confirm and ref==123
+            cid_str = (ref or "").strip()
+            # also handle case where action contains colon remnants
+            if not cid_str.isdigit() and ":" in action:
+                # fallback parse
+                parts = action.split(":",1)
+                if len(parts)>1:
+                    cid_str = parts[1]
+                    action = parts[0]
+            if not cid_str.isdigit():
+                _edit_or_send(chat_id, message_id, "Bad broadcast id.")
+                return
+            cid = int(cid_str)
+            if action == "broadcast_confirm":
+                ok = _pb.confirm_campaign(cid, telegram_user_id)
+                if ok:
+                    _edit_or_send(chat_id, message_id, f"✅ Broadcast #{cid} is now sending.", reply_markup=_pb.status_keyboard(cid))
+                    # also send status snapshot
+                    try:
+                        _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                    except Exception:
+                        pass
+                else:
+                    _edit_or_send(chat_id, message_id, f"❌ Could not confirm #{cid} (maybe already sent or cancelled).")
+                return
+            if action == "broadcast_cancel":
+                ok = _pb.cancel_campaign(cid, telegram_user_id)
+                _edit_or_send(chat_id, message_id, f"✅ Broadcast #{cid} cancelled." if ok else f"❌ Could not cancel #{cid}.")
+                try:
+                    _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                except Exception:
+                    pass
+                return
+            if action in ("broadcast_status", "broadcast_preview"):
+                _edit_or_send(chat_id, message_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                return
+        except Exception as exc:
+            logger.exception("broadcast callback %s failed", action)
+            _edit_or_send(chat_id, message_id, f"⚠️ Broadcast action failed: {type(exc).__name__}")
+        return
+
     if action == "bansflow":
         _start_admin_flow(chat_id, "ban")
         return
@@ -1785,7 +1884,8 @@ ADMIN_FLOWS = {
         ("value", "New job limit? (a number, or `clear` to remove the override)"),
     ],
     "broadcast": [
-        ("message", "What should I send to every linked user?"),
+        ("message", "What should I send to every linked user? (supports <b>, <i>, <code>, <a href=\"https://...\">)"),
+        ("buttons", "Optional URL buttons? One per line as \`Label | https://example.com\` — or send \`-\` to skip."),
     ],
     "search": [
         ("query", "Search for what? (part of a username or email)"),
@@ -1864,17 +1964,25 @@ def _run_admin_flow(chat_id, flow_name, data, extra=None):
         else:
             _send(chat_id, "That wasn't a number or `clear` — nothing changed.")
     elif flow_name == "broadcast":
-        ids = telegram_admin_ext.all_linked_telegram_ids()
-        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
-        sent = 0
-        for tid in ids:
-            try:
-                _send(tid, data["message"])
-                sent += 1
-            except Exception:
-                pass
-            time.sleep(0.05)
-        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+        # Rich flow — create campaign with preview + explicit confirmation.
+        msg = (data.get("message") or "").strip()
+        buttons_raw = (data.get("buttons") or "").strip()
+        if not msg:
+            _send(chat_id, "Empty message — nothing sent.")
+            return
+        # buttons: '-' means none
+        buttons = None if buttons_raw in ("", "-", "—") else buttons_raw
+        # media if admin sent photo/video as message
+        extra_media_type = (extra or {}).get("broadcast_media_type")
+        extra_media_file_id = (extra or {}).get("broadcast_media_file_id")
+        try:
+            from services import pingbot_broadcast as _pb
+            cid = _pb.create_campaign(chat_id, msg, buttons=buttons, media_type=extra_media_type, media_file_id=extra_media_file_id, auto_start=False)
+            _send(chat_id, _pb.preview_text(cid), reply_markup=_pb.preview_keyboard(cid))
+            _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+        except Exception as exc:
+            logger.exception("broadcast flow failed")
+            _send(chat_id, f"❌ Broadcast failed: {type(exc).__name__}: {exc}")
     elif flow_name == "search":
         rows = telegram_admin_ext.search_users(data["query"])
         if not rows:
@@ -2563,6 +2671,8 @@ def _queen_panel_kb():
     """Buttons for the 👑 panel: what a queen can actually do, one tap each."""
     rows = [[{"text": "📦 My projects", "callback_data": "qproj:list"},
              {"text": "📊 My apps", "callback_data": "queen:apps"}],
+            [{"text": "🖥 Runner", "callback_data": "queen:runner"},
+             {"text": "💎 Exclusive 512MB", "callback_data": "queen:runner"}],
             # An empty ref means "all of mine": the same screen /latest with no
             # argument shows, listing every repo app and whether its branch moved.
             [{"text": "⬆️ Deploy latest commits", "callback_data": "latest:"},
@@ -2601,12 +2711,22 @@ def _queen_panel_text(user) -> str:
                 if not mem else f"{mem}MB per app")
     zip_mb = priv.get("zip_max_mb") or bot_ops.ZIP_MAX_MB
     zip_files = priv.get("zip_max_files") or bot_ops.ZIP_MAX_FILES
+    # queen runner pin line — so a queen always sees where she is exclusive
+    try:
+        _pin = runner_client.get_queen_pin(uid) if uid else None
+    except Exception:
+        _pin = None
+    if _pin and _pin.get("runner_url"):
+        runner_line = f"🖥 Runner — `{_pin['runner_url']}` · exclusive 512MB (only you here)"
+    else:
+        runner_line = "🖥 Runner — auto (most free, 490MB+ when Fleet empty)"
     lines = [
         f"👑 *Queen panel* — {name}",
         "",
         "*Your limits*",
         f"🟢 Running apps — {slots}",
         f"🧠 Memory — {mem_line}",
+        runner_line,
         f"🗜 Zip upload — up to {zip_mb}MB / {zip_files} files unzipped",
         "🌿 GitHub — any public repo, any branch",
         "",
@@ -2639,6 +2759,132 @@ def _queen_panel_text(user) -> str:
         "when it moves (`off` stops it). `/projects` lists which apps are behind.",
     ]
     return "\n".join(lines)
+
+
+def _queen_runner_text(user) -> str:
+    """Runner picker for a queen — shows free MB, exclusive ownership, and how auto works."""
+    uid = _row_id(user)
+    pin = None
+    try:
+        pin = runner_client.get_queen_pin(uid)
+    except Exception:
+        pin = None
+    pool = runner_client.runner_pool()
+    # Use cached health — don't block the button for 18s probing all runners.
+    try:
+        health = runner_client.worker_health(refresh=False, max_age_s=20)
+    except Exception:
+        health = {}
+    excl = {}
+    try:
+        excl = runner_client.list_exclusive_runners()  # url -> owner_id
+    except Exception:
+        excl = {}
+    lines = ["🖥 *Queen runner* — pick where your next deploy lands", ""]
+    if pin and pin.get("runner_url"):
+        lines.append(f"📍 Pinned — `{pin['runner_url']}` · exclusive 512MB (only you here, no other user will be placed there).")
+        lines.append("   Heavy / video projects get the whole box — upload & download stay on this runner.")
+    else:
+        lines.append("📍 Now — *auto* (most free runner). Next deploy picks the emptiest box, so 6 empty runners (490MB free) are used before a 180MB-loaded one.")
+        lines.append("   Video-heavy uploads prefer the freest runner automatically.")
+    lines.append("")
+    lines.append(f"*Fleet* ({len(pool)} runners):")
+    if not pool:
+        lines.append("• Embedded mode — one runner inside this service.")
+    else:
+        # Show managed nodes with ids when possible
+        nodes = {}
+        try:
+            for n in runner_client.managed_runner_nodes():
+                nodes[n.get("url")] = n
+        except Exception:
+            nodes = {}
+        for idx, url in enumerate(pool):
+            h = health.get(url) or {}
+            online = h.get("online")
+            free_mb = int(h.get("free_mb") or 0)
+            total_mb = int(h.get("total_mb") or 0)
+            jobs = h.get("jobs", "?")
+            # idle look: if health missing, still show url
+            if online:
+                status = f"🟢 {free_mb}MB free of {total_mb}MB · {jobs} job(s)"
+            elif h == {}:
+                status = "⚪ unknown (not probed yet — tap ↻)"
+            else:
+                status = "🔴 offline / waking"
+            owner = excl.get(url.rstrip("/"))
+            excl_note = ""
+            if owner is not None:
+                if int(owner) == int(uid):
+                    excl_note = " · 👑 yours (exclusive)"
+                else:
+                    excl_note = f" · 🔒 queen #{owner} exclusive"
+            label = nodes.get(url, {}).get("label") or f"runner-{idx+1}"
+            pin_mark = " ← pinned" if pin and pin.get("runner_url","").rstrip("/") == url.rstrip("/") else ""
+            lines.append(f"• `{label}` — `{url}`\n  {status}{excl_note}{pin_mark}")
+    lines.append("")
+    lines.append("Tap a runner to pin it *exclusive* (no other users there) — huge projects get 512MB alone.")
+    lines.append("Tap *Auto* to clear pin and let the balancer pick the emptiest runner (recommended when fleet is mostly empty).")
+    return "\n".join(lines)
+
+
+def _queen_runner_kb(user) -> dict:
+    uid = _row_id(user)
+    pool = runner_client.runner_pool()
+    rows = []
+    # Auto first
+    rows.append([{"text": "✨ Auto — most free", "callback_data": "queen:pin:auto"}])
+    # managed nodes as buttons with id: for stable callback
+    nodes = []
+    try:
+        nodes = runner_client.managed_runner_nodes()
+    except Exception:
+        nodes = []
+    # Build map url -> id
+    url_to_id = {n.get("url"): n.get("id") for n in nodes}
+    for idx, url in enumerate(pool):
+        nid = url_to_id.get(url)
+        # label short
+        label = None
+        for n in nodes:
+            if n.get("url") == url:
+                label = n.get("label")
+                break
+        label = label or f"Runner {idx+1}"
+        # truncate label for button
+        blabel = (label[:28] + "…") if len(label) > 28 else label
+        # Determine free display for button text
+        try:
+            h = runner_client.worker_health(refresh=False, max_age_s=20).get(url) or {}
+            free_mb = int(h.get("free_mb") or 0)
+            suffix = f" {free_mb}MB" if h.get("online") else " ?"
+        except Exception:
+            suffix = ""
+        # check if exclusive other
+        try:
+            excl = runner_client.list_exclusive_runners()
+            owner = excl.get(url.rstrip("/"))
+            lock = " 🔒" if owner is not None and int(owner) != int(uid) else ""
+            mine = " 👑" if owner is not None and int(owner) == int(uid) else ""
+        except Exception:
+            lock = ""; mine = ""
+        text = f"🖥 {blabel}{suffix}{lock}{mine}"
+        # callback uses id: if we have DB id else index
+        cb = f"queen:pin:id:{nid}" if nid is not None else f"queen:pin:id:{idx}"
+        rows.append([{"text": text[:60], "callback_data": cb}])
+        # Telegram allows max 8 buttons per? We'll show all but limit rows to ~10 runners fine
+    rows.append([{"text": "⬅️ Back to Queen panel", "callback_data": "queen:menu"}])
+    return {"inline_keyboard": rows}
+
+
+def cmd_queen_runner(chat_id, user):
+    """`/runner` — queen picks where the next heavy deploy lands."""
+    if not user or not _user_is_queen(user):
+        _send(chat_id, "👑 *Runner* selection is queen access.\n\n"
+                       "A queen can pin one runner exclusive 512MB (no other users there) — huge/video projects get the whole box.\n"
+                       "Use `/limits` to see your allowances, or ask the bot owner for 👑.")
+        return
+    _send(chat_id, _queen_runner_text(user), reply_markup=_queen_runner_kb(user))
 
 
 def cmd_limits(chat_id, user):
@@ -3476,7 +3722,7 @@ def cmd_health(chat_id, user):
 
     pool = runner_client.runner_pool()
     try:
-        health = runner_client.worker_health(refresh=True) if pool else {}
+        health = runner_client.worker_health(refresh=False, max_age_s=20) if pool else {}
         online = [u for u, h in health.items() if h.get("online")]
         if not pool:
             lines.append("🟢 Runner — embedded in this service")
@@ -4992,6 +5238,46 @@ def handle_callback(chat_id, data, message_id=None):
                            "`/limits` shows what your account can do now.")
         elif ref == "apps":
             cmd_apps(chat_id, user)
+        elif ref == "runner":
+            if not _user_is_queen(user):
+                _send(chat_id, "👑 Runner selection is part of queen access.")
+            else:
+                _send(chat_id, _queen_runner_text(user), reply_markup=_queen_runner_kb(user))
+        elif ref.startswith("pin:"):
+            if not user or not _user_is_queen(user):
+                _send(chat_id, "👑 Only queen accounts can pin a runner.")
+            else:
+                val = ref[4:]
+                uid = _row_id(user)
+                if val == "auto":
+                    runner_client.clear_queen_pin(uid)
+                    _send(chat_id, "✅ Runner set to *auto* — next deploy picks the most free runner (490MB+ when fleet empty).\n\nHeavy video uploads will land on the emptiest box, not on a 180MB-loaded one.", reply_markup=_queen_panel_kb())
+                    try:
+                        _send(chat_id, _queen_runner_text(user), reply_markup=_queen_runner_kb(user))
+                    except Exception:
+                        pass
+                elif val.startswith("id:"):
+                    try:
+                        rid = int(val[3:])
+                        # map id -> url
+                        chosen = None
+                        for n in runner_client.managed_runner_nodes():
+                            if int(n.get("id")) == rid:
+                                chosen = n.get("url")
+                                break
+                        if not chosen:
+                            # fallback: runner_pool index
+                            pool = runner_client.runner_pool()
+                            if 0 <= rid < len(pool):
+                                chosen = pool[rid]
+                        if chosen and runner_client.set_queen_pin(uid, chosen, exclusive=1):
+                            _send(chat_id, f"✅ Pinned to `{chosen}` — exclusive 512MB (no other user will be placed there).\nVideo upload/download runs alone here.\n\nSend a zip or `/import` now.", reply_markup=_queen_panel_kb())
+                        else:
+                            _send(chat_id, "❌ Could not pin to that runner — it may be offline or disabled.")
+                    except Exception as exc:
+                        _send(chat_id, f"❌ Could not pin: {exc}")
+                else:
+                    _send(chat_id, _queen_runner_text(user), reply_markup=_queen_runner_kb(user))
         else:
             _send(chat_id, _queen_panel_text(user), reply_markup=_queen_panel_kb())
     elif action == "ping":
@@ -5153,7 +5439,7 @@ def handle_update(upd):
                 _send(chat_id, "Cancelled.")
                 return
             if not command and chat_id in _admin_flow:
-                # jobedit can take a document; everything else is plain text.
+                # jobedit can take a document; broadcast can take photo/video/document with caption.
                 state = _admin_flow.get(chat_id) or {}
                 if (state.get("flow") == "jobedit"
                         and "document" in msg
@@ -5163,6 +5449,37 @@ def handle_update(upd):
                         _send(chat_id, f"❌ {err}")
                         return
                     text = code or ""
+                # Broadcast media capture — admin sends photo/video with caption as broadcast message
+                if state.get("flow") == "broadcast" and not text.strip():
+                    # check media
+                    media_type = None
+                    media_file_id = None
+                    caption = (msg.get("caption") or "").strip()
+                    if "photo" in msg and msg["photo"]:
+                        photos = msg["photo"]
+                        try:
+                            # largest last
+                            media_file_id = photos[-1].get("file_id") if isinstance(photos, list) else None
+                            media_type = "photo" if media_file_id else None
+                        except Exception:
+                            media_type = None
+                    elif "video" in msg and isinstance(msg.get("video"), dict):
+                        media_file_id = msg["video"].get("file_id")
+                        media_type = "video" if media_file_id else None
+                    elif "document" in msg and isinstance(msg.get("document"), dict):
+                        media_file_id = msg["document"].get("file_id")
+                        media_type = "document" if media_file_id else None
+                    elif "animation" in msg and isinstance(msg.get("animation"), dict):
+                        media_file_id = msg["animation"].get("file_id")
+                        media_type = "animation" if media_file_id else None
+                    if media_type and media_file_id:
+                        # stash media in flow extra, use caption as message (fallback if empty)
+                        if not caption:
+                            caption = "(media)"
+                        # store for later steps
+                        state.setdefault("extra", {})["broadcast_media_type"] = media_type
+                        state.setdefault("extra", {})["broadcast_media_file_id"] = media_file_id
+                        text = caption
                 if text.strip() and _advance_admin_flow(chat_id, text):
                     return
 
@@ -5251,6 +5568,8 @@ def handle_update(upd):
                 # /limits is the plain-language answer to "what am I allowed?"
                 # and, for a 👑 account, the door to their panel.
                 "/limits": lambda: gated(lambda u: cmd_limits(chat_id, u)),
+                "/runner": lambda: gated(lambda u: cmd_queen_runner(chat_id, u)),
+                "/myrunner": lambda: gated(lambda u: cmd_queen_runner(chat_id, u)),
                 "/admin": lambda: cmd_admin(chat_id, msg.get("from", {}).get("id"), arg),
                 "/details": lambda: cmd_details(chat_id, msg.get("from", {}).get("id"), arg),
                 "/zip": lambda: cmd_admin_short_toggle(chat_id, msg.get("from", {}).get("id"), arg, "allowzip"),
@@ -5322,15 +5641,19 @@ def handle_update(upd):
                          display_name=_tg_display(msg_cb),
                          telegram_user_id=cb.get("from", {}).get("id"),
                          user_id=_row_id(linked))
-            # Telegram requires answerCallbackQuery within ~30s or the
+            # Telegram requires answerCallbackQuery within ~3s or the
             # button sits in a spinner / looks unresponsive on the user's
-            # phone. This used to run AFTER handle_callback with no
-            # try/finally, so any exception in handle_callback (a runner
-            # timeout, a job already deleted, a network hiccup) skipped
-            # the answer entirely — "the button sometimes doesn't work",
-            # intermittent because it only happened when the action
-            # itself failed. Now it's answered no matter what.
+            # phone. We now answer *immediately* before doing any work
+            # (runner health, DB lookups) so the spinner stops instantly;
+            # work still happens after. The old code only answered AFTER
+            # handle_callback, so a slow runner probe (18s for 6 runners)
+            # kept the button spinning the whole time — that's the
+            # "inline buttons take long" bug.
             try:
+                try:
+                    _tg("answerCallbackQuery", callback_query_id=cb["id"])
+                except Exception:
+                    pass
                 # admin: buttons check _is_admin() themselves and were never
                 # meant to require a linked CodeNest account — but this
                 # `if linked` gate (meant for job-action buttons like
@@ -5356,7 +5679,6 @@ def handle_update(upd):
                     _send(chat_id, "This chat isn't linked to an account right now. "
                                    "Send `/link`, pick your account, and the buttons "
                                    "will work.")
-                _tg("answerCallbackQuery", callback_query_id=cb["id"])
             except Exception as cb_exc:
                 event["outcome"] = "error"
                 event["error"] = f"{type(cb_exc).__name__}: {cb_exc}"
@@ -5573,6 +5895,15 @@ def poll_loop():
 
 
 def start_bot():
+    # Resume any pending rich broadcasts before other subsystems start
+    try:
+        from services import pingbot_broadcast as _pb
+        _pb.ensure_broadcast_schema()
+        cnt = _pb.resume_pending_broadcasts()
+        if cnt:
+            logger.warning("Resumed %d pending broadcast(s) after restart.", cnt)
+    except Exception as exc:
+        logger.warning("broadcast resume skipped: %s", exc)
     if not BOT_TOKEN:
         print("TELEGRAM_PING_BOT_TOKEN not set")
         return

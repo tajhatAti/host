@@ -565,10 +565,17 @@ def runners_overview(refresh: bool = False) -> dict:
     finally:
         conn.close()
     health = runner_client.worker_health(refresh=refresh, max_age_s=ADMIN_HEALTH_MAX_AGE_S) or {}
+    # annotate exclusive queen pins so admin sees why a runner is avoided for normal users
+    try:
+        excl = runner_client.list_exclusive_runners()
+    except Exception:
+        excl = {}
     for row in rows:
         h = health.get(row["url"]) or {}
         row.update(online=bool(h.get("online")), jobs=h.get("jobs", 0),
-                   capacity=h.get("capacity", 0), mem_mb=h.get("mem_mb", 0))
+                   capacity=h.get("capacity", 0), mem_mb=h.get("mem_mb", 0),
+                   free_mb=h.get("free_mb", 0), total_mb=h.get("total_mb", 0),
+                   exclusive_owner=excl.get(row["url"].rstrip("/")) )
     embedded = None
     if runner_client.embedded_mode() or runner_client._has_embedded_assignments():
         try:
