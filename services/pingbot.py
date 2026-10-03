@@ -31,6 +31,7 @@ from services import runner_client  # noqa: E402
 from services import bot_analytics
 from services import telegram_admin_ext  # noqa: E402
 from services import github_repo  # noqa: E402
+from services import pingbot_broadcast  # noqa: E402
 
 import logging
 logger = logging.getLogger("codenest-app")
@@ -617,21 +618,68 @@ def cmd_admin(chat_id, telegram_user_id, arg):
         return
 
     if sub == "broadcast":
+        # Rich broadcast — supports: /admin broadcast status, /admin broadcast cancel <id>, /admin broadcast <message>
+        low_rest = (rest or "").strip().lower()
+        if low_rest in ("status", "list", "queue"):
+            try:
+                from services import pingbot_broadcast as _pb
+                cands = _pb.list_campaigns(limit=5)
+                if not cands:
+                    _send(chat_id, "📢 No broadcasts yet.")
+                    return
+                lines = ["📢 *Recent broadcasts:*"]
+                for c in cands:
+                    lines.append(f"#{c['id']} · `{c['status']}` · {c.get('total_count',0)} users · {c.get('created_at','')[:10]}")
+                    lines.append(f"_{ (c.get('text') or '')[:80].replace(chr(10),' ') }_")
+                kb = {"inline_keyboard": [[{"text": f"📊 #{c['id']} status", "callback_data": f"admin:broadcast_status:{c['id']}" }] for c in cands[:4]] + [[{"text": "⬅️ Menu", "callback_data": "admin:menu"}]]}
+                _send(chat_id, "\n".join(lines), reply_markup=kb)
+            except Exception as exc:
+                logger.exception("broadcast status failed")
+                _send(chat_id, f"❌ Status failed: {type(exc).__name__}")
+            return
+        if low_rest.startswith("cancel"):
+            bits = (rest or "").split(None, 1)
+            cid = bits[1].strip() if len(bits) > 1 else ""
+            if not cid.isdigit():
+                _send(chat_id, "Usage: `/admin broadcast cancel <id>` — or `status` to list.")
+                return
+            try:
+                from services import pingbot_broadcast as _pb
+                ok = _pb.cancel_campaign(int(cid))
+                _send(chat_id, f"✅ Broadcast #{cid} cancelled." if ok else f"❌ Could not cancel #{cid} (not found or already done).")
+                if ok:
+                    _send(chat_id, _pb.status_text(int(cid)), reply_markup=_pb.status_keyboard(int(cid)))
+            except Exception as exc:
+                _send(chat_id, f"❌ Cancel failed: {exc}")
+            return
         if not rest:
             _start_admin_flow(chat_id, "broadcast")
             return
-        ids = telegram_admin_ext.all_linked_telegram_ids()
-        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
-        sent = 0
-        for tid in ids:
-            try:
-                _send(tid, rest)
-                sent += 1
-            except Exception:
-                pass
-            time.sleep(0.05)  # stay well under Telegram's flood limits
-        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
-        return
+        # One-line broadcast with explicit preview + confirmation (new rich path).
+        # Keep legacy immediate-send as fallback if broadcast module unavailable.
+        try:
+            from services import pingbot_broadcast as _pb
+            cid = _pb.create_campaign(telegram_user_id or chat_id, rest, auto_start=False)
+            st = _pb.campaign_stats(cid)
+            # preview to admin with confirm/cancel buttons
+            _send(chat_id, _pb.preview_text(cid), reply_markup=_pb.preview_keyboard(cid))
+            _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+            return
+        except Exception as exc:
+            logger.exception("rich broadcast create failed, falling back to legacy")
+            # fallback legacy immediate
+            ids = telegram_admin_ext.all_linked_telegram_ids()
+            _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
+            sent = 0
+            for tid in ids:
+                try:
+                    _send(tid, rest)
+                    sent += 1
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+            return
 
     if sub in ("health", "doctor", "diag", "diagnose"):
         # The same screen the 🩺 button shows: webhook, runners, jobs, the two
@@ -1671,6 +1719,52 @@ def _handle_admin_callback_inner(chat_id, telegram_user_id, action, ref, message
         _start_admin_flow(chat_id, "broadcast")
         return
 
+    if action in ("broadcast_confirm", "broadcast_cancel", "broadcast_status", "broadcast_preview"):
+        # Rich broadcast callbacks — explicit confirmation / cancel / status
+        try:
+            from services import pingbot_broadcast as _pb
+            # ref may contain campaign id; action already split? Some callbacks encode as admin:broadcast_confirm:123
+            # In _handle_admin_callback_inner, action is first part after 'admin:', ref is second. For broadcast_confirm:123, action==broadcast_confirm and ref==123
+            cid_str = (ref or "").strip()
+            # also handle case where action contains colon remnants
+            if not cid_str.isdigit() and ":" in action:
+                # fallback parse
+                parts = action.split(":",1)
+                if len(parts)>1:
+                    cid_str = parts[1]
+                    action = parts[0]
+            if not cid_str.isdigit():
+                _edit_or_send(chat_id, message_id, "Bad broadcast id.")
+                return
+            cid = int(cid_str)
+            if action == "broadcast_confirm":
+                ok = _pb.confirm_campaign(cid, telegram_user_id)
+                if ok:
+                    _edit_or_send(chat_id, message_id, f"✅ Broadcast #{cid} is now sending.", reply_markup=_pb.status_keyboard(cid))
+                    # also send status snapshot
+                    try:
+                        _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                    except Exception:
+                        pass
+                else:
+                    _edit_or_send(chat_id, message_id, f"❌ Could not confirm #{cid} (maybe already sent or cancelled).")
+                return
+            if action == "broadcast_cancel":
+                ok = _pb.cancel_campaign(cid, telegram_user_id)
+                _edit_or_send(chat_id, message_id, f"✅ Broadcast #{cid} cancelled." if ok else f"❌ Could not cancel #{cid}.")
+                try:
+                    _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                except Exception:
+                    pass
+                return
+            if action in ("broadcast_status", "broadcast_preview"):
+                _edit_or_send(chat_id, message_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+                return
+        except Exception as exc:
+            logger.exception("broadcast callback %s failed", action)
+            _edit_or_send(chat_id, message_id, f"⚠️ Broadcast action failed: {type(exc).__name__}")
+        return
+
     if action == "bansflow":
         _start_admin_flow(chat_id, "ban")
         return
@@ -1785,7 +1879,8 @@ ADMIN_FLOWS = {
         ("value", "New job limit? (a number, or `clear` to remove the override)"),
     ],
     "broadcast": [
-        ("message", "What should I send to every linked user?"),
+        ("message", "What should I send to every linked user? (supports <b>, <i>, <code>, <a href=\"https://...\">)"),
+        ("buttons", "Optional URL buttons? One per line as \`Label | https://example.com\` — or send \`-\` to skip."),
     ],
     "search": [
         ("query", "Search for what? (part of a username or email)"),
@@ -1864,17 +1959,25 @@ def _run_admin_flow(chat_id, flow_name, data, extra=None):
         else:
             _send(chat_id, "That wasn't a number or `clear` — nothing changed.")
     elif flow_name == "broadcast":
-        ids = telegram_admin_ext.all_linked_telegram_ids()
-        _send(chat_id, f"📢 Sending to {len(ids)} user(s)…")
-        sent = 0
-        for tid in ids:
-            try:
-                _send(tid, data["message"])
-                sent += 1
-            except Exception:
-                pass
-            time.sleep(0.05)
-        _send(chat_id, f"✅ Broadcast sent to {sent}/{len(ids)} user(s).")
+        # Rich flow — create campaign with preview + explicit confirmation.
+        msg = (data.get("message") or "").strip()
+        buttons_raw = (data.get("buttons") or "").strip()
+        if not msg:
+            _send(chat_id, "Empty message — nothing sent.")
+            return
+        # buttons: '-' means none
+        buttons = None if buttons_raw in ("", "-", "—") else buttons_raw
+        # media if admin sent photo/video as message
+        extra_media_type = (extra or {}).get("broadcast_media_type")
+        extra_media_file_id = (extra or {}).get("broadcast_media_file_id")
+        try:
+            from services import pingbot_broadcast as _pb
+            cid = _pb.create_campaign(chat_id, msg, buttons=buttons, media_type=extra_media_type, media_file_id=extra_media_file_id, auto_start=False)
+            _send(chat_id, _pb.preview_text(cid), reply_markup=_pb.preview_keyboard(cid))
+            _send(chat_id, _pb.status_text(cid), reply_markup=_pb.status_keyboard(cid))
+        except Exception as exc:
+            logger.exception("broadcast flow failed")
+            _send(chat_id, f"❌ Broadcast failed: {type(exc).__name__}: {exc}")
     elif flow_name == "search":
         rows = telegram_admin_ext.search_users(data["query"])
         if not rows:
@@ -5153,7 +5256,7 @@ def handle_update(upd):
                 _send(chat_id, "Cancelled.")
                 return
             if not command and chat_id in _admin_flow:
-                # jobedit can take a document; everything else is plain text.
+                # jobedit can take a document; broadcast can take photo/video/document with caption.
                 state = _admin_flow.get(chat_id) or {}
                 if (state.get("flow") == "jobedit"
                         and "document" in msg
@@ -5163,6 +5266,37 @@ def handle_update(upd):
                         _send(chat_id, f"❌ {err}")
                         return
                     text = code or ""
+                # Broadcast media capture — admin sends photo/video with caption as broadcast message
+                if state.get("flow") == "broadcast" and not text.strip():
+                    # check media
+                    media_type = None
+                    media_file_id = None
+                    caption = (msg.get("caption") or "").strip()
+                    if "photo" in msg and msg["photo"]:
+                        photos = msg["photo"]
+                        try:
+                            # largest last
+                            media_file_id = photos[-1].get("file_id") if isinstance(photos, list) else None
+                            media_type = "photo" if media_file_id else None
+                        except Exception:
+                            media_type = None
+                    elif "video" in msg and isinstance(msg.get("video"), dict):
+                        media_file_id = msg["video"].get("file_id")
+                        media_type = "video" if media_file_id else None
+                    elif "document" in msg and isinstance(msg.get("document"), dict):
+                        media_file_id = msg["document"].get("file_id")
+                        media_type = "document" if media_file_id else None
+                    elif "animation" in msg and isinstance(msg.get("animation"), dict):
+                        media_file_id = msg["animation"].get("file_id")
+                        media_type = "animation" if media_file_id else None
+                    if media_type and media_file_id:
+                        # stash media in flow extra, use caption as message (fallback if empty)
+                        if not caption:
+                            caption = "(media)"
+                        # store for later steps
+                        state.setdefault("extra", {})["broadcast_media_type"] = media_type
+                        state.setdefault("extra", {})["broadcast_media_file_id"] = media_file_id
+                        text = caption
                 if text.strip() and _advance_admin_flow(chat_id, text):
                     return
 
@@ -5573,6 +5707,15 @@ def poll_loop():
 
 
 def start_bot():
+    # Resume any pending rich broadcasts before other subsystems start
+    try:
+        from services import pingbot_broadcast as _pb
+        _pb.ensure_broadcast_schema()
+        cnt = _pb.resume_pending_broadcasts()
+        if cnt:
+            logger.warning("Resumed %d pending broadcast(s) after restart.", cnt)
+    except Exception as exc:
+        logger.warning("broadcast resume skipped: %s", exc)
     if not BOT_TOKEN:
         print("TELEGRAM_PING_BOT_TOKEN not set")
         return
