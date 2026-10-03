@@ -975,6 +975,46 @@ _SCHEMA_TABLES = [
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
     )
     """,
+    """
+    -- Rich broadcast — resumable, per-recipient delivery with retry/backoff.
+    -- Text is stored as safe Telegram HTML; optional inline URL buttons are
+    -- JSON; media (photo/video/document) is optional. Each campaign has many
+    -- recipient rows so a restart can continue from pending ones.
+    CREATE TABLE IF NOT EXISTS broadcast_campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_by INTEGER,
+        status TEXT NOT NULL DEFAULT 'draft',
+        text TEXT NOT NULL DEFAULT '',
+        html TEXT NOT NULL DEFAULT '',
+        parse_mode TEXT NOT NULL DEFAULT 'HTML',
+        media_type TEXT,
+        media_file_id TEXT,
+        caption TEXT,
+        buttons_json TEXT,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        sent_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        blocked_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        error TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS broadcast_recipients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (campaign_id) REFERENCES broadcast_campaigns (id) ON DELETE CASCADE,
+        UNIQUE (campaign_id, telegram_id)
+    )
+    """,
 ]
 
 
@@ -1178,6 +1218,36 @@ def init_db():
                      "ON store_reviews (item_slug, user_id)")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_store_favorites_one "
                      "ON store_favorites (item_slug, user_id)")
+
+        # Rich broadcast — resumable delivery (idempotent)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_status "
+                     "ON broadcast_campaigns (status, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_campaign "
+                     "ON broadcast_recipients (campaign_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_telegram "
+                     "ON broadcast_recipients (telegram_id, status)")
+        # Legacy installs: if broadcast tables already existed without html column
+        # (e.g. a partial earlier migration), add it idempotently.
+        try:
+            if not _column_exists(conn, "broadcast_campaigns", "html"):
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN html TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            if not _column_exists(conn, "broadcast_campaigns", "caption"):
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN caption TEXT")
+        except Exception:
+            pass
+        try:
+            if not _column_exists(conn, "broadcast_campaigns", "blocked_count"):
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN blocked_count INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            if not _column_exists(conn, "broadcast_recipients", "next_retry_at"):
+                conn.execute("ALTER TABLE broadcast_recipients ADD COLUMN next_retry_at TEXT")
+        except Exception:
+            pass
 
         conn.commit()
     finally:
